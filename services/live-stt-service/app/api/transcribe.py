@@ -31,6 +31,17 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import Settings, get_settings
 from app.models.schemas import TranscribeResponse
 from app.services.transcribe import TranscribeService, get_service
+from app.api.metrics import (
+    AudioFormat,
+    TranscribeResult,
+    _normalise_format,
+    stt_oom_total,
+    stt_pii_redaction_total,
+    stt_timeout_total,
+    stt_transcribe_total,
+    stt_transcribe_duration_seconds,
+    stt_audio_bytes_total,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -49,10 +60,24 @@ def _correlation_id_from_request(request: Request) -> str:
 
 # Subset of redaction patterns used in structured logs; never redact the
 # structured log keys — only values that may contain raw token/email/path.
+#
+# Canonical patterns per observability-skeleton-meeting-intelligence.md
+# (Codex rev 019e8846 absorb):
+#   - bearer/secret/password/token → REDACTED
+#   - email                       → REDACTED_EMAIL
+#   - TC kimlik (11-digit, first ≠ 0) → REDACTED_TC
+#   - IBAN TR                     → REDACTED_IBAN
+#   - TR phone                    → REDACTED_PHONE
 _REDACT_PATTERNS = [
     (re.compile(r"(?i)bearer[\s:=]+[A-Za-z0-9\-_]+\.?[A-Za-z0-9\-_\.]+"), "***REDACTED***"),
     (re.compile(r"(?i)(secret|password|token)[\s:=]+\S+"), "***REDACTED***"),
     (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"), "***REDACTED_EMAIL***"),
+    # TC kimlik: 11-digit, first digit 1-9 (Turkish national ID)
+    (re.compile(r"\b[1-9]\d{10}\b"), "***REDACTED_TC***"),
+    # IBAN TR: TR prefix + 24 digits
+    (re.compile(r"\bTR\d{24}\b"), "***REDACTED_IBAN***"),
+    # Turkish mobile/phone: +90 or 0 prefix, 10 digits total
+    (re.compile(r"\b(\+90|0)?[\s]?5\d{2}[\s]?\d{3}[\s]?\d{2}[\s]?\d{2}\b"), "***REDACTED_PHONE***"),
 ]
 
 
@@ -71,7 +96,13 @@ def _log_extra(corr_id: str, **kwargs) -> dict:
     """Build structured log extra dict with correlation_id and PII redaction."""
     extra = {"correlation_id": corr_id}
     for k, v in kwargs.items():
-        extra[k] = _redact_log_value(str(v)) if isinstance(v, str) else v
+        if isinstance(v, str):
+            redacted = _redact_log_value(v)
+            if redacted != v:
+                stt_pii_redaction_total.labels(pattern_class="log_value").inc()
+            extra[k] = redacted
+        else:
+            extra[k] = v
     return extra
 
 
@@ -163,6 +194,7 @@ async def transcribe_endpoint(
         )
     except asyncio.TimeoutError as exc:
         logger.warning("Transcribe timeout", extra=_log_extra(corr_id, timeout_sec=settings.request_timeout, **log_meta))
+        stt_timeout_total.labels(model=settings.model_name).inc()
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=(
@@ -172,6 +204,7 @@ async def transcribe_endpoint(
         ) from exc
     except MemoryError as exc:
         logger.error("Transcribe OOM", extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)))
+        stt_oom_total.inc()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Resource exhaustion (memory)",
@@ -183,12 +216,22 @@ async def transcribe_endpoint(
             "Transcribe decode/inference failure",
             extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)),
         )
+        stt_transcribe_total.labels(
+            model=settings.model_name,
+            language=settings.language,
+            result=TranscribeResult.CLIENT_ERROR.value,
+        ).inc()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Audio decode or inference failed ({_sanitize_error(exc, corr_id)})",
         ) from exc
     except OSError as exc:
         logger.error("Transcribe I/O failure", extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)))
+        stt_transcribe_total.labels(
+            model=settings.model_name,
+            language=settings.language,
+            result=TranscribeResult.IO_ERROR.value,
+        ).inc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"I/O failure ({_sanitize_error(exc, corr_id)})",
@@ -198,4 +241,18 @@ async def transcribe_endpoint(
         "Transcribe success",
         extra=_log_extra(corr_id, **log_meta, duration_sec=result.duration, elapsed_ms=result.elapsed_ms, segments=len(result.segments), language=result.language),
     )
+
+    # Prometheus metrics (PII-safe: language/labels only, no transcript/text)
+    fmt = _normalise_format(audio.content_type)
+    stt_transcribe_total.labels(
+        model=settings.model_name,
+        language=result.language,
+        result=TranscribeResult.SUCCESS.value,
+    ).inc()
+    stt_transcribe_duration_seconds.labels(
+        model=settings.model_name,
+        language=result.language,
+    ).observe(result.elapsed_ms / 1000.0)
+    stt_audio_bytes_total.labels(format=fmt.value).inc(len(raw))
+
     return result

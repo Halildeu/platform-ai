@@ -7,13 +7,14 @@ Run:
 from __future__ import annotations
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import __version__
-from app.api import health, transcribe
+from app.api import health, metrics, transcribe
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,9 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         corr_id = request.headers.get(self.HEADER)
-        request.state.correlation_id = corr_id or ""
+        if not corr_id:
+            corr_id = str(uuid.uuid4())
+        request.state.correlation_id = corr_id
         response = await call_next(request)
         if corr_id:
             response.headers[self.HEADER] = corr_id
@@ -73,4 +76,5 @@ app = FastAPI(
 app.add_middleware(CorrelationIdMiddleware)
 
 app.include_router(health.router, tags=["health"])
+app.include_router(metrics.router, tags=["metrics"])
 app.include_router(transcribe.router, tags=["transcribe"])
