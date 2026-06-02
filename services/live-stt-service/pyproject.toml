@@ -25,9 +25,11 @@ target-version = ["py311"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -v --strict-markers"
+# Codex `019e8a24` iter-1 absorb: default CI excludes integration; opt-in via
+# `pytest -m integration` (manual / nightly / self-hosted with model cache).
+addopts = "-ra -v --strict-markers -m 'not integration'"
 markers = [
-    "integration: requires real audio fixture + Whisper model",
+    "integration: requires real audio fixture + Whisper model (opt-in)",
     "slow: takes > 5s",
 ]
 # Note: asyncio_mode set in conftest.py when pytest-asyncio is installed (dev only).
