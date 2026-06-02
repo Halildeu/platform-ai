@@ -51,3 +51,32 @@ Repo-spesifik öne çıkanlar:
 - Ses dosyası işleyen kod = PII handler; logging redaction zorunlu.
 - Cross-repo değişim (örn. transcript-service API kontratı) eş-zamanlı PR ile yapılır.
 - Codex iter sırasında plan-time AGREE → direkt impl (Plan Consensus Autonomy).
+
+## 5. Branch Oluşturma Pre-Check (Collision Önleme)
+
+**Kural**: Yeni branch oluşturmadan ÖNCE mevcut branch tablosu kontrol edilir.
+Paralel session collision'ı önlemek için `git branch -a | grep <branch-name>` zorunlu pre-check.
+
+```
+# 1. Branch adayı belirlendikten sonra — pre-check
+git fetch --all
+git branch -a | grep "feat/agent/AG-038"
+
+# 2. Collision varsa: mevcut branch üzerinde çalış veya farklı adlandır
+# BAD:  feat/agent/AG-038-agent-self-diagnostics-probe  (collision risk)
+# GOOD: feat/agent/AG-038-diagnostics-v2
+
+# 3. Temizse — oluştur
+git checkout -b feat/agent/AG-038-diagnostics-v2 origin/main
+
+# 4. Push öncesi tekrar kontrol (uzak collision)
+git push origin feat/agent/AG-038-diagnostics-v2 --dry-run
+```
+
+Branch adlandırma standard:
+- Feature: `feat/<area>/<short-description>`
+- Agent probe: `feat/agent/AG-NNN-<short-name>`
+- Faz: `feat/faz-NN-<area>`
+- Hotfix: `hotfix/<description>`
+
+Collision sonrası iş akışı: squash-merge sonrası branch from origin/main (`git fetch origin && git checkout -b <new> origin/main`). Eski commit taşımak merged fix'leri geri getirme riski yaratır.
