@@ -10,15 +10,22 @@ Codex `019e877b` iter-1 REVISE absorb:
   resource exhaustion (503), I/O (500). Internal exception messages are
   sanitized — only exception class name is surfaced, never the raw `str(exc)`
   that may carry PII or audio path leaks.
+
+Faz 24 Plan (ADR-0030 + Codex 019e879c iter-3 absorb):
+- correlation_id from X-Correlation-Id header (CorrelationIdMiddleware)
+- meetingId / sessionId / deviceId from query params (Gateway contract)
+- language: ISO 639-1 required, per-request override of Settings default
+- All structured log entries include correlation_id for audit correlation
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
@@ -28,14 +35,57 @@ from app.services.transcribe import TranscribeService, get_service
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# --- correlation helpers ---
 
-def _sanitize_error(exc: BaseException) -> str:
+_CORR_ID_RE = re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$", re.IGNORECASE)
+
+
+def _correlation_id_from_request(request: Request) -> str:
+    """Read correlation_id from request state (set by CorrelationIdMiddleware)."""
+    return getattr(request.state, "correlation_id", "")
+
+
+# --- PII redaction ---
+
+# Subset of redaction patterns used in structured logs; never redact the
+# structured log keys — only values that may contain raw token/email/path.
+_REDACT_PATTERNS = [
+    (re.compile(r"(?i)bearer[\s:=]+[A-Za-z0-9\-_]+\.?[A-Za-z0-9\-_\.]+"), "***REDACTED***"),
+    (re.compile(r"(?i)(secret|password|token)[\s:=]+\S+"), "***REDACTED***"),
+    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"), "***REDACTED_EMAIL***"),
+]
+
+
+def _redact_log_value(value: str) -> str:
+    """Redact PII from a single log value string.
+
+    Used only for structured log extra values — never for API response bodies.
+    """
+    result = str(value)
+    for pattern, replacement in _REDACT_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+def _log_extra(corr_id: str, **kwargs) -> dict:
+    """Build structured log extra dict with correlation_id and PII redaction."""
+    extra = {"correlation_id": corr_id}
+    for k, v in kwargs.items():
+        extra[k] = _redact_log_value(str(v)) if isinstance(v, str) else v
+    return extra
+
+
+def _sanitize_error(exc: BaseException, correlation_id: str = "") -> str:
     """Return a non-PII error summary — exception class name only.
 
     Never echo `str(exc)` back to the caller; faster-whisper can embed
     audio paths, ffmpeg stderr fragments, or even partial transcript
     snippets in its exception messages.
     """
+    logger.warning(
+        "Transcribe error",
+        extra=_log_extra(correlation_id, err_class=type(exc).__name__),
+    )
     return type(exc).__name__
 
 
@@ -46,7 +96,12 @@ def _sanitize_error(exc: BaseException) -> str:
     summary="Whisper transcribe (sync, PoC)",
 )
 async def transcribe_endpoint(
+    request: Request,
     audio: UploadFile,
+    meeting_id: str | None = Query(default=None, max_length=64, description="Meeting identifier from Gateway"),
+    session_id: str | None = Query(default=None, max_length=64, description="Session identifier from Gateway"),
+    device_id: str | None = Query(default=None, max_length=64, description="Device identifier from Gateway"),
+    language: str | None = Query(default=None, max_length=10, description="ISO 639-1 language override (e.g. tr, en, de)"),
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> TranscribeResponse:
     """Synchronous transcribe.
@@ -87,6 +142,17 @@ async def transcribe_endpoint(
         )
 
     service: TranscribeService = get_service(settings)
+    corr_id: str = _correlation_id_from_request(request)
+
+    # Build metadata dict for structured logs (PII-safe: no raw tokens/paths)
+    log_meta = {
+        "correlation_id": corr_id,
+        "meeting_id": (meeting_id or ""),
+        "session_id": (session_id or ""),
+        "device_id": (device_id or ""),
+        "language_override": (language or ""),
+        "size_mb": round(size_mb, 2),
+    }
 
     try:
         # Inference is CPU-bound and blocking. Push to threadpool so the
@@ -96,19 +162,16 @@ async def transcribe_endpoint(
             timeout=settings.request_timeout,
         )
     except asyncio.TimeoutError as exc:
-        logger.warning(
-            "Transcribe timeout",
-            extra={"timeout_sec": settings.request_timeout, "size_mb": round(size_mb, 2)},
-        )
+        logger.warning("Transcribe timeout", extra=_log_extra(corr_id, timeout_sec=settings.request_timeout, **log_meta))
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=(
                 f"Transcribe exceeded {settings.request_timeout}s timeout "
-                f"({_sanitize_error(exc)})"
+                f"({_sanitize_error(exc, corr_id)})"
             ),
         ) from exc
     except MemoryError as exc:
-        logger.error("Transcribe OOM", extra={"err_class": _sanitize_error(exc)})
+        logger.error("Transcribe OOM", extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Resource exhaustion (memory)",
@@ -118,26 +181,21 @@ async def transcribe_endpoint(
         # ValueError on bad argument. Both are caller-input class problems.
         logger.warning(
             "Transcribe decode/inference failure",
-            extra={"err_class": _sanitize_error(exc), "size_mb": round(size_mb, 2)},
+            extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)),
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Audio decode or inference failed ({_sanitize_error(exc)})",
+            detail=f"Audio decode or inference failed ({_sanitize_error(exc, corr_id)})",
         ) from exc
     except OSError as exc:
-        logger.error("Transcribe I/O failure", extra={"err_class": _sanitize_error(exc)})
+        logger.error("Transcribe I/O failure", extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"I/O failure ({_sanitize_error(exc)})",
+            detail=f"I/O failure ({_sanitize_error(exc, corr_id)})",
         ) from exc
 
     logger.info(
         "Transcribe success",
-        extra={
-            "duration_sec": result.duration,
-            "elapsed_ms": result.elapsed_ms,
-            "segments": len(result.segments),
-            "language": result.language,
-        },
+        extra=_log_extra(corr_id, **log_meta, duration_sec=result.duration, elapsed_ms=result.elapsed_ms, segments=len(result.segments), language=result.language),
     )
     return result
