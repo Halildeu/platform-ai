@@ -79,23 +79,39 @@ Tam liste: [CLAUDE.md](./CLAUDE.md) + global `~/.claude/CLAUDE.md` HARD RULE set
 - **No Closure Language** — sıradaki aksiyon her raporda
 - **Türkçe cevap default**
 
-## Faz Yol Haritası
+## Faz Yol Haritası — 3-AI Mutabakat (2026-06-02)
 
-| Faz | Konu | Durum |
-|---|---|---|
-| 24.0 | Charter + ADR-0030 + repo iskeleti | ⏳ planning |
-| 24.1 | Backend skeleton (meeting + transcript service Spring Boot) | ⏳ |
-| 24.2 | Python service skeleton (live-stt + final-stt + Redis) | ⏳ |
-| 24.3 | Audio Gateway (Spring WebFlux WebSocket) | ⏳ |
-| 24.4 | MinIO setup + audio storage akışı | ⏳ |
-| 24.5 | React Native + Expo mobile MVP | ⏳ |
-| 24.6 | platform-web `mfe-meeting` MFE | ⏳ |
-| 24.7 | Meeting AI (LLM özet/karar/aksiyon) | ⏳ |
-| 24.8 | Diarization (pyannote.audio + GPU karar) | ⏳ |
-| 24.9 | Notification + report-service `weekly-meeting-summary` entegre | ⏳ |
-| 24.X | Teams/Zoom recording webhook entegrasyonu (ileri) | ⏳ |
+Cross-AI consensus: Claude + Codex `019e879c` AGREE + Mavis `mvs_c922...` msg `78` AGREE. Canonical plan: [platform-k8s-gitops/docs/faz-24-meeting-intelligence-plan.md](https://github.com/Halildeu/platform-k8s-gitops/blob/main/docs/faz-24-meeting-intelligence-plan.md).
 
-Tahmini MVP: 14-18 hafta (mevcut Faz 22-23 paralel devam ederken).
+**Anahtar pivot**: `live-stt-service` ürün API'si **DEĞİL** — iç compute worker. Mobile/Web hiçbir zaman doğrudan platform-ai'a bağlanmaz. Audio Gateway Contract 1.0 önce kilitlenir, sonra STT entegre olur.
+
+| Sıra | PR | Konu | Durum |
+|---|---|---|---|
+| **0** | charter | ADR-0030 KVKK + Observability skeleton + PLAN.md Faz 24 + canonical plan | 🟡 [PR #1207](https://github.com/Halildeu/platform-k8s-gitops/pull/1207) OPEN |
+| **1** | PR-gw-01 | Audio Gateway Contract 1.0 freeze (platform-backend Spring WebFlux) | ⏳ Adım 0 sonrası |
+| **2** | PR-stt-02 | live-stt real audio fixture + Docker e2e + resource pressure baseline | ⏳ PR-gw-01 sonrası |
+| **3** | PR-stt-03 | supervised subprocess worker + hard timeout kill | ⏳ PR-stt-02 sonrası |
+| **4** | PR-queue-01 | bounded Redis admission + Gateway → STT producer/consumer | ⏳ PR-stt-03 sonrası |
+| **5** | PR-obs-01 | Grafana/Prometheus dashboard genişletme (skeleton 0'da) | ⏳ PR-queue-01 sonrası |
+| **6** | PR-wer-01 | Common Voice TR + gerçek pilot meeting WER raporu (ADR girdisi) | ⏳ PR-stt-03 + pilot kayıt |
+| **7** | PR-final-stt-01 | `final-stt-service` — WER sonucuna göre model kararı | ⏳ PR-wer-01 sonrası |
+| **8** | PR-gpu-01 | GPU Dockerfile variant — donanım + ölçüm sonrası | ⏳ en son |
+
+### 3-AI 3 RED (yapılmayacak)
+
+1. ❌ Gateway contract kilitlenmeden mobile/Web veya STT WebSocket contract yazılması
+2. ❌ KVKK ADR olmadan gerçek Workcube meeting kaydı kullanılması
+3. ❌ Synthetic WER ile model kararı kapatılması
+
+### Tahmini MVP
+
+14-18 hafta (mevcut Faz 22-23 paralel devam ederken). Donanım stratejisi: CPU PoC → cloud GPU bridge (Lambda/Vast.ai) → production GPU kararı (WER + maliyet sonrası).
+
+### Live durum (2026-06-02)
+
+- ✅ `live-stt-service` PoC iskelet **LIVE** (PR #1 MERGED `4088d9a`) — FastAPI + faster-whisper medium int8 + 22/22 test PASS + Codex `019e877b` AGREE
+- 🟡 Adım 0 charter (PR #1207) — Codex `019e879c` AGREE, CI gates bekleniyor
+- ⏳ Sıradaki: PR-gw-01 (platform-backend Spring WebFlux Audio Gateway Contract 1.0)
 
 ## Hızlı Başlangıç (placeholder)
 
