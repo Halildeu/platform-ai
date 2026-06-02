@@ -112,7 +112,9 @@ TRANSCRIBE_TOTAL=$(echo "$METRICS" | grep "^stt_transcribe_total{" | head -1 | a
 echo "  ✓ stt_transcribe_total: $TRANSCRIBE_TOTAL (expected: >= 1)"
 
 if [[ -z "$TRANSCRIBE_TOTAL" ]] || ! awk "BEGIN{exit !($TRANSCRIBE_TOTAL >= 1)}"; then
-    echo "  ⚠ metric not incremented as expected"
+    echo "  ✗ stt_transcribe_total expected >= 1, got: '${TRANSCRIBE_TOTAL:-empty}'"
+    echo "  Acceptance for #16 metrics verify fails (Codex 019e8a24 iter-2)."
+    exit 1
 fi
 
 echo ""
