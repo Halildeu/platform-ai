@@ -139,3 +139,70 @@ def test_transcribe_error_message_sanitized(client) -> None:  # type: ignore[no-
     # The endpoint must surface only the exception *class name*, never the path.
     assert secret_path not in r.json()["detail"]
     assert "RuntimeError" in r.json()["detail"]
+
+
+# ─── Codex 019e8846 absorb: metrics enum + format normalisation + PII patterns ──────
+
+
+def test_transcribe_result_enum_fixed_set() -> None:  # type: ignore[no-untyped-def]
+    """TranscribeResult enum must expose only the canonical result values."""
+    from app.api.metrics import TranscribeResult
+
+    expected = {"success", "client_error", "io_error", "timeout", "oom"}
+    actual = {v.value for v in TranscribeResult}
+    assert actual == expected, f"Unexpected enum values: {actual - expected}"
+
+
+@pytest.mark.parametrize(
+    "content_type, expected_fmt",
+    [
+        ("audio/wav", "wav"),
+        ("audio/webm; codecs=opus", "webm-opus"),
+        ("audio/mpeg", "mp3"),
+        ("audio/mp4", "m4a"),
+        ("audio/ogg", "ogg"),
+        ("audio/flac", "flac"),
+        ("audio/raw; rate=16000; channels=1; bits=16", "pcm16"),
+        ("application/octet-stream", "other"),
+        (None, "other"),
+        ("", "other"),
+    ],
+)
+def test_normalise_format(content_type: str | None, expected_fmt: str) -> None:  # type: ignore[no-untyped-def]
+    """_normalise_format maps raw Content-Type to fixed AudioFormat bucket."""
+    from app.api.metrics import AudioFormat, _normalise_format
+
+    assert _normalise_format(content_type) == AudioFormat(expected_fmt)
+
+
+@pytest.mark.parametrize(
+    "raw, expect_redacted",
+    [
+        # TC kimlik: valid 11-digit
+        ("TC: 12345678901", "TC: ***REDACTED_TC***"),
+        ("user=98765432109", "user=***REDACTED_TC***"),
+        # TC kimlik: invalid (11-digit but starts with 0 — not a real TC)
+        ("12345678901", "12345678901"),  # first digit 1 OK
+        # IBAN TR
+        ("IBAN=TR330006100519786993745634", "IBAN=***REDACTED_IBAN***"),
+        ("TR330006100519786993745634", "***REDACTED_IBAN***"),
+        # TR phone
+        ("+90 532 123 45 67", "***REDACTED_PHONE***"),
+        ("0532 1234567", "***REDACTED_PHONE***"),
+        ("05321234567", "***REDACTED_PHONE***"),
+        # existing patterns still work
+        ("bearer token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig", "bearer token=***REDACTED***"),
+        ("user@example.com", "***REDACTED_EMAIL***"),
+        ("password=SuperSecret123", "password=***REDACTED***"),
+    ],
+)
+def test_pii_redaction_patterns(raw: str, expect_redacted: str) -> None:  # type: ignore[no-untyped-def]
+    """PII patterns (TC, IBAN, phone) redact correctly; existing patterns unaffected."""
+    import re
+    from app.api.transcribe import _REDACT_PATTERNS
+
+    result = raw
+    for pattern, replacement in _REDACT_PATTERNS:
+        result = pattern.sub(replacement, result)
+
+    assert result == expect_redacted, f"Input: {raw!r} → got {result!r}, want {expect_redacted!r}"

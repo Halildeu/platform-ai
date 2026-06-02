@@ -10,9 +10,57 @@ All labels use hashed or bucketed values — never raw PII
 
 from __future__ import annotations
 
+from enum import Enum
+
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from fastapi import APIRouter, Response
+
+
+# ── Result enum (canonical set — Codex rev 019e8846) ──────────────────────────
+
+class TranscribeResult(str, Enum):
+    SUCCESS      = "success"      # 200
+    CLIENT_ERROR = "client_error"  # 400 / 413
+    IO_ERROR     = "io_error"      # 500
+    TIMEOUT      = "timeout"       # 504
+    OOM          = "oom"          # 503
+
+
+# ── Normalised audio format enum (fixed set, cardinality-safe) ─────────────────
+
+class AudioFormat(str, Enum):
+    WAV       = "wav"
+    WEBM_OPUS = "webm-opus"
+    PCM16     = "pcm16"
+    MP3       = "mp3"
+    M4A       = "m4a"
+    OGG       = "ogg"
+    FLAC      = "flac"
+    OTHER     = "other"  # catch-all for unknown / unrecognised
+
+
+def _normalise_format(content_type: str | None) -> AudioFormat:
+    """Map raw Content-Type to fixed AudioFormat bucket."""
+    if content_type is None:
+        return AudioFormat.OTHER
+    ct = content_type.lower()
+    if "wav" in ct:
+        return AudioFormat.WAV
+    if "webm" in ct and "opus" in ct:
+        return AudioFormat.WEBM_OPUS
+    if "mp3" in ct or "mpeg" in ct:
+        return AudioFormat.MP3
+    if "m4a" in ct or "mp4" in ct:
+        return AudioFormat.M4A
+    if "ogg" in ct:
+        return AudioFormat.OGG
+    if "flac" in ct:
+        return AudioFormat.FLAC
+    if "pcm" in ct or "16bit" in ct or "raw" in ct:
+        return AudioFormat.PCM16
+    return AudioFormat.OTHER
+
 
 router = APIRouter()
 
