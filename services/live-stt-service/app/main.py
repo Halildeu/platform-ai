@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import __version__
-from app.api import health, transcribe
+from app.api import health, metrics, transcribe
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -73,4 +73,5 @@ app = FastAPI(
 app.add_middleware(CorrelationIdMiddleware)
 
 app.include_router(health.router, tags=["health"])
+app.include_router(metrics.router, tags=["metrics"])
 app.include_router(transcribe.router, tags=["transcribe"])
