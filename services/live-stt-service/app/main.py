@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import __version__
 from app.api import health, transcribe
@@ -18,12 +19,32 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+class CorrelationIdMiddleware(BaseHTTPMiddleware):
+    """Extract X-Correlation-Id from request headers.
+
+    If absent, generate a UUID4 and attach it to the request state.
+    Downstream handlers (transcribe, health) can access it via
+    request.state.correlation_id. Logs should include it as
+    `extra={"correlation_id": ...}`.
+    """
+
+    HEADER = "X-Correlation-Id"
+
+    async def dispatch(self, request: Request, call_next):
+        corr_id = request.headers.get(self.HEADER)
+        request.state.correlation_id = corr_id or ""
+        response = await call_next(request)
+        if corr_id:
+            response.headers[self.HEADER] = corr_id
+        return response
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        format="%(asctime)s %(levelname)s %(name)s [%(correlation_id)s] %(message)s",
     )
     logger.info(
         "live-stt-service starting",
@@ -32,10 +53,11 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             "model": settings.model_name,
             "device": settings.device,
             "compute_type": settings.compute_type,
+            "correlation_id": "startup",
         },
     )
     yield
-    logger.info("live-stt-service stopping")
+    logger.info("live-stt-service stopping", extra={"correlation_id": "shutdown"})
 
 
 app = FastAPI(
@@ -47,6 +69,8 @@ app = FastAPI(
     ),
     lifespan=lifespan,
 )
+
+app.add_middleware(CorrelationIdMiddleware)
 
 app.include_router(health.router, tags=["health"])
 app.include_router(transcribe.router, tags=["transcribe"])
