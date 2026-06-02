@@ -68,17 +68,22 @@ for i in {1..60}; do
     sleep 1
 done
 
-# 4. POST /transcribe with fixture
+# 4. POST /transcribe with fixture (Codex 019e8a24 iter-1 — fail-fast, no silent PASS)
 if [[ ! -f "$FIXTURE" ]]; then
-    echo "  ⚠ fixture not found: $FIXTURE — skipping transcribe step (model load smoke only)"
+    echo "  ✗ fixture not found: $FIXTURE"
     echo "  Run: python scripts/download-cv17-tr-samples.py --out tests/fixtures/"
+    echo "  Acceptance for #14-16 requires a real Common Voice TR fixture present."
     docker logs "$CONTAINER_NAME" 2>&1 | tail -10
-    exit 0
+    exit 1
 fi
 
 echo "[4/5] POST /transcribe with $FIXTURE ..."
 START=$(date +%s)
-RESPONSE=$(curl -s -X POST -F "audio=@$FIXTURE;type=audio/wav" "http://localhost:$PORT/transcribe")
+RESPONSE=$(curl -sf -X POST -F "audio=@$FIXTURE;type=audio/wav" "http://localhost:$PORT/transcribe") || {
+    echo "  ✗ curl --fail: HTTP non-2xx from /transcribe"
+    docker logs "$CONTAINER_NAME" 2>&1 | tail -15
+    exit 1
+}
 ELAPSED=$(($(date +%s) - START))
 
 if echo "$RESPONSE" | grep -q '"text"'; then
@@ -99,7 +104,10 @@ fi
 
 # 5. Metrics check
 echo "[5/5] GET /metrics ..."
-METRICS=$(curl -s "http://localhost:$PORT/metrics")
+METRICS=$(curl -sf "http://localhost:$PORT/metrics") || {
+    echo "  ✗ /metrics HTTP fail"
+    exit 1
+}
 TRANSCRIBE_TOTAL=$(echo "$METRICS" | grep "^stt_transcribe_total{" | head -1 | awk '{print $2}')
 echo "  ✓ stt_transcribe_total: $TRANSCRIBE_TOTAL (expected: >= 1)"
 

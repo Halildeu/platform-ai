@@ -73,12 +73,8 @@ def sample_002_path() -> Path:
 def test_real_transcribe_sample_001_returns_turkish(sample_001_path: Path) -> None:
     """Real faster-whisper medium int8 on CV17 TR sample 1.
 
-    Acceptance:
-    - language == 'tr'
-    - duration > 0
-    - segments non-empty
-    - text contains at least 1 Turkish-specific character (ş, ğ, ı, ö, ü, ç)
-      OR test passes if expected ground truth substring matches
+    Codex `019e8a24` iter-1: assertion strengthened — either Türkçe character
+    present OR ground truth substring match. Smoke evidence concrete, not "len > 0".
     """
     from app.services.transcribe import TranscribeService
 
@@ -91,12 +87,28 @@ def test_real_transcribe_sample_001_returns_turkish(sample_001_path: Path) -> No
     assert result.elapsed_ms > 0
     assert len(result.segments) > 0
     assert result.model == settings.model_name
+    assert len(result.text.strip()) > 0
 
-    # Türkçe character verify (en az 1 var olmalı)
+    # Codex iter-1: assert at least ONE of:
+    # (a) Türkçe-specific character (ş/ğ/ı/ö/ü/ç)
+    # (b) ground truth substring (first 3 words of expected sentence)
     turkish_chars = set("şğıöüçŞĞİÖÜÇ")
     has_turkish = any(c in turkish_chars for c in result.text)
-    # Allow text-only sentences without diacritics (acceptable for smoke)
-    assert len(result.text.strip()) > 0
+
+    gt_path = sample_001_path.with_suffix(".txt")
+    has_gt_match = False
+    if gt_path.exists():
+        expected = gt_path.read_text(encoding="utf-8").strip()
+        # First 2-3 meaningful words of ground truth must appear in transcript
+        gt_words = expected.split()[:3]
+        if len(gt_words) >= 2:
+            joined = " ".join(gt_words).lower()
+            has_gt_match = joined in result.text.lower()
+
+    assert has_turkish or has_gt_match, (
+        f"Expected Turkish character OR ground-truth substring match. "
+        f"text={result.text!r}, has_turkish={has_turkish}, has_gt_match={has_gt_match}"
+    )
 
 
 def test_real_transcribe_sample_002_returns_turkish(sample_002_path: Path) -> None:
