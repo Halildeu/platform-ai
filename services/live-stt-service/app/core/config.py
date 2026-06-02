@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     vad_filter: bool = Field(default=True)
     max_audio_mb: int = Field(default=50, ge=1, le=500)
     log_level: str = Field(default="INFO")
-    request_timeout: int = Field(default=60, ge=5, le=300)
+    # Lower bound 1s allows test-suite to assert timeout behaviour without slow sleeps;
+    # production deploys should keep the default (60s) or higher per K8s readiness probe.
+    request_timeout: int = Field(default=60, ge=1, le=300)
 
 
 _settings: Settings | None = None
