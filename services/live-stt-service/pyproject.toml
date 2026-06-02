@@ -1,0 +1,34 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "S", "BLE", "A", "C4", "T20", "SIM", "RUF"]
+ignore = ["S101"]  # assert OK in tests
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*"]
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -v --strict-markers"
+markers = [
+    "integration: requires real audio fixture + Whisper model",
+    "slow: takes > 5s",
+]
+# Note: asyncio_mode set in conftest.py when pytest-asyncio is installed (dev only).
+# Test suite is currently sync; FastAPI TestClient uses anyio under the hood.
