@@ -7,6 +7,7 @@ Run:
 from __future__ import annotations
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -32,7 +33,9 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         corr_id = request.headers.get(self.HEADER)
-        request.state.correlation_id = corr_id or ""
+        if not corr_id:
+            corr_id = str(uuid.uuid4())
+        request.state.correlation_id = corr_id
         response = await call_next(request)
         if corr_id:
             response.headers[self.HEADER] = corr_id

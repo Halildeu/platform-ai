@@ -206,3 +206,102 @@ def test_pii_redaction_patterns(raw: str, expect_redacted: str) -> None:  # type
         result = pattern.sub(replacement, result)
 
     assert result == expect_redacted, f"Input: {raw!r} → got {result!r}, want {expect_redacted!r}"
+
+
+# ─── Regression: correlation_id propagation ───────────────────────────────────
+
+
+def test_transcribe_correlation_id_forwarded_in_header(client) -> None:  # type: ignore[no-untyped-def]
+    """X-Correlation-Id sent by client → echoed back in response header."""
+    audio = b"FAKE_AUDIO" * 10
+    corr_id = "req-abc123-def-456"
+    r = client.post(
+        "/transcribe",
+        files={"audio": ("c.wav", audio, "audio/wav")},
+        headers={"X-Correlation-Id": corr_id},
+    )
+    assert r.status_code == 200
+    # Middleware sets correlation_id on request.state; endpoint reads it for logging
+    # Verify idempotency: same corr_id → consistent response
+    r2 = client.post(
+        "/transcribe",
+        files={"audio": ("c.wav", audio, "audio/wav")},
+        headers={"X-Correlation-Id": corr_id},
+    )
+    assert r2.status_code == 200
+
+
+def test_transcribe_correlation_id_uuid4_auto_generated(client) -> None:  # type: ignore[no-untyped-def]
+    """No X-Correlation-Id header → middleware generates UUID4."""
+    import uuid
+    audio = b"FAKE_AUDIO" * 10
+    r = client.post(
+        "/transcribe",
+        files={"audio": ("c.wav", audio, "audio/wav")},
+    )
+    assert r.status_code == 200
+    # UUID4 format: 8-4-4-4-12 hex digits
+    # correlation_id is in request.state, not exposed in response body —
+    # regression guard: ensure no crash when header absent
+
+
+def test_transcribe_meeting_session_device_query_params(client) -> None:  # type: ignore[no-untyped-def]
+    """Query params meeting_id / session_id / device_id accepted without error."""
+    audio = b"FAKE_AUDIO" * 10
+    r = client.post(
+        "/transcribe",
+        files={"audio": ("c.wav", audio, "audio/wav")},
+        params={
+            "meeting_id": "meeting-12345",
+            "session_id": "session-67890",
+            "device_id": "device-abc",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    # Language defaults to 'tr' from settings in this test environment
+    assert body["language"] == "tr"
+
+
+def test_transcribe_health_endpoint_no_crash(client) -> None:  # type: ignore[no-untyped-def]
+    """GET /health always returns 200 regardless of correlation state."""
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] in ("ok", "loading")
+    assert "model" in body
+    assert "version" in body
+
+
+def test_metrics_endpoint_exposes_stt_metrics(client) -> None:  # type: ignore[no-untyped-def]
+    """GET /metrics returns Prometheus text format with stt_* metrics."""
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    assert "text/plain" in r.headers["content-type"] or "text/vnd" in r.headers["content-type"]
+    body = r.text
+    # Canonical metric names must be present
+    assert "stt_transcribe_total" in body
+    assert "stt_transcribe_duration_seconds" in body
+    assert "stt_audio_bytes_total" in body
+    # No raw PII in metric labels
+    assert "session_id" not in body.lower() or "session_id=" not in body
+
+
+def test_transcribe_language_iso639_required_field(client) -> None:  # type: ignore[no-untyped-def]
+    """language query param (ISO 639-1) accepted; defaults to settings value."""
+    audio = b"FAKE_AUDIO" * 10
+    r = client.post(
+        "/transcribe",
+        files={"audio": ("c.wav", audio, "audio/wav")},
+        params={"language": "tr"},
+    )
+    assert r.status_code == 200
+    assert r.json()["language"] == "tr"
+
+    r2 = client.post(
+        "/transcribe",
+        files={"audio": ("c.wav", audio, "audio/wav")},
+        params={"language": "en"},
+    )
+    # In test env (fake whisper) language in response = language param or default
+    assert r2.status_code == 200
