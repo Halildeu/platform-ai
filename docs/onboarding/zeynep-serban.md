@@ -51,11 +51,11 @@ Karışıklık olmasın diye: Project #2 platform-genel, Project #4 senin günl�
 | [#43](https://github.com/Halildeu/platform-ai/issues/43) | `[Performance ölçüm]` post-GPU WER + latency + memory + cost matrix güncelle | M5 Performance | GPU stack sonrası |
 | [#40](https://github.com/Halildeu/platform-ai/issues/40) | `[Donanım kararı]` RTX 4070 host upgrade vs cloud GPU vs k3d-prod node-pool | M5 Performance | **Title stale**: `k3d node-pool` ifadesi ADR-0031 sonrası **revize edilecek** — compute plane `platform-ai` dedicated host + k3s ai-test/ai-prod truth'una göre ADR draft hazırlanmalı; cloud GPU bridge eski tahmin (stale) |
 
-**Önerilen başlangıç sırası** (Codex `019e8d58` iter-1 absorb sonrası dengelenmiş):
+**Önerilen başlangıç sırası** (Codex `019e8d58` iter-1+iter-2 absorb — Section 9 ile hizalı):
 
 1. **#97 PII fix** (quick win, CI/test akışını öğren)
-2. **#39 state-machine scaffolding only** (model seçimi YOK — model kararı PR-wer-01 sonrası kilitlenir; Faz 24 plan §3 #8 mutabakat noktası)
-3. **#48 diarization skeleton** (mock pyannote dispatch)
+2. **#48 diarization skeleton** (mock pyannote dispatch — basit FastAPI skeleton)
+3. **#39 state-machine scaffolding only** (model seçimi YOK — model kararı PR-wer-01 sonrası kilitlenir; Faz 24 plan §3 #8 mutabakat noktası)
 4. **#41 + #42 GPU stack** (CPU PoC + WER sonrası — Gate B baseline ile birlikte)
 5. **#43 performance matrix** (GPU çalışır halde)
 6. **#40 hardware ADR draft** (data-driven karar — WER + latency + cost matrix sonrası)
@@ -127,7 +127,20 @@ Bu proje **çok-modelli adversarial peer review** disiplini ile geliştirilir. �
 | Google (Gemini Code Assist / Bard) | Claude, Codex, Mavis |
 | MiniMax (Mavis) | Claude, Codex, Gemini |
 
-**Same-provider exception**: kullanıcı explicit "Codex implementer Codex reviewer kabul" derse `Same-provider exception: user-explicit-approval` field ile audit edilir; aksi halde merge YASAK.
+**Same-provider exception**: kullanıcı explicit "Codex implementer Codex reviewer kabul" derse `Same-provider exception: user-explicit-approval` + `Exception reason: <kullanıcı beyanı + audit referansı>` field ile audit edilir; aksi halde merge YASAK.
+
+### PR body field value canonical enum (cross-ai-audit script uyumu)
+
+Audit script (`scripts/ci/pr-cross-ai-audit.mjs`) sadece `claude`, `codex`, `gemini`, `other` kabul eder. Semantic → field value mapping:
+
+| Semantic provider | PR field value |
+|---|---|
+| Anthropic / Claude / Claude Desktop / Claude Code / Cursor+Claude | `claude` |
+| OpenAI / Codex / GPT-4 / ChatGPT / Copilot / Cursor+GPT | `codex` |
+| Google / Gemini Code Assist / Bard / Gemini Pro | `gemini` |
+| MiniMax / Mavis / xAI / Grok / herhangi diğer sağlayıcı | `other` |
+
+> **"Gemini reviewer" claim etme** Gemini gerçekten review etmediği sürece — provider matrix semantik doğru, ama mevcut proje Gemini aktif değil. Reviewer Mavis ise `other` field value + `Cross-AI exempt reason: reviewer was Mavis MiniMax, no Codex thread` zorunlu.
 
 ### Pratik akış
 
@@ -226,13 +239,21 @@ PR body'de **zorunlu** iki blok (CI gate ADR-0011 BG-1 + cross-ai-audit):
 
 ## Cross-AI Peer Review
 
-Implementer AI: <provider — anthropic / openai / google / minimax>
-Reviewer AI: <farklı provider>
-Codex thread: 019eXXXX-... (veya N/A — Codex reviewer değilse)
+Implementer AI: <claude | codex | gemini | other>
+Reviewer AI: <claude | codex | gemini | other>
+Codex thread: <019eXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX | N/A>
+Cross-AI exempt reason: <ZORUNLU eğer Codex thread N/A — örn. "reviewer was Mavis (MiniMax), no Codex thread">
 Verdict: <agree | partial | revise | red>
 Verdict reason: <iter özet — örn. "iter-1 plan-time + iter-2 post-impl AGREE">
-Same-provider exception: N/A
+Same-provider exception: <N/A | user-explicit-approval>
+Exception reason: <ZORUNLU eğer Same-provider exception=user-explicit-approval; aksi halde N/A>
 ```
+
+> **Field semantics** (cross-ai-audit script `pr-cross-ai-audit.mjs` regex pattern):
+> - Plain `Key: Value` format (bullet `- ` YASAK; regex `^\s*(Key)\s*:\s*` match)
+> - `Cross-AI exempt reason` SADECE `Codex thread: N/A` durumunda dolu
+> - `Exception reason` SADECE `Same-provider exception: user-explicit-approval` durumunda dolu
+> - Aksi `N/A` yazılır (boş bırakılmaz)
 
 #### B) GitOps / test cluster apply PR örneği
 
@@ -318,6 +339,7 @@ mavis --help
 - tenant ID / company ID / user ID / device ID / meeting ID (numeric veya UUID — audit metadata KISITLI)
 - internal VPN/mTLS material (WireGuard config, Vault PKI cert/key payload)
 - signed URLs (S3/MinIO presigned, içerik path'i sızdırır)
+- raw log/output snippet containing transcript text or object storage keys (PII transitif sızıntı)
 
 Gerekirse sadece **redacted özet + evidence path/issue/PR linki** gönderilir.
 
@@ -378,7 +400,7 @@ Gerekirse sadece **redacted özet + evidence path/issue/PR linki** gönderilir.
 - [ ] Cross-AI plan-time istişare (sen Cursor+GPT-4 kullanıyorsan reviewer Claude/Gemini; Claude kullanıyorsan reviewer Codex) → AGREE → impl
 - [ ] PR + Boundary declaration (Section 6.4 A — `none of the above`) + Cross-AI section
 - [ ] Local pytest + ruff + mypy → tüm green
-- [ ] CI yeşil + reviewer AGREE → squash merge
+- [ ] CI varsa yeşil; yoksa lokal evidence (test output + ruff/mypy/black + docker-smoke) + PR comment + reviewer AGREE → squash merge (HARD RULE: CI varsa kırmızıyken merge YASAK)
 
 ### Gün 4-5: Issue #48 Diarization Skeleton Only
 
