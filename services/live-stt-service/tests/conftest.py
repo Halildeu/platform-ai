@@ -11,7 +11,6 @@ import sys
 import types
 from collections.abc import Generator
 from dataclasses import dataclass
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -45,7 +44,7 @@ class _FakeWhisperModel:
         self.calls += 1
         segments = [
             _FakeSeg(0, 0.0, 1.2, "Merhaba dünya."),
-            _FakeSeg(1, 1.2, 2.5, "Toplantı başlıyor."),
+            _FakeSeg(1, 1.2, 2.5, "Toplantı başlıyor."),  # noqa: RUF001
         ]
         return segments, _FakeInfo()
 
@@ -77,6 +76,7 @@ def settings_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STT_COMPUTE_TYPE", "int8")
     monkeypatch.setenv("STT_LANGUAGE", "tr")
     monkeypatch.setenv("STT_MAX_AUDIO_MB", "10")
+    monkeypatch.setenv("STT_WORKER_BACKEND", "inline")
     # bust settings cache
     from app.core import config as cfg
 

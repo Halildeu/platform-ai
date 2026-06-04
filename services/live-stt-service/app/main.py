@@ -9,8 +9,11 @@ from __future__ import annotations
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
+from starlette.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import __version__
@@ -40,19 +43,19 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 
     HEADER = "X-Correlation-Id"
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request: Request, call_next: Any) -> Response:
         corr_id = request.headers.get(self.HEADER)
         if not corr_id:
             corr_id = str(uuid.uuid4())
         request.state.correlation_id = corr_id
-        response = await call_next(request)
+        response = cast(Response, await call_next(request))
         if corr_id:
             response.headers[self.HEADER] = corr_id
         return response
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level,
