@@ -28,28 +28,31 @@ from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
-from app.core.config import Settings, get_settings
-from app.models.schemas import TranscribeResponse
-from app.services.transcribe import TranscribeService, get_service
-from app.services.worker import WorkerCrashedError
 from app.api.metrics import (
-    AudioFormat,
     TranscribeResult,
     _normalise_format,
+    stt_audio_bytes_total,
     stt_oom_total,
     stt_pii_redaction_total,
     stt_timeout_total,
-    stt_transcribe_total,
     stt_transcribe_duration_seconds,
-    stt_audio_bytes_total,
+    stt_transcribe_total,
+    stt_worker_killed_total,
 )
+from app.core.config import Settings, get_settings
+from app.models.schemas import TranscribeResponse
+from app.services.transcribe import TranscribeService, get_service
+from app.services.worker import WorkerCrashedError, WorkerTimeoutError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # --- correlation helpers ---
 
-_CORR_ID_RE = re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$", re.IGNORECASE)
+_CORR_ID_RE = re.compile(
+    r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+    re.IGNORECASE,
+)
 
 
 def _correlation_id_from_request(request: Request) -> str:
@@ -130,10 +133,26 @@ def _sanitize_error(exc: BaseException, correlation_id: str = "") -> str:
 async def transcribe_endpoint(
     request: Request,
     audio: UploadFile,
-    meeting_id: str | None = Query(default=None, max_length=64, description="Meeting identifier from Gateway"),
-    session_id: str | None = Query(default=None, max_length=64, description="Session identifier from Gateway"),
-    device_id: str | None = Query(default=None, max_length=64, description="Device identifier from Gateway"),
-    language: str | None = Query(default=None, max_length=10, description="ISO 639-1 language override (e.g. tr, en, de)"),
+    meeting_id: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Meeting identifier from Gateway",
+    ),
+    session_id: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Session identifier from Gateway",
+    ),
+    device_id: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Device identifier from Gateway",
+    ),
+    language: str | None = Query(
+        default=None,
+        max_length=10,
+        description="ISO 639-1 language override (e.g. tr, en, de)",
+    ),
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> TranscribeResponse:
     """Synchronous transcribe.
@@ -152,7 +171,7 @@ async def transcribe_endpoint(
       - 504 inference exceeded `STT_REQUEST_TIMEOUT`
       - 500 unexpected I/O
 
-    Streaming / chunked back-pressure = ayrı slice (PoC scope dışı; Codex
+    Streaming / chunked back-pressure = separate slice (out of PoC scope; Codex
     `019e877b` notu).
     """
     if audio.content_type and not audio.content_type.startswith(("audio/", "video/")):
@@ -187,14 +206,40 @@ async def transcribe_endpoint(
     }
 
     try:
-        # Inference is CPU-bound and blocking. Push to threadpool so the
-        # event loop continues to serve /health and other requests.
-        result = await asyncio.wait_for(
-            run_in_threadpool(service.transcribe, BytesIO(raw)),
-            timeout=settings.request_timeout,
+        if settings.worker_backend == "process":
+            # Worker-level timeout kills and respawns the child process before
+            # returning, avoiding the old wait_for/thread leak.
+            result = await run_in_threadpool(
+                service.transcribe,
+                BytesIO(raw),
+                settings.request_timeout,
+            )
+        else:
+            # Inline backend is test/dev only; keep the outer async timeout for
+            # patched in-process sleeps.
+            result = await asyncio.wait_for(
+                run_in_threadpool(service.transcribe, BytesIO(raw)),
+                timeout=settings.request_timeout,
+            )
+    except WorkerTimeoutError as exc:
+        logger.warning(
+            "Transcribe timeout",
+            extra=_log_extra(corr_id, timeout_sec=settings.request_timeout, **log_meta),
         )
-    except asyncio.TimeoutError as exc:
-        logger.warning("Transcribe timeout", extra=_log_extra(corr_id, timeout_sec=settings.request_timeout, **log_meta))
+        stt_timeout_total.labels(model=settings.model_name).inc()
+        stt_worker_killed_total.labels(reason="timeout").inc()
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=(
+                f"Transcribe exceeded {settings.request_timeout}s timeout "
+                f"({_sanitize_error(exc, corr_id)})"
+            ),
+        ) from exc
+    except (asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041
+        logger.warning(
+            "Transcribe timeout",
+            extra=_log_extra(corr_id, timeout_sec=settings.request_timeout, **log_meta),
+        )
         stt_timeout_total.labels(model=settings.model_name).inc()
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
@@ -204,7 +249,14 @@ async def transcribe_endpoint(
             ),
         ) from exc
     except MemoryError as exc:
-        logger.error("Transcribe OOM", extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)))
+        logger.error(
+            "Transcribe OOM",
+            extra=_log_extra(
+                corr_id,
+                **log_meta,
+                err_class=_sanitize_error(exc, corr_id),
+            ),
+        )
         stt_oom_total.inc()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -213,7 +265,11 @@ async def transcribe_endpoint(
     except WorkerCrashedError as exc:
         logger.error(
             "Transcribe worker crashed",
-            extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)),
+            extra=_log_extra(
+                corr_id,
+                **log_meta,
+                err_class=_sanitize_error(exc, corr_id),
+            ),
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -224,7 +280,11 @@ async def transcribe_endpoint(
         # ValueError on bad argument. Both are caller-input class problems.
         logger.warning(
             "Transcribe decode/inference failure",
-            extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)),
+            extra=_log_extra(
+                corr_id,
+                **log_meta,
+                err_class=_sanitize_error(exc, corr_id),
+            ),
         )
         stt_transcribe_total.labels(
             model=settings.model_name,
@@ -236,7 +296,14 @@ async def transcribe_endpoint(
             detail=f"Audio decode or inference failed ({_sanitize_error(exc, corr_id)})",
         ) from exc
     except OSError as exc:
-        logger.error("Transcribe I/O failure", extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)))
+        logger.error(
+            "Transcribe I/O failure",
+            extra=_log_extra(
+                corr_id,
+                **log_meta,
+                err_class=_sanitize_error(exc, corr_id),
+            ),
+        )
         stt_transcribe_total.labels(
             model=settings.model_name,
             language=settings.language,
@@ -249,7 +316,14 @@ async def transcribe_endpoint(
 
     logger.info(
         "Transcribe success",
-        extra=_log_extra(corr_id, **log_meta, duration_sec=result.duration, elapsed_ms=result.elapsed_ms, segments=len(result.segments), language=result.language),
+        extra=_log_extra(
+            corr_id,
+            **log_meta,
+            duration_sec=result.duration,
+            elapsed_ms=result.elapsed_ms,
+            segments=len(result.segments),
+            language=result.language,
+        ),
     )
 
     # Prometheus metrics (PII-safe: language/labels only, no transcript/text)

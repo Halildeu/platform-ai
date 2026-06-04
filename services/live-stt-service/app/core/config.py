@@ -25,6 +25,7 @@ class Settings(BaseSettings):
       STT_LOG_LEVEL        INFO (default)
       STT_WORKER_MAX_WORKERS 1 (default, subprocess worker pool size)
       STT_WORKER_BACKEND    process / inline (default: process)
+      STT_WORKER_KILL_GRACE_SEC 2.0 (default, terminate -> kill grace)
       STT_REQUEST_TIMEOUT  60 (default — sec, hard cap)
     """
 
@@ -49,6 +50,7 @@ class Settings(BaseSettings):
     request_timeout: int = Field(default=60, ge=1, le=300)
     worker_max_workers: int = Field(default=1, ge=1, le=8)
     worker_backend: str = Field(default="process", pattern="^(process|inline)$")
+    worker_kill_grace_sec: float = Field(default=2.0, ge=0.0, le=30.0)
 
 
 _settings: Settings | None = None
