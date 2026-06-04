@@ -20,6 +20,15 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+class CorrelationIdLogFilter(logging.Filter):
+    """Ensure third-party log records can use our correlation_id formatter."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "correlation_id"):
+            record.correlation_id = "-"
+        return True
+
+
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
     """Extract X-Correlation-Id from request headers.
 
@@ -49,6 +58,8 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s [%(correlation_id)s] %(message)s",
     )
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(CorrelationIdLogFilter())
     logger.info(
         "live-stt-service starting",
         extra={
