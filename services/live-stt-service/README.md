@@ -73,6 +73,79 @@ docker run --rm -p 8200:8200 \
   live-stt-service:dev
 ```
 
+## PR-stt-02 baseline
+
+Project item #17 measured the current PoC with a real Turkish Common Voice
+fixture in a CPU Docker container.
+
+Baseline summary:
+
+| Metric | Value |
+|---|---:|
+| Model | `medium` |
+| Device | `cpu` |
+| Compute type | `int8` |
+| Cold start total | `40.097687s` |
+| Cold API `elapsed_ms` | `10872ms` |
+| Approx. model load + overhead | `29.226s` |
+| Warm transcribe wall-clock | `7.718536s` |
+| Warm API `elapsed_ms` | `7701ms` |
+| Peak observed container memory | `1.503GiB` |
+| Docker smoke | PASS |
+| Integration test | `3 passed, 50 deselected` |
+
+Full report:
+
+- `docs/poc-stt-baseline.md`
+- `docs/pr-stt-02-line-17-execution-report.md`
+
+## Known limits and open blockers
+
+This section documents Project item #18:
+`[PR-stt-02] README known-limits + open blocker notu`.
+
+Known limits:
+
+- CPU-only PoC: current Docker baseline is `medium/int8/cpu`.
+- No GPU in this PR line: GPU variants such as `large-v3`, `large-v3-turbo`,
+  CUDA, and float16 are not part of this baseline.
+- No client WebSocket: current official service surface is synchronous
+  `POST /transcribe`, not browser/mobile live streaming.
+- No production exposure: do not expose this service directly to users or the
+  internet; Gateway, auth, rate limits, queueing, and deployment hardening are
+  separate plan items.
+- No hard kill isolation yet: inference currently runs behind an async timeout
+  and threadpool path, but the worker is not isolated in a killable subprocess.
+- Timeout worker leak remains open: if a Whisper inference exceeds
+  `STT_REQUEST_TIMEOUT`, the API returns 504, but the underlying worker thread
+  can continue until the blocking inference exits.
+- No Redis queue consumer yet: Gateway-to-STT queue integration is planned in
+  later PR-queue items.
+- No production WER claim: Common Voice fixtures are smoke/baseline inputs, not
+  an accuracy benchmark for Turkish enterprise meetings.
+- No iPhone-like live dictation claim: this CPU sync endpoint is for baseline
+  measurement. Real live UX requires the approved GPU streaming architecture or
+  a later optimized streaming ASR worker.
+
+Open blocker:
+
+- `timeout worker leak` is intentionally left for PR-stt-03, where
+  `TranscribeService` should move Whisper inference into a supervised
+  `multiprocessing.Process` worker. That worker can be killed and respawned
+  deterministically after timeout or crash.
+
+3-AI consensus reference:
+
+- Codex `019e879c` + Mavis `78 AGREE`.
+
+Approved GPU live PoC note:
+
+- The separately approved GPU live STT PoC is not represented by the CPU
+  baseline numbers above. That PoC uses WebSocket streaming, a fast draft model,
+  and a larger final model on the GPU server. Integration of that path into the
+  official repository should be handled by a later plan item, not by PR-stt-02
+  README documentation.
+
 ## Konfigürasyon (env)
 
 | Variable | Default | Anlam |
