@@ -16,8 +16,10 @@ Default output size is 150 clips. Override with environment variables:
 COUNT=200 SEED=20260605 bash scripts/wer-poc/download-common-voice-tr.sh
 ```
 
-Generated audio and transcript files are not committed by default. They are WER
-PoC runtime fixtures and may be large. The source license is CC0 1.0.
+Generated audio and per-clip TXT files are not committed by default. They are
+WER PoC runtime fixtures and may be large. `ground-truth.json` is allowed so the
+selected sample manifest and transcript references can be reviewed. The source
+license is CC0 1.0.
 
 PII boundary: do not store Common Voice `client_id`, speaker id, email, raw IP,
 or any internal meeting audio here.

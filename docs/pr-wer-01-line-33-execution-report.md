@@ -29,6 +29,8 @@ The issue asks for:
   - `tests/fixtures/wer-common-voice-tr/README.md`
 - Added fixture output guard:
   - `tests/fixtures/wer-common-voice-tr/.gitignore`
+- Generated and committed transcript manifest:
+  - `tests/fixtures/wer-common-voice-tr/ground-truth.json`
 - Added this execution report:
   - `docs/pr-wer-01-line-33-execution-report.md`
 
@@ -93,7 +95,8 @@ or any internal meeting metadata.
 | Reused and extended the existing Python downloader | Avoid duplicate HuggingFace/download logic | Keeps #17 smoke fixture path working |
 | Shell wrapper added at root path requested by issue | Issue explicitly requested `scripts/wer-poc/download-common-voice-tr.sh` | Matches plan path |
 | Random deterministic sampling instead of demographic balancing | Issue allows random or balanced; demographic fields are not always stable in streaming rows | Reproducible sample set with fixed seed |
-| Generated audio not committed | 100-200 WAV files can be large and are runtime fixtures | Script creates them on demand; fixture dir `.gitignore` prevents accidental commit |
+| Generated audio not committed | 100-200 WAV files can be large and are runtime fixtures | Script creates them on demand; fixture dir `.gitignore` prevents accidental WAV/TXT commit |
+| `ground-truth.json` committed | Issue explicitly asks for ground truth transcript JSON | Keeps transcript manifest reviewable without committing 63 MB audio payload |
 
 ## Validation
 
@@ -114,15 +117,25 @@ git diff --check
 
 python services/live-stt-service/scripts/download-cv17-tr-samples.py --help
 # PASS
+
+bash scripts/wer-poc/download-common-voice-tr.sh
+# PASS
+# Primary dataset `mozilla-foundation/common_voice_17_0` had no streamable data files in this environment.
+# Fallback dataset `fsicoli/common_voice_17_0` was used.
+# scanned=5000 eligible=4477 selected=150 seed=20260605
+
+python -c "import json; p='tests/fixtures/wer-common-voice-tr/ground-truth.json'; d=json.load(open(p, encoding='utf-8')); print(d['sample_count'], d['source_dataset'], len(d['samples']))"
+# PASS -> 150 fsicoli/common_voice_17_0 150
 ```
 
 Additional compatibility note: local `python` resolves to Python 3.10 on this
 PC, so the script intentionally uses `datetime.timezone.utc` instead of the
 Python 3.11-only `datetime.UTC` alias.
 
-Network download was not run during implementation because HuggingFace access may
-require authentication/rate-limit handling and would generate a large fixture
-directory. The script is designed for operator/local execution.
+Network download was run locally. It created 150 WAV files, 150 per-clip TXT
+files, and `ground-truth.json` under `tests/fixtures/wer-common-voice-tr/`.
+Total local fixture output size was about `63.61 MB`. WAV/TXT files remain
+ignored to avoid repository bloat; the generated ground-truth JSON is committed.
 
 ## Risks
 
