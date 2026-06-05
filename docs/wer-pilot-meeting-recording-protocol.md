@@ -184,6 +184,19 @@ Before recording, operator must provide:
 - retention period
 - reviewer/operator names
 
+Suggested operator request:
+
+```text
+#34 privacy-safe pilot meeting protokolu hazir.
+Gercek kayit icin operator onayi, katilimci listesi, riza sahibi,
+encrypted storage/Vault path ve kayit tarihi gerekiyor.
+
+Kimler katilacak?
+Kayit tarihi ne olacak?
+Vault/encrypted storage hedefi ne olacak?
+Riza/onay sahibi kim olacak?
+```
+
 ## Link To Next Steps
 
 - #35 uses this pilot output as one dataset in the WER + 8 metric matrix.

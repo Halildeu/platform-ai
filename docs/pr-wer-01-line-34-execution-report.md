@@ -99,4 +99,36 @@ docs/pr-wer-01-line-34-execution-report.md
 - completed manual ground truth
 - PII/customer-data screening result
 
+## Next Operator Actions To Actually Record The Pilot
+
+The protocol is ready, but the real pilot meeting still needs operator/human
+execution. The next operational actions are:
+
+1. Halil Bey or the assigned operator approves this protocol for pilot use.
+2. Operator selects 2-5 internal Workcube participants.
+3. Operator confirms no customer/personal/secret data will be discussed.
+4. Operator chooses the 5-10 minute pilot meeting date/time.
+5. Operator defines the consent owner and withdrawal contact.
+6. Operator confirms the encrypted storage target and Vault path.
+7. UI consent modal copy is shown to every participant.
+8. Consent email is sent after consent.
+9. Pilot audio is recorded only if every participant consents.
+10. Raw audio is stored only in encrypted storage; never in git.
+11. Manual ground-truth transcript is prepared with the JSON template.
+12. A second reviewer spot-checks at least 20% of transcript segments.
+13. Only then can #35 use the pilot as one WER dataset.
+
+Suggested message to Halil Bey/operator:
+
+```text
+#34 privacy-safe pilot meeting protokolu hazir.
+Gercek kayit icin operator onayi, katilimci listesi, riza sahibi,
+encrypted storage/Vault path ve kayit tarihi gerekiyor.
+
+Kimler katilacak?
+Kayit tarihi ne olacak?
+Vault/encrypted storage hedefi ne olacak?
+Riza/onay sahibi kim olacak?
+```
+
 AG-019 staging resource gate pending; implementation validated locally only.
