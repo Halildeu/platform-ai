@@ -1,0 +1,38 @@
+{
+  "recording_id": "WER-PILOT-YYYYMMDD-001",
+  "meeting_id": "MTG-YYYY-0001",
+  "purpose": "STT WER/model evaluation",
+  "consent_version": "wer-pilot-consent-v1",
+  "recorded_at": "YYYY-MM-DDTHH:mm:ssZ",
+  "duration_seconds": 0,
+  "language_primary": "tr",
+  "optional_code_switching": [],
+  "audio": {
+    "format": "wav",
+    "sample_rate_hz": 16000,
+    "channels": 1,
+    "encrypted_object_uri": "vault-encrypted://wer-pilot/WER-PILOT-YYYYMMDD-001/audio.wav.enc",
+    "sha256": "<sha256-of-plaintext-or-approved-canonical-hash>"
+  },
+  "storage": {
+    "encryption": "vault-managed",
+    "vault_path": "kv/platform/meeting-intelligence/wer-pilot/WER-PILOT-YYYYMMDD-001",
+    "retention_days": 0,
+    "access_group": "wer-pilot-operators"
+  },
+  "consent": {
+    "participant_count": 0,
+    "all_consented": false,
+    "consent_manifest_uri": "vault-encrypted://wer-pilot/WER-PILOT-YYYYMMDD-001/consent-manifest.json"
+  },
+  "ground_truth": {
+    "status": "pending",
+    "transcript_uri": "vault-encrypted://wer-pilot/WER-PILOT-YYYYMMDD-001/ground-truth.json",
+    "reviewed": false
+  },
+  "pii_screening": {
+    "operator_checked": false,
+    "customer_data_present": false,
+    "rejected_reason": null
+  }
+}

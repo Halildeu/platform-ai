@@ -1,0 +1,30 @@
+{
+  "recording_id": "WER-PILOT-YYYYMMDD-001",
+  "language": "tr",
+  "transcript_version": "manual-ground-truth-v1",
+  "created_by": "<operator-id>",
+  "reviewed_by": "<reviewer-id>",
+  "review_status": "draft",
+  "normalization_policy": {
+    "lowercase": false,
+    "punctuation": "preserve-readable",
+    "numbers": "write-as-spoken",
+    "inaudible_token": "[inaudible]",
+    "speaker_labels": "neutral-only"
+  },
+  "segments": [
+    {
+      "segment_id": "seg-0001",
+      "speaker_label": "SPEAKER_01",
+      "start_ms": 0,
+      "end_ms": 0,
+      "text": ""
+    }
+  ],
+  "quality_checks": {
+    "second_review_percent": 20,
+    "pii_checked": false,
+    "customer_data_checked": false,
+    "ready_for_wer": false
+  }
+}
