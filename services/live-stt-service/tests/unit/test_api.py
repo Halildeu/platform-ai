@@ -5,6 +5,7 @@ Codex `019e877b` iter-1 absorb: added threadpool/timeout/error-class coverage.
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -27,7 +28,7 @@ def test_transcribe_happy_path(client) -> None:  # type: ignore[no-untyped-def]
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["text"] == "Merhaba dünya. Toplantı başlıyor."
+    assert body["text"] == "Merhaba dünya. Toplantı başlıyor."  # noqa: RUF001
     assert body["language"] == "tr"
     assert body["duration"] == 2.5
     assert body["model"] == "tiny"
@@ -93,6 +94,20 @@ def _force_service_error(client, exc_to_raise: BaseException, sleep_for: float =
         raise AssertionError("test setup error — no exception or sleep")
 
     svc.transcribe = boom  # type: ignore[method-assign]
+
+
+def _prometheus_metric_value(client, metric_name: str, label_fragment: str) -> float:  # type: ignore[no-untyped-def]
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    pattern = re.compile(
+        rf"^{re.escape(metric_name)}\{{[^}}]*{re.escape(label_fragment)}[^}}]*\}}\s+"
+        r"([0-9.eE+-]+)$"
+    )
+    for line in r.text.splitlines():
+        match = pattern.match(line)
+        if match:
+            return float(match.group(1))
+    return 0.0
 
 
 def test_transcribe_timeout_504(client, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -163,6 +178,40 @@ def test_transcribe_worker_timeout_maps_to_504(client) -> None:  # type: ignore[
     assert "timeout" in r.json()["detail"].lower()
 
 
+def test_worker_timeout_returns_504_and_increments_kill_metric(client) -> None:  # type: ignore[no-untyped-def]
+    """Timeout contract: controlled 504 plus timeout/worker-killed metrics."""
+    from app.services.worker import WorkerTimeoutError
+
+    timeout_before = _prometheus_metric_value(
+        client,
+        "stt_timeout_total",
+        'model="tiny"',
+    )
+    killed_before = _prometheus_metric_value(
+        client,
+        "stt_worker_killed_total",
+        'reason="timeout"',
+    )
+    _force_service_error(client, exc_to_raise=WorkerTimeoutError("timeout"))
+
+    r = client.post("/transcribe", files={"audio": ("c.wav", b"X" * 50, "audio/wav")})
+
+    timeout_after = _prometheus_metric_value(
+        client,
+        "stt_timeout_total",
+        'model="tiny"',
+    )
+    killed_after = _prometheus_metric_value(
+        client,
+        "stt_worker_killed_total",
+        'reason="timeout"',
+    )
+    assert r.status_code == 504
+    assert "timeout" in r.json()["detail"].lower()
+    assert timeout_after == timeout_before + 1
+    assert killed_after == killed_before + 1
+
+
 # ─── Codex 019e8846 absorb: metrics enum + format normalisation + PII patterns ──────
 
 
@@ -200,7 +249,10 @@ def test_normalise_format(content_type: str | None, expected_fmt: str) -> None: 
 # PR-stt-02a iter-2 absorb (Codex 019e8a24): Mavis PR #74 PII patterns 4 regression
 # tracked separately in Issue #97 (M3 Observability). xfail until PR #97 fixes regex.
 @pytest.mark.xfail(
-    reason="Mavis PR #74 PII regression — see Issue #97 (TC first-zero, TR phone with spaces, bearer/password edge case)",
+    reason=(
+        "Mavis PR #74 PII regression — see Issue #97 "
+        "(TC first-zero, TR phone with spaces, bearer/password edge case)"
+    ),
     strict=False,
 )
 @pytest.mark.parametrize(
@@ -219,14 +271,16 @@ def test_normalise_format(content_type: str | None, expected_fmt: str) -> None: 
         ("0532 1234567", "***REDACTED_PHONE***"),
         ("05321234567", "***REDACTED_PHONE***"),
         # existing patterns still work
-        ("bearer token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig", "bearer token=***REDACTED***"),
+        (
+            "bearer token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig",
+            "bearer token=***REDACTED***",
+        ),
         ("user@example.com", "***REDACTED_EMAIL***"),
         ("password=SuperSecret123", "password=***REDACTED***"),
     ],
 )
 def test_pii_redaction_patterns(raw: str, expect_redacted: str) -> None:  # type: ignore[no-untyped-def]
     """PII patterns (TC, IBAN, phone) redact correctly; existing patterns unaffected."""
-    import re
     from app.api.transcribe import _REDACT_PATTERNS
 
     result = raw
@@ -261,7 +315,6 @@ def test_transcribe_correlation_id_forwarded_in_header(client) -> None:  # type:
 
 def test_transcribe_correlation_id_uuid4_auto_generated(client) -> None:  # type: ignore[no-untyped-def]
     """No X-Correlation-Id header → middleware generates UUID4."""
-    import uuid
     audio = b"FAKE_AUDIO" * 10
     r = client.post(
         "/transcribe",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from types import MethodType
 
 import pytest
 
@@ -14,6 +15,7 @@ from app.services.worker import (
     ProcessWorkerPool,
     WorkerCrashedError,
     WorkerTimeoutError,
+    _WorkerSlot,
     build_worker_pool,
 )
 
@@ -116,3 +118,59 @@ def test_process_worker_timeout_kills_and_respawns_slot() -> None:
 
     assert slot.kill_calls == 1
     assert slot.task_queue.items[0]["type"] == "transcribe"
+
+
+def test_worker_slot_timeout_terminate_kill_respawn_sequence() -> None:
+    """Hard timeout uses terminate, grace wait, kill fallback, queue reset, respawn."""
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.alive = True
+            self.calls: list[str] = []
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.calls.append("terminate")
+
+        def join(self, timeout: float) -> None:
+            self.calls.append(f"join:{timeout}")
+
+        def kill(self) -> None:
+            self.calls.append("kill")
+            self.alive = False
+
+    class FakeCtx:
+        def __init__(self) -> None:
+            self.queue_count = 0
+
+        def Queue(self, maxsize: int):  # type: ignore[no-untyped-def]  # noqa: N802
+            self.queue_count += 1
+            return {"maxsize": maxsize, "queue_no": self.queue_count}
+
+    process = FakeProcess()
+    ctx = FakeCtx()
+    slot = _WorkerSlot.__new__(_WorkerSlot)
+    slot.ctx = ctx  # type: ignore[attr-defined]
+    slot.process = process  # type: ignore[attr-defined]
+    slot.task_queue = "old-task-queue"  # type: ignore[attr-defined]
+    slot.result_queue = "old-result-queue"  # type: ignore[attr-defined]
+    slot.model_loaded = True  # type: ignore[attr-defined]
+
+    start_calls: list[str] = []
+
+    def fake_start(self) -> None:  # type: ignore[no-untyped-def]
+        start_calls.append("start")
+        self.process = "respawned-worker"
+
+    slot.start = MethodType(fake_start, slot)  # type: ignore[method-assign]
+
+    _WorkerSlot.kill_for_timeout(slot, grace_sec=2.0)
+
+    assert process.calls == ["terminate", "join:2.0", "kill", "join:2.0"]
+    assert start_calls == ["start"]
+    assert slot.task_queue == {"maxsize": 1, "queue_no": 1}
+    assert slot.result_queue == {"maxsize": 1, "queue_no": 2}
+    assert slot.model_loaded is False
+    assert slot.process == "respawned-worker"
