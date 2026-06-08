@@ -26,6 +26,11 @@ final_stt_chunk_duration_seconds = Histogram(
     "Declared final STT audio chunk duration",
     buckets=(5.0, 10.0, 12.5, 15.0, 20.0),
 )
+final_stt_revision_events_total = Counter(
+    "final_stt_revision_events_total",
+    "Final STT revision events by bounded state",
+    ["state"],
+)
 
 
 @router.get("/metrics")

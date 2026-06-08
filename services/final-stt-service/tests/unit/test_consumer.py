@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +71,17 @@ def test_success_publishes_then_acks(tmp_path: Path) -> None:
     settings = Settings(audio_root=tmp_path)
     consumer = FinalSttConsumer(settings, FakeTranscriber(), redis)  # type: ignore[arg-type]
     consumer.process_message("1-0", valid_fields(audio))
-    assert redis.added[0][0] == settings.redis_result_stream
+    assert [name for name, _fields in redis.added] == [settings.redis_result_stream] * 4
+    payloads = [json.loads(fields["payload"]) for _name, fields in redis.added]
+    assert [payload["state"] for payload in payloads] == [
+        "draft",
+        "stabilizing",
+        "final",
+        "revised",
+    ]
+    assert [payload["stateSequence"] for payload in payloads] == [0, 1, 2, 3]
+    assert payloads[-1]["terminal"] is True
+    assert payloads[-1]["result"]["revisedText"] == "nihai metin"
     assert redis.acked == ["1-0"]
 
 
@@ -81,3 +92,29 @@ def test_invalid_message_goes_to_dead_letter_and_acks(tmp_path: Path) -> None:
     consumer.process_message("2-0", {b"sessionId": b"s1"})
     assert redis.added[0][0] == settings.redis_dead_letter_stream
     assert redis.acked == ["2-0"]
+
+
+class FailingRedis(FakeRedis):
+    def xadd(
+        self,
+        name: str,
+        fields: dict[str, str],
+        maxlen: int,
+        approximate: bool,
+    ) -> object:
+        if len(self.added) == 2:
+            raise RuntimeError("result stream unavailable")
+        return super().xadd(name, fields, maxlen, approximate)
+
+
+def test_publish_failure_keeps_source_pending_for_retry(tmp_path: Path) -> None:
+    audio = tmp_path / "chunk.wav"
+    audio.write_bytes(b"fake")
+    redis = FailingRedis()
+    settings = Settings(audio_root=tmp_path)
+    consumer = FinalSttConsumer(settings, FakeTranscriber(), redis)  # type: ignore[arg-type]
+
+    consumer.process_message("3-0", valid_fields(audio))
+
+    assert len(redis.added) == 2
+    assert redis.acked == []

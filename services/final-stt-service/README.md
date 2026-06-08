@@ -14,8 +14,34 @@ olarak çalışır.
 - Temel kelime-overlap segment birleştirme
 - PII-safe loglama: ses/metin/session kimliği loglanmaz
 
-Tam `draft -> stabilizing -> final -> revised` durum makinesi ve UI state
-yayılımı #39 kapsamındadır.
+## #39 Revize Durum Makinesi
+
+Her final STT işi aynı `revisionId` altında dört sıralı olay üretir:
+
+```text
+draft -> stabilizing -> final -> revised
+```
+
+| State | Anlam |
+|---|---|
+| `draft` | Live STT geçici metni kabul edildi |
+| `stabilizing` | 10-15 saniyelik final STT geçişi çalışıyor |
+| `final` | Final modelin yalnızca mevcut chunk için ürettiği metin hazır |
+| `revised` | Önceki committed metinle overlap kaldırılarak birleşmiş metin hazır |
+
+`stateSequence` değerleri sırasıyla `0, 1, 2, 3` olur. Yalnızca `revised`
+olayında `terminal=true` bulunur. Kaynak Redis işi, dört olay da başarıyla
+yayımlandıktan sonra ACK edilir.
+
+`revisionId`, `sessionId + chunkSeq + correlationId` girdilerinden
+deterministik üretilir. Bir retry aynı state olaylarını yeniden yazarsa UI veya
+downstream consumer `(revisionId, stateSequence)` anahtarıyla deduplikasyon
+yapabilir.
+
+`diff` alanı draft ile yeni metin arasındaki kelime bazlı değişiklikleri
+`equal`, `insert`, `delete`, `replace` işlemleriyle taşır. `overlapWords`,
+committed metnin sonu ile final chunk başlangıcı arasında kaldırılan kelime
+sayısını belirtir.
 
 ## Geçici Model Kararı
 
@@ -59,6 +85,42 @@ objesini güvenli yerel mount/download katmanına bağlayacaktır.
 
 Başarılı sonuç varsayılan olarak `stt:final:results` stream'ine yazılır.
 Kaynak mesaj yalnızca sonuç yayınlandıktan sonra ACK edilir.
+
+Her result stream kaydındaki `payload`, UI/downstream sözleşmesi olan bir state
+event JSON'ıdır:
+
+```json
+{
+  "sessionId": "opaque-session-id",
+  "chunkSeq": 12,
+  "correlationId": "request-correlation-id",
+  "revisionId": "64-character-sha256",
+  "state": "revised",
+  "stateSequence": 3,
+  "terminal": true,
+  "text": "Birleşmiş ve revize edilmiş metin",
+  "previousText": "Ekranda daha önce görülen draft metin",
+  "overlapWords": 2,
+  "diff": [
+    {
+      "operation": "replace",
+      "beforeStart": 3,
+      "beforeEnd": 4,
+      "afterStart": 3,
+      "afterEnd": 4,
+      "beforeText": "yanlış",
+      "afterText": "doğru"
+    }
+  ],
+  "result": {
+    "revisedText": "Birleşmiş ve revize edilmiş metin"
+  }
+}
+```
+
+`result` yalnızca terminal `revised` olayında bulunur; böylece birleşmiş metin
+`final` aşamasında erken görünmez. Transcript ve ses yolu loglanmaz; metin
+yalnızca iş akışı payload'ında taşınır.
 
 ## Yerel Çalıştırma
 
