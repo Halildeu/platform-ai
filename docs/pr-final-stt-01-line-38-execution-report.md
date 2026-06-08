@@ -142,9 +142,12 @@ Executed under the isolated `services/final-stt-service/.venv`:
 | Container runtime user | `10001:10001` |
 | Real Redis Streams integration | `2 passed` |
 | Service-to-Redis consumer lifecycle | PASS: group created, consumer `1`, pending `0` |
+| GPU model load | PASS: `large-v3/cuda/float16`, local cache only |
+| GPU service inference | PASS: 12.0 seconds processed in `767 ms` |
 
-Unit tests use fake audio/model/Redis objects. No Whisper model was downloaded,
-no GPU was accessed, and no Workcube recording was used.
+Unit tests use fake audio/model/Redis objects. The separate GPU smoke used the
+real model and service transcriber. No model was downloaded and no Workcube
+recording was used.
 
 ## Docker Smoke Evidence
 
@@ -216,16 +219,55 @@ This validates the consumer lifecycle and queue semantics locally. AG-019 still
 blocks staging-resource validation, but real Redis functionality is no longer
 untested.
 
-## Validation Not Executed
+## Real GPU Inference Evidence
 
-Real GPU inference:
+The branch was cloned into a separate clean directory on the GPU PC so the
+approved live-STT PoC and its local changes remained untouched:
 
-- This laptop has no NVIDIA GPU and did not run `large-v3/cuda/float16`.
-- The GPU PC is not reachable from this session: `denetimpc` has no reachable
-  SSH endpoint, and the local Tailscale client is logged out with no peer list.
-- No remote command channel or GPU PC credential is available to this Codex
-  session.
-- GPU PC installation and CUDA image validation remain #41/#42.
+```text
+host working copy:
+C:\Users\denetimpc\platform-ai-final-stt-test
+
+branch:
+feature/pr-final-stt-01-service-skeleton
+```
+
+The GPU runtime reported one CTranslate2 CUDA device. `large-v3` was loaded
+from the existing local Hugging Face cache with:
+
+```text
+device: cuda
+compute type: float16
+local files only: true
+result: large-v3 GPU ready
+```
+
+The real `FinalTranscriber` path then processed a 12.0-second Turkish WAV:
+
+```text
+model: large-v3
+device: cuda
+compute type: float16
+detected duration: 12.0 seconds
+inference latency: 767 ms
+language: tr
+segments: 1
+expected source text: Geçiş ülkelerinde yaşananlar ise karışık.
+observed text: Geçiş ülkelerinde yaşananlar ise Karasok.
+```
+
+The 12-second file was produced by repeating a short Common Voice smoke
+fixture. Therefore this result validates CUDA model loading, Turkish decoding,
+duration validation and the service-level transcription path. It is not valid
+WER evidence and does not close #35/#36. The final word mismatch is recorded
+without tuning or hiding it.
+
+The fresh environment also exposed an undeclared runtime dependency:
+`faster-whisper` imported `requests`, but the package was absent. `requests` is
+now pinned directly in `requirements.txt` for reproducible installation.
+
+GPU Docker/CUDA image validation remains #41 scope. Concurrency, sustained
+throughput and VRAM pressure remain #42 scope.
 
 ## Scope Deviations
 
