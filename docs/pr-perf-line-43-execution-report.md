@@ -20,8 +20,8 @@ read **off** the resulting matrix — no winner is hard-coded.
 |---|---|---|
 | 0 | Methodology: WER metric, references, models, cost model | DONE |
 | 1 | WER + cost modules + perf-matrix harness + unit tests | DONE (36 tests) |
-| 2 | Real RTX 4070 matrix run (medium vs large-v3) | PENDING (GPU) |
-| 3 | Production model recommendation from the matrix | PENDING |
+| 2 | Real RTX 4070 matrix run (medium vs large-v3) | DONE (latency/VRAM solid; WER corpus too small) |
+| 3 | Production model recommendation from the matrix | BLOCKED (needs bigger WER corpus + cost inputs) |
 
 ---
 
@@ -76,13 +76,47 @@ All pure logic is GPU-free and unit-tested; the GPU run only feeds audio in.
 
 ---
 
-## Phase 2 — RTX 4070 Matrix Results
+## Phase 2 — RTX 4070 Matrix Results (2026-06-08)
 
-_To be appended after running `gpu-perf-matrix.ps1` on the GPU PC._
+`gpu-perf-matrix.ps1 -Models medium,large-v3 -ComputeType float16` on RTX 4070
+(8188 MiB), over the 2 committed CV17 TR fixtures (13 reference words total).
+
+| Model | Ok | Errors | Corpus WER | Ref words | Latency ms / audio-min | RTF | Peak VRAM MiB |
+|---|---|---|---|---|---|---|---|
+| medium | 2 | 0 | 0.1538 | 13 | 3924.7 | 0.0654 | 2097 |
+| large-v3 | 2 | 0 | 0.1538 | 13 | 5854.8 | 0.0976 | 3921 |
+
+### Findings (latency / VRAM are decision-grade)
+
+- **Latency:** large-v3 is **~49 % slower** than medium per audio-minute
+  (5855 vs 3925 ms/min).
+- **VRAM:** large-v3 uses **~87 % more** VRAM (3921 vs 2097 MiB).
+- **Both are far faster than real time** on GPU: RTF 0.065 (medium, ~15×) and
+  0.098 (large-v3, ~10×). Neither is latency-bound on the RTX 4070.
+
+### WER is NOT decision-grade yet (honest limitation)
+
+Both models scored **0.1538** (2 word errors out of **13** reference words). With
+only 13 words this is **noise, not signal** — it does **not** mean large-v3 and
+medium are equally accurate. A real accuracy decision requires a proper corpus
+(100-200 CV17 TR samples via `download-cv17-tr-samples.py --selection random`).
+The harness pipeline is proven end-to-end; only the corpus size is the blocker.
 
 ## Phase 3 — Production Decision
 
-_To be appended: data-driven recommendation (accuracy vs latency vs VRAM vs cost)._
+**BLOCKED on two inputs:**
+
+1. **Real WER corpus** — rerun the matrix after downloading 100-200 CV17 TR
+   samples so the accuracy column becomes meaningful.
+2. **Cost inputs** — electricity price (per kWh), GPU power draw, hardware cost,
+   amortization horizon, and a cloud GPU hourly rate (and clarification of the
+   issue's "4535/saat" figure). The `cost.py` model turns these into a per-audio
+   -minute comparison once supplied.
+
+Preliminary, latency/VRAM-only (NOT the final accuracy call): both models run
+comfortably real-time on the RTX 4070, so the choice is an **accuracy-vs-VRAM**
+trade-off — large-v3 only justifies its ~1.9× VRAM and ~1.5× latency if the
+larger-corpus WER shows a real accuracy gain. To be decided in a follow-up run.
 
 ## Scope Boundaries
 
