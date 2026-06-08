@@ -223,6 +223,25 @@ Manual alternative:
 Because the guard is default-off, leaving it in place has no runtime effect
 until an operator opts in.
 
+### Validation (2026-06-08)
+
+- 6 GPU-free unit tests (`test_worker_vram_budget.py`) + full suite 71 passed.
+- In-container env→clamp proof on the RTX 4070 (current `app/` mounted over the
+  pre-guard `gpu-issue-41` image):
+
+  ```text
+  device= cuda requested= 4 budget= 6300 per= 2100
+  WorkerCountPlan(requested=4, effective=3, affordable=3, clamped=True)
+  ```
+
+  i.e. a request for 4 workers is admitted as 3 to fit the 6300 MiB budget.
+
+> Note: the published `live-stt-service:gpu-issue-41` image was built during #41
+> and predates the guard code; a live worker-pool run that emits the
+> `Clamping STT worker count` warning requires rebuilding the image from this
+> branch. The logic and env parsing are proven above and by unit tests; the
+> rebuild-and-observe integration run is optional.
+
 ## Scope Boundaries
 
 - No model production lock (#39).
