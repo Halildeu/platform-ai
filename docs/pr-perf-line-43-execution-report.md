@@ -20,8 +20,8 @@ read **off** the resulting matrix — no winner is hard-coded.
 |---|---|---|
 | 0 | Methodology: WER metric, references, models, cost model | DONE |
 | 1 | WER + cost modules + perf-matrix harness + unit tests | DONE (36 tests) |
-| 2 | Real RTX 4070 matrix run (medium vs large-v3) | DONE (latency/VRAM solid; WER corpus too small) |
-| 3 | Production model recommendation from the matrix | BLOCKED (needs bigger WER corpus + cost inputs) |
+| 2 | Real RTX 4070 matrix run (medium vs large-v3) | DONE (150 samples, 989 ref words) |
+| 3 | Production model recommendation from the matrix | DONE (two-tier; cost deferred) |
 
 ---
 
@@ -102,21 +102,50 @@ medium are equally accurate. A real accuracy decision requires a proper corpus
 (100-200 CV17 TR samples via `download-cv17-tr-samples.py --selection random`).
 The harness pipeline is proven end-to-end; only the corpus size is the blocker.
 
+### Real corpus run — 150 CV17 TR samples (2026-06-08)
+
+`gpu-perf-matrix.ps1 -Models medium,large-v3 -FixturesDir tests/fixtures/wer-cv17-tr`
+over 150 random Common Voice 17 TR clips (989 reference words).
+
+| Model | Ok | Errors | Corpus WER | Ref words | Latency ms / audio-min | RTF | Peak VRAM MiB |
+|---|---|---|---|---|---|---|---|
+| medium | 150 | 0 | **0.2083** | 989 | 4969.6 | 0.0828 | 2737 |
+| large-v3 | 150 | 0 | **0.1830** | 989 | 6722.3 | 0.1120 | 4113 |
+
+Now decision-grade (989 words). Findings:
+
+- **Accuracy:** large-v3 WER 18.3 % vs medium 20.8 % — a **2.5 pp absolute /
+  ~12 % relative** WER reduction.
+- **Latency:** large-v3 is **~35 % slower** (6722 vs 4970 ms/audio-min).
+- **VRAM:** large-v3 uses **~50 % more** (4113 vs 2737 MiB).
+- **Both are far faster than real time** (RTF 0.083 / 0.112), so neither is
+  latency-bound on the RTX 4070.
+
 ## Phase 3 — Production Decision
 
-**BLOCKED on two inputs:**
+**Recommendation: keep the two-tier design** — `medium` for the live/draft pass,
+`large-v3` for the final pass (`final-stt-service`, #39). The matrix is the
+data backing the already-approved PoC architecture:
 
-1. **Real WER corpus** — rerun the matrix after downloading 100-200 CV17 TR
-   samples so the accuracy column becomes meaningful.
-2. **Cost inputs** — electricity price (per kWh), GPU power draw, hardware cost,
-   amortization horizon, and a cloud GPU hourly rate (and clarification of the
-   issue's "4535/saat" figure). The `cost.py` model turns these into a per-audio
-   -minute comparison once supplied.
+- large-v3's ~12 % relative WER gain is worth its +35 % latency / +50 % VRAM
+  **for the final pass**, where accuracy dominates and latency is not critical;
+  4113 MiB fits 8 GiB comfortably (even 2-3 concurrent within the #42 budget).
+- `medium` remains the right live/draft choice: 20.8 % WER at the lowest latency
+  and VRAM (2737 MiB), ideal for the fast first-paint.
+- If a **single** model were mandated: `medium` when 20.8 % WER is acceptable
+  (cheapest), `large-v3` when accuracy is paramount.
 
-Preliminary, latency/VRAM-only (NOT the final accuracy call): both models run
-comfortably real-time on the RTX 4070, so the choice is an **accuracy-vs-VRAM**
-trade-off — large-v3 only justifies its ~1.9× VRAM and ~1.5× latency if the
-larger-corpus WER shows a real accuracy gain. To be decided in a follow-up run.
+### Honest caveats
+
+- WER is measured on **Common Voice TR read speech**, not real meeting audio.
+  Real meeting-room WER will differ; a pilot meeting recording (PR-wer-01)
+  should refine this before any hard production lock.
+- **Cost dimension deferred** (operator inputs not supplied). The `cost.py`
+  model can fold electricity/amortization vs cloud into a per-audio-minute
+  figure once the numbers and the "4535/saat" reference are clarified.
+- The 150-sample corpus and `ground-truth.json` live on the GPU host only (not
+  committed): regenerate with `download-cv17-tr-samples.py --count 150
+  --selection random`.
 
 ## Scope Boundaries
 
