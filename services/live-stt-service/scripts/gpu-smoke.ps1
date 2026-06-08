@@ -53,16 +53,26 @@ try {
     }
 
     Write-Host "[5/6] Service start and real GPU transcription"
-    Invoke-Docker run -d --rm --name $containerName --gpus all `
-        -p "${Port}:8200" `
-        --mount "type=bind,source=$cachePath,target=/home/stt/.cache/huggingface" `
-        -e "STT_MODEL_NAME=$Model" `
-        -e "STT_LANGUAGE=tr" `
-        -e "STT_DEVICE=cuda" `
-        -e "STT_COMPUTE_TYPE=$ComputeType" `
-        -e "STT_BEAM_SIZE=1" `
-        -e "STT_REQUEST_TIMEOUT=300" `
+    # NOTE: docker is invoked directly (not via Invoke-Docker) because PowerShell
+    # advanced functions parse `-d`/`-e` as common parameters (-Debug / ambiguous
+    # -ErrorAction/-ErrorVariable). Splatting an explicit array to the native
+    # docker.exe passes every token literally.
+    $runArgs = @(
+        "run", "-d", "--rm", "--name", $containerName, "--gpus", "all",
+        "-p", "${Port}:8200",
+        "--mount", "type=bind,source=$cachePath,target=/home/stt/.cache/huggingface",
+        "-e", "STT_MODEL_NAME=$Model",
+        "-e", "STT_LANGUAGE=tr",
+        "-e", "STT_DEVICE=cuda",
+        "-e", "STT_COMPUTE_TYPE=$ComputeType",
+        "-e", "STT_BEAM_SIZE=1",
+        "-e", "STT_REQUEST_TIMEOUT=300",
         $Image
+    )
+    & $docker @runArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker run failed for GPU smoke container"
+    }
 
     $health = $null
     for ($attempt = 1; $attempt -le 60; $attempt++) {
