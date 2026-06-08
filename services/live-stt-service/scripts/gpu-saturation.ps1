@@ -8,7 +8,7 @@ param(
     [int[]]$Workers = @(1, 2, 3, 4),
     [int]$Concurrency = 0,           # 0 => concurrency equals worker count K
     [int]$BasePort = 18230,
-    [int]$Timeout = 360
+    [int]$Timeout = 300
 )
 
 # #42 GPU saturation harness.
@@ -24,6 +24,10 @@ $cachePath = Join-Path $env:USERPROFILE ".cache\huggingface"
 $client = Join-Path $PSScriptRoot "saturation_client.py"
 $docker = "docker"
 $rows = @()
+
+# STT_REQUEST_TIMEOUT is validated server-side as <= 300 (config.py le=300).
+# The client HTTP timeout may stay larger; only the container env is clamped.
+$reqTimeout = [Math]::Min($Timeout, 300)
 
 New-Item -ItemType Directory -Force -Path $cachePath | Out-Null
 
@@ -63,7 +67,7 @@ foreach ($k in $Workers) {
         "-e", "STT_DEVICE=cuda",
         "-e", "STT_COMPUTE_TYPE=$ComputeType",
         "-e", "STT_BEAM_SIZE=1",
-        "-e", "STT_REQUEST_TIMEOUT=$Timeout",
+        "-e", "STT_REQUEST_TIMEOUT=$reqTimeout",
         "-e", "STT_WORKER_MAX_WORKERS=$k",
         $Image
     )
