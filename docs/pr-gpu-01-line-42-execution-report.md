@@ -21,7 +21,7 @@ hard-coded VRAM estimates are introduced before real RTX 4070 numbers exist.
 | 1 | Saturation measurement harness + unit tests (laptop) | DONE (13/13 tests) |
 | 2 | Real RTX 4070 measurement (1..N workers) | DONE (K=1..4, saturation found) |
 | 3 | "CUDA stream per worker" source + experimental evidence | DONE (process-context, honest) |
-| 4 | VRAM guard/config — measurement justifies it | PROPOSED (per-worker ≈ 2097 MiB) |
+| 4 | VRAM guard/config — measurement justifies it | ADDED (opt-in, default off; 6 tests) |
 | 5 | Optional busy-worker observability (not an issue AC) | OPTIONAL |
 | 6 | Final report with measured saturation point | DONE (this report) |
 
@@ -165,18 +165,63 @@ fixture `sample-tr-cv17-001.wav` (5.52 s). Concurrency equals worker count K.
   stream. That is the route to raise the ceiling beyond 3 — a candidate for a
   follow-up, not required to close #42's measurement.
 
-## Phase 4 — VRAM budget / config decision
+## Phase 4 — VRAM budget guard (ADDED 2026-06-08)
 
-The measurement now justifies a budget guard with **real** numbers (not a guess):
+> **Transparency note.** This guard was **not** in the original codebase. It was
+> added during #42 *after* the measurement, because Phase 2 showed that
+> `STT_WORKER_MAX_WORKERS=4` silently collapses (0/4 ok, VRAM 7835/8188 MiB).
+> It is a **safety rail**, not a throughput improvement (raising the ceiling is
+> the separate CTranslate2 shared-weights follow-up in Phase 3).
 
-- measured per-worker ≈ **2097 MiB**; device total 8188 MiB.
-- Without a guard, `STT_WORKER_MAX_WORKERS=4` produced an all-fail run.
-- A guard that caps effective workers so `K × per_worker ≤ usable_budget`
-  (e.g. ≤ ~6.3 GiB → max 3) prevents the K=4 collapse.
+### Why it was added
 
-Proposed (opt-in, default off, GPU only): `STT_WORKER_VRAM_BUDGET_MB` +
-`STT_WORKER_VRAM_PER_WORKER_MB` (default **2100**, the measured value) with a
-clamp + warning. Implementation pending review approval.
+- Measured per-worker ≈ **2097 MiB**; device total 8188 MiB.
+- Without a guard, an over-large worker count crashes every request.
+- A guard capping `effective = min(requested, budget // per_worker)` turns the
+  crash into a safe clamp + a warning log.
+
+### What changed
+
+| File | Change |
+|---|---|
+| `app/core/config.py` | `worker_vram_budget_mb` + `worker_vram_per_worker_mb` settings; `WorkerCountPlan` + `resolve_worker_count()` |
+| `app/services/worker.py` | `ProcessWorkerPool.__init__` uses `resolve_worker_count`; logs a warning when clamped |
+| `tests/unit/test_worker_vram_budget.py` | 6 GPU-free unit tests |
+
+### Default behaviour is UNCHANGED (important)
+
+- `STT_WORKER_VRAM_BUDGET_MB` default is **0 = disabled**. The guard never
+  engages unless it is set **and** `STT_DEVICE=cuda`.
+- CPU runs and the existing default config behave exactly as before.
+- The per-worker figure (`STT_WORKER_VRAM_PER_WORKER_MB`, default 2100) is the
+  **measured** value, never an auto-guess.
+
+### How to enable (GPU, opt-in)
+
+```text
+STT_DEVICE=cuda
+STT_WORKER_MAX_WORKERS=4
+STT_WORKER_VRAM_BUDGET_MB=6300        # usable VRAM budget
+STT_WORKER_VRAM_PER_WORKER_MB=2100    # measured medium/fp16
+# -> effective workers = min(4, 6300 // 2100) = 3, with a warning log
+```
+
+### How to REMOVE it (if undesired)
+
+Cleanest: `git revert` the guard commit (the one titled
+`feat(live-stt): #42 add opt-in GPU VRAM admission guard`).
+
+Manual alternative:
+
+1. `app/services/worker.py` — restore `range(settings.worker_max_workers)` in
+   `ProcessWorkerPool.__init__` and drop the `resolve_worker_count` import +
+   clamp warning.
+2. `app/core/config.py` — delete the two `worker_vram_*` fields, the
+   `WorkerCountPlan` dataclass and `resolve_worker_count()`.
+3. Delete `tests/unit/test_worker_vram_budget.py`.
+
+Because the guard is default-off, leaving it in place has no runtime effect
+until an operator opts in.
 
 ## Scope Boundaries
 

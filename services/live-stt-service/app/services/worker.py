@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, BinaryIO, Protocol
 
-from app.core.config import Settings
+from app.core.config import Settings, resolve_worker_count
 from app.models.schemas import TranscribeResponse
 
 logger = logging.getLogger(__name__)
@@ -275,9 +275,22 @@ class ProcessWorkerPool:
     def __init__(self, settings: Settings) -> None:
         self._cfg = _WorkerConfig.from_settings(settings)
         self._kill_grace_sec = settings.worker_kill_grace_sec
-        self._slots = [
-            _WorkerSlot(self._cfg, index=i) for i in range(settings.worker_max_workers)
-        ]
+        # #42: optional GPU VRAM admission. Disabled unless device=cuda and a
+        # positive STT_WORKER_VRAM_BUDGET_MB is set, so default/CPU behaviour is
+        # unchanged. Prevents the measured K=4 all-fail collapse on 8 GiB.
+        plan = resolve_worker_count(settings)
+        if plan.clamped:
+            logger.warning(
+                "Clamping STT worker count to fit GPU VRAM budget",
+                extra={
+                    "requested": plan.requested,
+                    "effective": plan.effective,
+                    "affordable": plan.affordable,
+                    "vram_budget_mb": settings.worker_vram_budget_mb,
+                    "vram_per_worker_mb": settings.worker_vram_per_worker_mb,
+                },
+            )
+        self._slots = [_WorkerSlot(self._cfg, index=i) for i in range(plan.effective)]
         self._available = threading.BoundedSemaphore(value=len(self._slots))
         self._lock = threading.Lock()
         self._next_slot = 0
