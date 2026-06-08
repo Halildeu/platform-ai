@@ -43,6 +43,22 @@ dataset is unavailable.
 Those inputs do not exist yet. Therefore the ADR records the dependency and
 uses only available evidence. It does not invent pilot WER or GPU RAM values.
 
+## Workcube Recording Blocker
+
+A real Workcube meeting recording cannot currently be performed. Therefore:
+
+- #35 and #36 were temporarily skipped, not completed;
+- no Workcube WER, CER, latency, accuracy, or model-comparison result is
+  claimed;
+- #37 uses only the models and observations already tested in the PoC;
+- the decision remains `PROVISIONAL`;
+- the project must return to #35 and #36 after an approved Workcube recording,
+  participant consent, encrypted storage, manual ground truth, and review are
+  available.
+
+This deferral prevents the missing Workcube test from blocking all subsequent
+engineering work, but it does not remove the test requirement.
+
 ## Evidence Used
 
 Repository CPU baseline:

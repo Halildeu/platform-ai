@@ -126,10 +126,16 @@ evidence is still required:
 
 Reason:
 
+- a real Workcube meeting recording cannot currently be made;
 - #34 real Workcube pilot recording is operator-action;
 - participant consent is not yet collected;
 - encrypted storage target is not yet confirmed;
 - manual pilot ground truth does not exist.
+
+For this reason, #35 and #36 were temporarily skipped so work could continue
+with the models already tested in the PoC. This is not a completion or
+acceptance claim. The project must return to #35 and #36 when an approved
+Workcube recording and reviewed ground truth become available.
 
 The Common Voice dataset prepared by #33 remains available. The pilot rows in
 the future #35 matrix must remain `PENDING` until operator evidence arrives.
@@ -183,4 +189,3 @@ Negative:
 - production model choice remains provisional;
 - exact WER/CER and GPU memory/cost claims cannot yet be made;
 - #35 and #36 remain open dependencies.
-
