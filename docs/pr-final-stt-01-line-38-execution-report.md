@@ -140,6 +140,8 @@ Executed under the isolated `services/final-stt-service/.venv`:
 | Container `/metrics` | HTTP 200 |
 | Docker HEALTHCHECK | `healthy` |
 | Container runtime user | `10001:10001` |
+| Real Redis Streams integration | `2 passed` |
+| Service-to-Redis consumer lifecycle | PASS: group created, consumer `1`, pending `0` |
 
 Unit tests use fake audio/model/Redis objects. No Whisper model was downloaded,
 no GPU was accessed, and no Workcube recording was used.
@@ -179,17 +181,50 @@ removed after validation. The local image remains available for later tests.
 
 `Dockerfile.gpu` remains #41 scope.
 
+## Real Redis Integration Evidence
+
+The existing `teas-redis` container was explicitly not used or modified.
+A separate temporary Redis instance was started:
+
+```text
+container: final-stt-redis-e2e
+image: redis:7.2-alpine
+host port: 16380
+persistence: disabled
+```
+
+Two real Redis Streams integration tests passed:
+
+1. producer `XADD` -> consumer group `XREADGROUP` -> result `XADD` -> source
+   `XACK`, with pending count `0`;
+2. invalid job -> dead-letter `XADD` -> source `XACK`, with pending count `0`.
+
+The built `final-stt-service:issue-38` container was then started with Redis
+enabled against the isolated Redis container. It created the
+`final-stt-service` consumer group with:
+
+```text
+consumers: 1
+pending: 0
+lag: 0
+health redis_enabled: true
+```
+
+Both temporary containers were removed after validation.
+
+This validates the consumer lifecycle and queue semantics locally. AG-019 still
+blocks staging-resource validation, but real Redis functionality is no longer
+untested.
+
 ## Validation Not Executed
-
-Real Redis integration:
-
-- Consumer publish/ACK/dead-letter behavior is unit tested.
-- No reachable staging Redis resource was provided.
-- AG-019 remains pending.
 
 Real GPU inference:
 
-- This laptop did not run `large-v3/cuda/float16`.
+- This laptop has no NVIDIA GPU and did not run `large-v3/cuda/float16`.
+- The GPU PC is not reachable from this session: `denetimpc` has no reachable
+  SSH endpoint, and the local Tailscale client is logged out with no peer list.
+- No remote command channel or GPU PC credential is available to this Codex
+  session.
 - GPU PC installation and CUDA image validation remain #41/#42.
 
 ## Scope Deviations
@@ -218,7 +253,7 @@ propagation intentionally remain #39.
 | Risk | Impact | Required follow-up |
 |---|---|---|
 | Workcube WER unknown | Final model may be suboptimal for domain vocabulary | Return to #35/#36 |
-| No live Redis integration | Queue behavior not proven against staging | Resolve AG-019 and run integration test |
+| No staging Redis integration | Local Redis passed, staging topology remains unproven | Resolve AG-019 |
 | No GPU container validation | CUDA/cuDNN/runtime compatibility unproven | #41 |
 | Single consumer/inference path | Throughput and VRAM concurrency unknown | #42 |
 | Basic overlap merge | UI can still show unstable state transitions | #39 |

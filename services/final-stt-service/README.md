@@ -80,6 +80,8 @@ GPU container varyantı #41 kapsamındadır. Bu adım GPU CUDA image'ı üretmez
 
 ```powershell
 python -m pytest -q
+$env:FINAL_STT_TEST_REDIS_URL="redis://127.0.0.1:16380/0"
+python -m pytest -q -m integration tests/integration/test_redis_consumer.py
 python -m ruff check app tests
 python -m mypy app
 python -m black --check app tests

@@ -24,4 +24,7 @@ target-version = ["py311"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -q"
+addopts = "-ra -q -m 'not integration'"
+markers = [
+    "integration: requires an external service such as Redis",
+]
