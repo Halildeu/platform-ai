@@ -35,7 +35,7 @@ try {
 
     Write-Host "[1/6] NVIDIA runtime visibility"
     Invoke-Docker run --rm --gpus all --entrypoint nvidia-smi $Image `
-        --query-gpu=name,driver_version,memory.total --format=csv,noheader
+        "--query-gpu=name,driver_version,memory.total" "--format=csv,noheader"
 
     Write-Host "[2/6] CTranslate2 CUDA capability"
     Invoke-Docker run --rm --gpus all --entrypoint python3 $Image -c `
@@ -99,7 +99,7 @@ try {
     $imageSize = & $docker image inspect $Image --format "{{.Size}}"
     $runtimeUser = & $docker exec $containerName sh -c "id -u; id -g"
     $gpuMemory = & $docker exec $containerName nvidia-smi `
-        --query-compute-apps=used_memory --format=csv,noheader,nounits
+        "--query-compute-apps=used_memory" "--format=csv,noheader,nounits"
 
     [pscustomobject]@{
         Image = $Image
