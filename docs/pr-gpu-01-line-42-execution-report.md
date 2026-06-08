@@ -17,13 +17,13 @@ hard-coded VRAM estimates are introduced before real RTX 4070 numbers exist.
 
 | Phase | Description | State |
 |---|---|---|
-| 0 | Architecture + CTranslate2 concurrency research | IN PROGRESS |
-| 1 | Saturation measurement harness + unit tests (laptop) | PENDING |
-| 2 | Real RTX 4070 measurement (1..N workers) | PENDING |
-| 3 | "CUDA stream per worker" source + experimental evidence | PENDING |
-| 4 | VRAM guard/config — only if measurement requires it | CONDITIONAL |
+| 0 | Architecture + CTranslate2 concurrency research | DONE |
+| 1 | Saturation measurement harness + unit tests (laptop) | DONE (13/13 tests) |
+| 2 | Real RTX 4070 measurement (1..N workers) | DONE (K=1..4, saturation found) |
+| 3 | "CUDA stream per worker" source + experimental evidence | DONE (process-context, honest) |
+| 4 | VRAM guard/config — measurement justifies it | PROPOSED (per-worker ≈ 2097 MiB) |
 | 5 | Optional busy-worker observability (not an issue AC) | OPTIONAL |
-| 6 | Final report with measured saturation point | PENDING |
+| 6 | Final report with measured saturation point | DONE (this report) |
 
 ---
 
@@ -115,13 +115,68 @@ No auto-clamp, no VRAM constant. Pure measurement.
 
 ---
 
-## Phase 2 — RTX 4070 Measurement Results
+## Phase 2 — RTX 4070 Measurement Results (2026-06-08)
 
-_To be appended after running the harness on the GPU PC._
+Harness: `gpu-saturation.ps1 -Workers 1,2,3,4 -Concurrency 0` on RTX 4070 Laptop
+GPU (8188 MiB), image `live-stt-service:gpu-issue-41`, `medium`/`float16`,
+fixture `sample-tr-cv17-001.wav` (5.52 s). Concurrency equals worker count K.
 
-## Phase 3 — CUDA Stream Evidence
+| K | Concurrency | Ok | Errors | p50 ms | p95 ms | Throughput rps | Overlap | Max conc. | VRAM base MiB |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | 1 | 0 | 507.4 | 507.4 | 1.97 | false | 1 | 2097 |
+| 2 | 2 | 2 | 0 | 574.0 | 630.3 | 3.14 | true | 2 | 4194 |
+| 3 | 3 | 3 | 0 | 925.7 | 935.7 | 3.20 | true | 3 | 6291 |
+| 4 | 4 | 0 | 4 | — | — | 0.0 | false | 0 | 7835 |
 
-_To be appended: source citation + experimental overlap/VRAM evidence._
+### Findings
+
+1. **Per-worker VRAM ≈ 2.05 GiB, linear** (2097 → 4194 → 6291 → 7835 MiB).
+   Each worker holds a **full medium/float16 model copy** — weights are NOT
+   shared. This confirms Phase 0.3 interpretation **A** (process-per-worker).
+   The measured **memory budget per stream ≈ 2.05 GiB**.
+2. **Concurrent inference is real**: `overlap=true` and `max_concurrency=K` at
+   K=2 and K=3 — multiple inferences run simultaneously on one GPU.
+3. **Throughput saturates at K≈2–3**: 1.97 → 3.14 → 3.20 rps. The 3rd worker
+   adds VRAM but almost no throughput while p50 degrades 574 → 926 ms. GPU
+   compute is the bottleneck beyond ~2 concurrent streams.
+4. **K=4 = VRAM ceiling**: base VRAM already 7835 / 8188 MiB and all 4 requests
+   failed (0 ok). Four full-model copies do not fit in 8 GiB.
+
+### Saturation point
+
+- Throughput knee: **K ≈ 2** (best rps/latency balance: ~3.1 rps, p50 574 ms).
+- Hard VRAM ceiling: **K = 4 fails**; **K = 3 is the largest that fits**
+  (6291 MiB) but with degraded latency and no throughput gain.
+- Practical recommendation for the **current architecture** on RTX 4070 8 GiB:
+  **2 workers (throughput-optimal), 3 maximum (VRAM-safe)**.
+
+## Phase 3 — "CUDA stream per worker" evidence
+
+- **Concurrency proven (experiment):** `overlap=true` with `max_concurrency=K`
+  at K=2,3 demonstrates simultaneous GPU inference.
+- **Mechanism (honest):** this is achieved by **separate worker processes =
+  separate CUDA contexts**, *not* by CTranslate2 `inter_threads` CUDA streams.
+  Signature evidence: per-worker VRAM scales linearly with the full model size
+  (no weight sharing), which is characteristic of independent contexts rather
+  than shared-weight multi-stream execution.
+- **Implication:** the CTranslate2 native path (`num_workers`/`inter_threads`
+  with shared weights, source: CTranslate2 parallel docs) would fit **more**
+  concurrent streams in the same 8 GiB because only activation memory scales per
+  stream. That is the route to raise the ceiling beyond 3 — a candidate for a
+  follow-up, not required to close #42's measurement.
+
+## Phase 4 — VRAM budget / config decision
+
+The measurement now justifies a budget guard with **real** numbers (not a guess):
+
+- measured per-worker ≈ **2097 MiB**; device total 8188 MiB.
+- Without a guard, `STT_WORKER_MAX_WORKERS=4` produced an all-fail run.
+- A guard that caps effective workers so `K × per_worker ≤ usable_budget`
+  (e.g. ≤ ~6.3 GiB → max 3) prevents the K=4 collapse.
+
+Proposed (opt-in, default off, GPU only): `STT_WORKER_VRAM_BUDGET_MB` +
+`STT_WORKER_VRAM_PER_WORKER_MB` (default **2100**, the measured value) with a
+clamp + warning. Implementation pending review approval.
 
 ## Scope Boundaries
 
