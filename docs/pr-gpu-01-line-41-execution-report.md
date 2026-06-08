@@ -155,25 +155,56 @@ as a GPU failure. No `teas-*` container was modified, restarted or used by the
 Large CUDA build and runtime validation are intentionally moved to the RTX 4070
 GPU PC.
 
-## Required RTX 4070 Evidence
+## RTX 4070 Evidence — RECORDED 2026-06-08
 
-The issue is not technically validated until the GPU PC records:
+Executed on the clean test clone `C:\Users\denetimpc\platform-ai-final-stt-test`
+(RTX 4070 Laptop GPU, driver 595.79). `gpu-smoke.ps1 -Model medium
+-ComputeType float16` returned `GPU smoke PASS`.
 
-| Evidence | Required result |
-|---|---|
-| Docker build | PASS |
-| Container GPU visibility | RTX 4070 visible |
-| CTranslate2 CUDA devices | `>= 1` |
-| Compute types | includes `float16`; test `int8_float16` separately |
-| cuBLAS | `libcublas.so.12` present |
-| cuDNN | `libcudnn.so.8` present |
-| Real Turkish transcribe | non-empty response |
-| Response metadata | `device=cuda` |
-| Runtime user | `10001:10001` |
-| Image size | measured |
-| Inference latency | measured |
-| GPU memory | measured |
-| Temporary container | removed |
+| Evidence | Required | Recorded result |
+|---|---|---|
+| Docker build | PASS | PASS (289s, 14/14 layers) |
+| Container GPU visibility | RTX 4070 | `NVIDIA GeForce RTX 4070 Laptop GPU, 595.79, 8188 MiB` |
+| CTranslate2 CUDA devices | `>= 1` | `1` |
+| Compute types | includes `float16` | `float16` present (also `int8_float16` advertised) |
+| cuBLAS | `libcublas.so.12` | present at `/usr/local/cuda/.../libcublas.so.12` |
+| cuDNN | `libcudnn.so.8` | present at `/usr/lib/x86_64-linux-gnu/libcudnn.so.8` |
+| FFmpeg GPU | optional | `cuda` hwaccel + CUVID decoders + NVENC encoders detected |
+| Real Turkish transcribe | non-empty | `"Geçiş ülkelerinde yaşananlar ise karışık."` |
+| Response metadata | `device=cuda` | `device=cuda`, `compute_type=float16`, `model=medium`, `language=tr` |
+| Runtime user | `10001:10001` | `10001:10001` |
+| Image size | measured | `2393742183` bytes (~2.23 GiB) |
+| Inference latency | measured | `673 ms` (audio 5.52s; first-request wall 15.9s incl. cached model load) |
+| GPU memory | measured | `[N/A]` — `--query-compute-apps` caught no active process post-inference (timing only; GPU confirmed working) |
+| Temporary container | removed | removed by `finally` block |
+
+### Script fixes required during RTX 4070 validation
+
+Two PowerShell-specific defects in `gpu-smoke.ps1` were found and fixed (build
+and image itself were correct from the first run):
+
+1. `83814f9` — quoted the `--query-gpu`/`--format` args so PowerShell does not
+   array-split comma-separated tokens before they reach `nvidia-smi`.
+2. `f175ab1` — step [5/6] container run now splats an explicit arg array to the
+   native `docker.exe`; the `Invoke-Docker` advanced function was parsing `-d`
+   and `-e` as common parameters (`-Debug`, ambiguous `-ErrorAction`/`-ErrorVariable`).
+
+First-run model download must be primed into the mounted HF cache before the
+timed transcribe (otherwise the in-request download exceeds the worker timeout
+and returns 504). Pre-warm:
+
+```powershell
+docker run --rm --gpus all `
+  --mount "type=bind,source=$env:USERPROFILE\.cache\huggingface,target=/home/stt/.cache/huggingface" `
+  --entrypoint python3 live-stt-service:gpu-issue-41 `
+  -c "from faster_whisper import WhisperModel; WhisperModel('medium', device='cuda', compute_type='float16')"
+```
+
+### Not yet executed (optional, non-blocking for #41 core)
+
+- `int8_float16` second smoke run (compute mode advertised and parameterized;
+  quality/latency comparison is #43 scope).
+- Active GPU-memory figure (measurement timing gap only).
 
 ## GPU PC Commands
 
@@ -181,9 +212,10 @@ Use the clean test clone, not the approved dirty live-STT PoC directory:
 
 ```powershell
 cd C:\Users\denetimpc\platform-ai-final-stt-test
-git fetch origin
-git checkout feature/pr-gpu-01-dockerfile-gpu
-git pull --ff-only origin feature/pr-gpu-01-dockerfile-gpu
+# The clone is --single-branch, so a bare `git fetch origin` does not create the
+# remote-tracking ref. Fetch the branch explicitly and check out FETCH_HEAD.
+git fetch origin feature/pr-gpu-01-dockerfile-gpu
+git checkout -B feature/pr-gpu-01-dockerfile-gpu FETCH_HEAD
 cd services\live-stt-service
 ```
 
@@ -229,9 +261,16 @@ Then run the second compute mode without rebuilding:
 
 ## Completion State
 
-Implementation and laptop static validation are complete.
+Implementation, laptop static validation, and RTX 4070 real-GPU validation are
+complete. `gpu-smoke.ps1` returns `GPU smoke PASS` end-to-end: Docker build,
+GPU visibility, CTranslate2 CUDA, cuBLAS/cuDNN linkage, real Turkish
+transcription (`device=cuda`, `medium`/`float16`, 673 ms), non-root
+`10001:10001`, and image size 2.23 GiB are all recorded above.
 
-RTX 4070 Docker build and real container inference evidence must be appended
-before claiming issue #41 is fully validated.
+Issue #41 core scope (NVIDIA CUDA + cuDNN + faster-whisper CUDA image with real
+GPU transcription) is validated. No model lock (#39), no multi-worker (#42), no
+performance winner (#43), and no production/GitOps change were made.
 
-AG-019 staging resource gate pending; implementation is development-only.
+Optional follow-ups, non-blocking: `int8_float16` second smoke run and an active
+GPU-memory figure. AG-019 staging resource gate pending; implementation is
+development-only.
