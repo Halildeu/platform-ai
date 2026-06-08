@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Explicit GPU runtime pin. faster-whisper permits CTranslate2 <5, but leaving
+# this transitive dependency floating makes CUDA/cuDNN compatibility drift.
+ctranslate2==4.8.0
