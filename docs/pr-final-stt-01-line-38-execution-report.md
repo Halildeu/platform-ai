@@ -135,18 +135,51 @@ Executed under the isolated `services/final-stt-service/.venv`:
 | `pip check` | No broken requirements |
 | `compileall app tests` | PASS |
 | `git diff --check` | PASS |
+| Docker image build | PASS: `final-stt-service:issue-38` |
+| Container `/health` | HTTP 200 |
+| Container `/metrics` | HTTP 200 |
+| Docker HEALTHCHECK | `healthy` |
+| Container runtime user | `10001:10001` |
 
 Unit tests use fake audio/model/Redis objects. No Whisper model was downloaded,
 no GPU was accessed, and no Workcube recording was used.
 
+## Docker Smoke Evidence
+
+Docker Desktop and Engine `29.4.1` were started on the laptop. The initial
+build attempt reached Debian package installation but failed because the Debian
+mirror connection timed out. This exposed a reproducibility weakness in the
+Dockerfile.
+
+The Dockerfile was updated with bounded APT retries/timeouts, and a
+`.dockerignore` was added to exclude local venv, test caches and tests from the
+runtime context. The second build completed successfully.
+
+Smoke runtime:
+
+```text
+image: final-stt-service:issue-38
+image size: 362332773 bytes
+host port: 18211
+container port: 8211
+redis: disabled
+device: cpu
+compute: int8
+health response:
+{"status":"loading","version":"0.1.0","model":"large-v3",
+ "model_revision":"main","device":"cpu","compute_type":"int8",
+ "redis_enabled":false}
+Docker health: healthy
+runtime uid/gid: 10001:10001
+```
+
+The `loading` health state is expected because the health endpoint deliberately
+does not download or initialize the Whisper model. The smoke container was
+removed after validation. The local image remains available for later tests.
+
+`Dockerfile.gpu` remains #41 scope.
+
 ## Validation Not Executed
-
-Docker image build:
-
-- Docker CLI exists on the laptop.
-- Docker Engine is not running.
-- The build was not claimed as passed.
-- `Dockerfile.gpu` remains #41 scope.
 
 Real Redis integration:
 

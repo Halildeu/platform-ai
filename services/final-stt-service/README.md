@@ -85,4 +85,15 @@ python -m mypy app
 python -m black --check app tests
 ```
 
+Docker CPU smoke:
+
+```powershell
+docker build --network=host -t final-stt-service:issue-38 .
+docker run --rm -p 8211:8211 `
+  -e FINAL_STT_REDIS_ENABLED=false `
+  -e FINAL_STT_DEVICE=cpu `
+  -e FINAL_STT_COMPUTE_TYPE=int8 `
+  final-stt-service:issue-38
+```
+
 AG-019 staging resource gate pending; implementation validated locally only.
