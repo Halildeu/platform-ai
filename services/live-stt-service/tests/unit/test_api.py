@@ -246,23 +246,16 @@ def test_normalise_format(content_type: str | None, expected_fmt: str) -> None: 
     assert _normalise_format(content_type) == AudioFormat(expected_fmt)
 
 
-# PR-stt-02a iter-2 absorb (Codex 019e8a24): Mavis PR #74 PII patterns 4 regression
-# tracked separately in Issue #97 (M3 Observability). xfail until PR #97 fixes regex.
-@pytest.mark.xfail(
-    reason=(
-        "Mavis PR #74 PII regression — see Issue #97 "
-        "(TC first-zero, TR phone with spaces, bearer/password edge case)"
-    ),
-    strict=False,
-)
+# Issue #97 fix: PII redaction regex corrected — key-preserving secret/password/
+# token, TR phone with +90/spaces, privacy-first bare TC. Previously xfailed.
 @pytest.mark.parametrize(
     "raw, expect_redacted",
     [
         # TC kimlik: valid 11-digit
         ("TC: 12345678901", "TC: ***REDACTED_TC***"),
         ("user=98765432109", "user=***REDACTED_TC***"),
-        # TC kimlik: invalid (11-digit but starts with 0 — not a real TC)
-        ("12345678901", "12345678901"),  # first digit 1 OK
+        # TC kimlik: a bare 11-digit number is redacted privacy-first (#97)
+        ("12345678901", "***REDACTED_TC***"),
         # IBAN TR
         ("IBAN=TR330006100519786993745634", "IBAN=***REDACTED_IBAN***"),
         ("TR330006100519786993745634", "***REDACTED_IBAN***"),
