@@ -14,7 +14,7 @@ redacted text.
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     request_timeout: int = Field(default=60, ge=1, le=300)
     summary_max_chars: int = Field(default=280, ge=40, le=4000)
+
+    @model_validator(mode="after")
+    def _enforce_kvkk_redaction_boundary(self) -> Settings:
+        """Issue #49 hard requirement: PII redaction BEFORE any LLM call.
+
+        Disabling redaction is only permitted on the in-process mock backend
+        (no data leaves the service). For any real LLM backend the boundary is
+        mandatory and cannot be switched off by env.
+        """
+        if self.backend != "mock" and not self.redact_pii:
+            raise ValueError(
+                "MAI_REDACT_PII=False is not allowed with a non-mock backend: "
+                "the KVKK boundary requires redaction before any LLM call"
+            )
+        return self
 
 
 _settings: Settings | None = None
