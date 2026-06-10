@@ -1,0 +1,45 @@
+# #55 MinIO host-compose — meeting/transcript artifact storage (Faz 24).
+# Profiles: `prod` and `test` (isolated ports + volumes). Secrets come from the
+# environment (host) or, on k8s, from the ESO ExternalSecret in this directory —
+# never commit credentials.
+#
+# Usage:
+#   docker compose --profile test up -d    # test instance :9100/:9101
+#   docker compose --profile prod up -d    # prod instance :9000/:9001
+services:
+  minio-prod:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["prod"]
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set via host env / ESO}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set via host env / ESO}
+    volumes:
+      - minio-prod-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio-test:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["test"]
+    command: server /data --console-address ":9101"
+    ports:
+      - "9100:9000"
+      - "9101:9101"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_TEST_ROOT_USER:?set via host env}
+      MINIO_ROOT_PASSWORD: ${MINIO_TEST_ROOT_PASSWORD:?set via host env}
+    volumes:
+      - minio-test-data:/data
+    restart: unless-stopped
+
+volumes:
+  minio-prod-data:
+  minio-test-data:
