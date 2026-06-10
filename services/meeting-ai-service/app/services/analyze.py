@@ -100,7 +100,7 @@ Lütfen sadece geçerli JSON döndür, başka bir şey ekleme:
   "summary": "<maksimum 3 cümle toplantı özeti>",
   "decisions": ["<karar 1>", "<karar 2>"],
   "action_items": [
-    {{"text": "<aksiyon açıklaması>", "owner": "<sorumlu kişi veya null>"}},
+    {{"text": "<aksiyon açıklaması>", "owner": "<sorumlu kişi veya null>"}}
   ]
 }}
 """
