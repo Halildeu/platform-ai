@@ -13,9 +13,11 @@ from app.api.metrics import (
     final_stt_consumer_up,
     final_stt_inference_seconds,
     final_stt_jobs_total,
+    final_stt_revision_events_total,
 )
 from app.core.config import Settings
-from app.models.schemas import FinalSttJob
+from app.models.schemas import FinalSttJob, TranscriptRevisionEvent
+from app.services.state_machine import TranscriptRevisionStateMachine
 from app.services.transcribe import FinalTranscriber
 
 logger = structlog.get_logger(__name__)
@@ -68,18 +70,26 @@ class FinalSttConsumer:
     def stop(self) -> None:
         self._stop_event.set()
 
+    def _publish_event(self, event: TranscriptRevisionEvent) -> None:
+        self._redis.xadd(
+            self._settings.redis_result_stream,
+            {"payload": event.model_dump_json(by_alias=True)},
+            maxlen=self._settings.redis_result_maxlen,
+            approximate=True,
+        )
+        final_stt_revision_events_total.labels(state=event.state).inc()
+
     def process_message(self, message_id: str, fields: dict[object, object]) -> None:
         try:
             job = FinalSttJob.model_validate(_decode_fields(fields))
             final_stt_chunk_duration_seconds.observe(job.audio_duration_sec)
+            state_machine = TranscriptRevisionStateMachine(job)
+            self._publish_event(state_machine.draft())
+            self._publish_event(state_machine.stabilizing())
             result = self._transcriber.transcribe(job)
             final_stt_inference_seconds.observe(result.elapsed_ms / 1000)
-            self._redis.xadd(
-                self._settings.redis_result_stream,
-                {"payload": result.model_dump_json(by_alias=True)},
-                maxlen=self._settings.redis_result_maxlen,
-                approximate=True,
-            )
+            self._publish_event(state_machine.final(result))
+            self._publish_event(state_machine.revised(result))
             self._redis.xack(
                 self._settings.redis_input_stream,
                 self._settings.redis_consumer_group,
@@ -91,6 +101,7 @@ class FinalSttConsumer:
                 correlation_id=job.correlation_id,
                 chunk_seq=job.chunk_seq,
                 elapsed_ms=result.elapsed_ms,
+                revision_id=state_machine.revision_id,
             )
         except (ValidationError, ValueError, FileNotFoundError) as exc:
             final_stt_jobs_total.labels(result="invalid").inc()

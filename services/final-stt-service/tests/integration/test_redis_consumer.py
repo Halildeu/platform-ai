@@ -88,10 +88,16 @@ def test_real_redis_publish_consume_result_and_ack(tmp_path: Path) -> None:
         consumer.process_message(received_id.decode(), fields)
 
         result_records = redis.xrange(settings.redis_result_stream)
-        assert len(result_records) == 1
-        payload = json.loads(result_records[0][1][b"payload"])
-        assert payload["revisedText"] == "gercek redis sonucu"
-        assert payload["chunkSeq"] == 7
+        assert len(result_records) == 4
+        payloads = [json.loads(record[1][b"payload"]) for record in result_records]
+        assert [payload["state"] for payload in payloads] == [
+            "draft",
+            "stabilizing",
+            "final",
+            "revised",
+        ]
+        assert payloads[-1]["result"]["revisedText"] == "gercek redis sonucu"
+        assert payloads[-1]["chunkSeq"] == 7
         assert (
             redis.xpending(settings.redis_input_stream, settings.redis_consumer_group)["pending"]
             == 0

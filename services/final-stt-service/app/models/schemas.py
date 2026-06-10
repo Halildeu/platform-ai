@@ -42,6 +42,31 @@ class FinalSttResult(BaseModel):
     segments: list[TranscriptSegment] = Field(default_factory=list)
 
 
+class TranscriptDiffOperation(BaseModel):
+    operation: str = Field(pattern="^(equal|insert|delete|replace)$")
+    before_start: int = Field(alias="beforeStart", ge=0)
+    before_end: int = Field(alias="beforeEnd", ge=0)
+    after_start: int = Field(alias="afterStart", ge=0)
+    after_end: int = Field(alias="afterEnd", ge=0)
+    before_text: str = Field(alias="beforeText")
+    after_text: str = Field(alias="afterText")
+
+
+class TranscriptRevisionEvent(BaseModel):
+    session_id: str = Field(alias="sessionId")
+    chunk_seq: int = Field(alias="chunkSeq", ge=0)
+    correlation_id: str = Field(alias="correlationId")
+    revision_id: str = Field(alias="revisionId", min_length=64, max_length=64)
+    state: str = Field(pattern="^(draft|stabilizing|final|revised)$")
+    state_sequence: int = Field(alias="stateSequence", ge=0, le=3)
+    terminal: bool
+    text: str
+    previous_text: str = Field(alias="previousText")
+    overlap_words: int = Field(alias="overlapWords", ge=0)
+    diff: list[TranscriptDiffOperation] = Field(default_factory=list)
+    result: FinalSttResult | None = None
+
+
 class HealthResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
