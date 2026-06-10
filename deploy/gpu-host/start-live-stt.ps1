@@ -4,7 +4,10 @@
 
 param(
     [string]$RepoRoot = "C:\platform-ai",
-    [int]$Port = 8200
+    [int]$Port = 8200,
+    # Full path required: the task runs as SYSTEM, whose PATH does not include
+    # per-user Python installs. install.ps1 resolves and passes this.
+    [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,4 +20,4 @@ $log = Join-Path $logDir ("live-stt-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
 $env:STT_LOG_LEVEL = "INFO"
 
 Set-Location $svc
-& python -m uvicorn app.main:app --host 0.0.0.0 --port $Port *>> $log
+& $PythonExe -m uvicorn app.main:app --host 0.0.0.0 --port $Port *>> $log

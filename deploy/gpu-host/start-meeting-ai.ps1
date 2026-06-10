@@ -8,7 +8,10 @@ param(
     # Ollama server is not reachable at startup, so the service never hard-fails.
     [string]$Backend = "ollama",
     [string]$OllamaHost = "http://localhost:11434",
-    [string]$OllamaModel = "llama3.1:8b"
+    [string]$OllamaModel = "llama3.1:8b",
+    # Full path required: the task runs as SYSTEM, whose PATH does not include
+    # per-user Python installs. install.ps1 resolves and passes this.
+    [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,4 +37,4 @@ $env:MAI_OLLAMA_MODEL = $OllamaModel
 $env:MAI_LOG_LEVEL = "INFO"
 
 Set-Location $svc
-& python -m uvicorn app.main:app --host 0.0.0.0 --port $Port *>> $log
+& $PythonExe -m uvicorn app.main:app --host 0.0.0.0 --port $Port *>> $log
