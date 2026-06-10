@@ -72,16 +72,26 @@ def _correlation_id_from_request(request: Request) -> str:
 #   - TC kimlik (11-digit, first ≠ 0) → REDACTED_TC
 #   - IBAN TR                     → REDACTED_IBAN
 #   - TR phone                    → REDACTED_PHONE
-_REDACT_PATTERNS = [
-    (re.compile(r"(?i)bearer[\s:=]+[A-Za-z0-9\-_]+\.?[A-Za-z0-9\-_\.]+"), "***REDACTED***"),
-    (re.compile(r"(?i)(secret|password|token)[\s:=]+\S+"), "***REDACTED***"),
-    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"), "***REDACTED_EMAIL***"),
-    # TC kimlik: 11-digit, first digit 1-9 (Turkish national ID)
+_REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # bearer <jwt>: a dotted token directly after `bearer`. The dot is required
+    # so this does NOT swallow `bearer token=<jwt>` (handled by the key=value
+    # rule below, which preserves the `token=` prefix). Issue #97.
+    (re.compile(r"(?i)bearer[\s:=]+[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_.]+"), "***REDACTED***"),
+    # secret/password/token = value: keep the key + separator, redact only the
+    # value (so `password=x` -> `password=***REDACTED***`). Issue #97.
+    (re.compile(r"(?i)(secret|password|token)([\s:=]+)\S+"), r"\g<1>\g<2>***REDACTED***"),
+    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "***REDACTED_EMAIL***"),
+    # TC kimlik: any 11-digit run starting 1-9. Privacy-first — a bare 11-digit
+    # number is redacted even without a `TC:` cue (#97 resolves the ambiguity).
     (re.compile(r"\b[1-9]\d{10}\b"), "***REDACTED_TC***"),
     # IBAN TR: TR prefix + 24 digits
     (re.compile(r"\bTR\d{24}\b"), "***REDACTED_IBAN***"),
-    # Turkish mobile/phone: +90 or 0 prefix, 10 digits total
-    (re.compile(r"\b(\+90|0)?[\s]?5\d{2}[\s]?\d{3}[\s]?\d{2}[\s]?\d{2}\b"), "***REDACTED_PHONE***"),
+    # Turkish mobile: optional +90/0 prefix with optional spaces/dashes, 5xx
+    # group. No leading \b so a `+90 ...` prefix is captured. Issue #97.
+    (
+        re.compile(r"(?i)(?:\+90|0)?[\s-]?5\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b"),
+        "***REDACTED_PHONE***",
+    ),
 ]
 
 
