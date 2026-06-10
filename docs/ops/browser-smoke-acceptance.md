@@ -47,3 +47,20 @@ Mobil koşular #94 harness'i ile (Detox + Maestro), rapor CI artefaktı.
 | S4 | | |
 | S5 | | |
 | S6 | | |
+
+### Aşama-1 koşusu — 2026-06-10, GPU host (RTX 4070), main @ PR #131 sonrası
+Kurulum: live-stt :8200 (cuda/fp16) + meeting-ai :8300 (mock) + cloudflared
+quick tunnel (IPv4 origin: http://127.0.0.1:8200 — localhost IPv6/::1 tuzağına
+dikkat) + stt-frontend (vite, laptop) `?ws=` parametresiyle.
+
+| Senaryo | Sonuç | Not |
+|---|---|---|
+| S1 | **PASS** | İlk draft <3 sn (bağlantı dahil); draft inference 215-401 ms; live=medium, final=large-v3-turbo (ADR-0031 defaults) |
+| S2 | **PASS** | Final'ler draft'ı revize etti (515-788 ms); ör. draft "güzel çalışıyorsun" → final "Güzel çalışıyorsun, beğendim." |
+| S3 | **PASS** | Segment aralarındaki 9-19 sn boşluklarda hiçbir halüsinasyon artefaktı UI'a düşmedi |
+| S4 | **PASS** | /analyze: `redacted:true`, `redaction_count:2`; TC→***REDACTED_TC***, telefon→***REDACTED_PHONE***; karar+aksiyon doğru ayıklandı |
+| S5 | **PASS** | Sunucu logları transcript-free: yalnız `Stream connected` / `Final segment sent` / süre+VAD satırları; konuşulan metinden tek kelime yok |
+| S6 | **PASS** | F5 sonrası yeniden bağlantı temiz `ready`; servis kesintisiz (logda disconnect→reconnect→final akışı görülür) |
+
+**Aşama-1 = 6/6 PASS → G8'in direct-WS yarısı YEŞİL.** Kalan: Aşama-2
+(gateway+mobil; ön şart #106 merge + staging).
