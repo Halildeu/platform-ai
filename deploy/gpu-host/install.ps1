@@ -42,10 +42,25 @@ foreach ($t in $tasks) {
     }
 }
 
+# Tasks run as SYSTEM, whose PATH does not see per-user Python installs:
+# resolve the full interpreter path now and bake it into the task action.
+$pythonExe = (Get-Command python -ErrorAction Stop).Source
+Write-Host "Using Python: $pythonExe"
+
+# A service port already in use means a manually started instance is running;
+# the task's uvicorn would fail to bind. Refuse and tell the operator.
+foreach ($port in 8200, 8300) {
+    $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    if ($conn) {
+        $busyPid = ($conn | Select-Object -First 1).OwningProcess
+        throw "Port $port is already in use by PID $busyPid. Stop it first: Stop-Process -Id $busyPid -Force"
+    }
+}
+
 foreach ($t in $tasks) {
     $scriptPath = Join-Path $deployDir $t.Script
     $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RepoRoot `"$RepoRoot`""
+        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RepoRoot `"$RepoRoot`" -PythonExe `"$pythonExe`""
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet `
