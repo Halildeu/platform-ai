@@ -73,6 +73,59 @@ docker run --rm -p 8200:8200 \
   live-stt-service:dev
 ```
 
+### NVIDIA GPU image (#41)
+
+GPU image, CPU image'dan ayrı tutulur:
+
+```powershell
+cd services/live-stt-service
+docker build -f Dockerfile.gpu -t live-stt-service:gpu-issue-41 .
+
+docker run --rm --gpus all -p 8200:8200 `
+  -e STT_MODEL_NAME=medium `
+  -e STT_LANGUAGE=tr `
+  -e STT_DEVICE=cuda `
+  -e STT_COMPUTE_TYPE=float16 `
+  live-stt-service:gpu-issue-41
+```
+
+Image tabanı:
+
+```text
+nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+CUDA: 12.2.2
+cuDNN: 8
+CTranslate2: 4.8.0
+```
+
+GPU host'ta NVIDIA Container Toolkit / Docker `--gpus all` desteği
+zorunludur. Fail-fast gerçek GPU smoke:
+
+```powershell
+.\scripts\gpu-smoke.ps1 `
+  -Image live-stt-service:gpu-issue-41 `
+  -Model medium `
+  -ComputeType float16
+```
+
+Script şunları doğrular:
+
+- `nvidia-smi` container içinden GPU'yu görür;
+- CTranslate2 en az bir CUDA device ve desteklenen compute type'ları raporlar;
+- `libcublas.so.12` ve `libcudnn.so.8` runtime'da bulunur;
+- FFmpeg CUDA hwaccel, NVDEC/CUVID ve NVENC varlığı opsiyonel olarak raporlanır;
+- gerçek Türkçe WAV, servis `/transcribe` yolundan işlenir;
+- response `device=cuda` ve seçilen compute type bilgisini taşır;
+- image boyutu, inference süresi ve non-root UID/GID raporlanır.
+
+`float16` varsayılandır. `int8_float16`, aynı scriptte `-ComputeType
+int8_float16` ile ayrıca ölçülebilir. Bu iki modun kalite/latency/VRAM
+karşılaştırması #43 performans matrisi kapsamındadır.
+
+NVDEC/NVENC zorunlu STT bağımlılığı değildir; ses decode CPU ffmpeg yoluyla
+yapılır. GPU video decode/encode yalnızca ileride video kaynakları eklendiğinde
+opsiyonel hızlandırmadır.
+
 ## PR-stt-02 baseline
 
 Project item #17 measured the current PoC with a real Turkish Common Voice

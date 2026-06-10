@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1.7
+#
+# live-stt-service NVIDIA GPU runtime image.
+#
+# Build:
+#   docker build -f Dockerfile.gpu -t live-stt-service:gpu .
+#
+# Run:
+#   docker run --rm --gpus all -p 8200:8200 \
+#     -e STT_DEVICE=cuda -e STT_COMPUTE_TYPE=float16 \
+#     -e STT_MODEL_NAME=medium live-stt-service:gpu
+
+ARG CUDA_IMAGE=nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04@sha256:2d913b09e6be8387e1a10976933642c73c840c0b735f0bf3c28d97fc9bc422e0
+FROM ${CUDA_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+LABEL org.opencontainers.image.title="live-stt-service GPU"
+LABEL org.opencontainers.image.description="CUDA 12.2 + cuDNN 8 runtime for faster-whisper"
+LABEL com.serban.platform-ai.cuda.version="12.2.2"
+LABEL com.serban.platform-ai.cudnn.major="8"
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    STT_DEVICE=cuda \
+    STT_COMPUTE_TYPE=float16 \
+    STT_WORKER_MAX_WORKERS=1
+
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y \
+       --no-install-recommends \
+       ca-certificates \
+       ffmpeg \
+       python3 \
+       python3-pip \
+       python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt requirements-gpu.txt /app/
+RUN python3 -m pip install --no-cache-dir --upgrade pip \
+    && python3 -m pip install --no-cache-dir -r requirements-gpu.txt \
+    && python3 -c "import ctranslate2, faster_whisper, requests; print('GPU Python imports OK')" \
+    && ldconfig -p | grep -q 'libcublas.so.12' \
+    && ldconfig -p | grep -q 'libcudnn.so.8'
+
+COPY app /app/app
+
+RUN useradd -u 10001 -m -s /bin/bash stt \
+    && mkdir -p /home/stt/.cache/huggingface \
+    && chown -R stt:stt /home/stt /app
+
+USER stt
+
+EXPOSE 8200
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD python3 -c "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8200/health', timeout=3).status == 200 else 1)"
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8200", "--workers", "1"]
