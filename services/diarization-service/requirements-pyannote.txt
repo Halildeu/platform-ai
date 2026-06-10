@@ -1,0 +1,8 @@
+# Real pyannote backend deps (#48). Heavy: torch + pyannote.audio.
+# Install on the inference host only:
+#   pip install -r requirements.txt -r requirements-pyannote.txt
+# Gated model access: huggingface.co/pyannote/speaker-diarization-3.1
+# requires an HF account token (DIA_HF_TOKEN) with the model terms accepted.
+pyannote.audio==3.3.2
+torch==2.5.1
+torchaudio==2.5.1

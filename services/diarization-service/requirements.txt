@@ -1,0 +1,10 @@
+# diarization-service runtime dependencies (skeleton — mock backend).
+# pyannote.audio + torch are intentionally NOT pinned here: the real backend is
+# a follow-up and is heavy (GPU/torch + HF token). The mock backend needs none.
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-multipart==0.0.12
+structlog==24.4.0
+prometheus-client==0.21.0
