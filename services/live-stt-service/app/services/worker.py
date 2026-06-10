@@ -9,17 +9,19 @@ PR-stt-03 / #20 scope:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import multiprocessing as mp
 import queue
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, BinaryIO, Protocol
 
-from app.core.config import Settings
+from app.core.config import Settings, resolve_worker_count
 from app.models.schemas import TranscribeResponse
 
 logger = logging.getLogger(__name__)
@@ -275,9 +277,22 @@ class ProcessWorkerPool:
     def __init__(self, settings: Settings) -> None:
         self._cfg = _WorkerConfig.from_settings(settings)
         self._kill_grace_sec = settings.worker_kill_grace_sec
-        self._slots = [
-            _WorkerSlot(self._cfg, index=i) for i in range(settings.worker_max_workers)
-        ]
+        # #42: optional GPU VRAM admission. Disabled unless device=cuda and a
+        # positive STT_WORKER_VRAM_BUDGET_MB is set, so default/CPU behaviour is
+        # unchanged. Prevents the measured K=4 all-fail collapse on 8 GiB.
+        plan = resolve_worker_count(settings)
+        if plan.clamped:
+            logger.warning(
+                "Clamping STT worker count to fit GPU VRAM budget",
+                extra={
+                    "requested": plan.requested,
+                    "effective": plan.effective,
+                    "affordable": plan.affordable,
+                    "vram_budget_mb": settings.worker_vram_budget_mb,
+                    "vram_per_worker_mb": settings.worker_vram_per_worker_mb,
+                },
+            )
+        self._slots = [_WorkerSlot(self._cfg, index=i) for i in range(plan.effective)]
         self._available = threading.BoundedSemaphore(value=len(self._slots))
         self._lock = threading.Lock()
         self._next_slot = 0
@@ -350,7 +365,227 @@ class ProcessWorkerPool:
             slot.stop()
 
 
+# ---------------------------------------------------------------------------
+# #42 shared-model multi-stream backend
+#
+# One supervised subprocess hosts a SINGLE WhisperModel(num_workers=K). Weights
+# are loaded once, so VRAM stays ~flat as concurrency grows (fixes the measured
+# linear 2->4->6 GiB / K=4 OOM of the per-worker process pool). Concurrency is
+# K simultaneous model.transcribe() calls dispatched over a ThreadPoolExecutor;
+# CTranslate2 assigns each call to its own worker / CUDA stream.
+#
+# #20-22 hard-kill guarantee is preserved at *supervisor* granularity: a timed
+# out job triggers terminate -> grace -> kill of the whole supervisor, which is
+# then respawned. The trade-off (documented for #42) is that the kill also
+# fails the other in-flight jobs on that supervisor — they surface as a
+# controlled WorkerCrashedError rather than a per-request SIGKILL.
+# ---------------------------------------------------------------------------
+
+_CRASH_SENTINEL = "__supervisor_crashed__"
+
+
+def _supervisor_main(
+    cfg: _WorkerConfig,
+    num_streams: int,
+    task_queue: Any,
+    result_queue: Any,
+) -> None:
+    model: object | None = None
+    executor: ThreadPoolExecutor | None = None
+
+    def _run_job(job_id: str, payload: dict[str, bytes | str | None]) -> None:
+        assert model is not None
+        try:
+            result = _transcribe_with_model(model, cfg, payload)
+            result_queue.put({"job_id": job_id, "ok": True, "result": result})
+        except BaseException as exc:  # noqa: BLE001 - report sanitized class only
+            result_queue.put({"job_id": job_id, "ok": False, "error_class": type(exc).__name__})
+
+    while True:
+        task = task_queue.get()
+        if task.get("type") == "stop":
+            if executor is not None:
+                executor.shutdown(wait=False)
+            return
+        if model is None:
+            # Local import keeps faster-whisper out of the default/test import path.
+            from faster_whisper import WhisperModel
+
+            logger.info(
+                "Loading shared Whisper model",
+                extra={
+                    "model": cfg.model_name,
+                    "device": cfg.device,
+                    "compute_type": cfg.compute_type,
+                    "num_streams": num_streams,
+                },
+            )
+            # num_workers=K -> CTranslate2 runs K concurrent inference workers,
+            # each on its own CUDA stream, over the SHARED model weights.
+            model = WhisperModel(
+                cfg.model_name,
+                device=cfg.device,
+                compute_type=cfg.compute_type,
+                num_workers=num_streams,
+            )
+            executor = ThreadPoolExecutor(max_workers=num_streams)
+        assert executor is not None
+        payload = task["audio"]
+        assert isinstance(payload, dict)
+        executor.submit(_run_job, str(task["job_id"]), payload)
+
+
+class SharedModelWorkerPool:
+    """Single supervised process hosting one shared model over K CUDA streams."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._cfg = _WorkerConfig.from_settings(settings)
+        self._kill_grace_sec = settings.worker_kill_grace_sec
+        # #42: per-stream VRAM admission. In shared mode the model weights are
+        # loaded ONCE, so worker_vram_per_worker_mb is the marginal per-stream
+        # budget (operator-measured on the target GPU), not a full model copy.
+        plan = resolve_worker_count(settings)
+        if plan.clamped:
+            logger.warning(
+                "Clamping STT CUDA stream count to fit GPU VRAM budget",
+                extra={
+                    "requested": plan.requested,
+                    "effective": plan.effective,
+                    "affordable": plan.affordable,
+                    "vram_budget_mb": settings.worker_vram_budget_mb,
+                    "vram_per_worker_mb": settings.worker_vram_per_worker_mb,
+                },
+            )
+        self._num_streams = plan.effective
+        self._ctx = mp.get_context("spawn")
+        self._lock = threading.Lock()
+        self._restart_lock = threading.Lock()
+        self._pending: dict[str, queue.Queue[dict[str, Any]]] = {}
+        self._available = threading.BoundedSemaphore(self._num_streams)
+        self._model_loaded = False
+        self._generation = 0
+        self._process: Any | None = None
+        self._task_queue: Any = None
+        self._result_queue: Any = None
+        self._demux_stop: threading.Event | None = None
+        self._start()
+
+    def _start(self) -> None:
+        self._task_queue = self._ctx.Queue()
+        self._result_queue = self._ctx.Queue()
+        self._generation += 1
+        self._process = self._ctx.Process(
+            target=_supervisor_main,
+            args=(self._cfg, self._num_streams, self._task_queue, self._result_queue),
+            name="stt-shared-supervisor",
+            daemon=True,
+        )
+        self._process.start()
+        stop_event = threading.Event()
+        self._demux_stop = stop_event
+        result_queue = self._result_queue
+        demux = threading.Thread(
+            target=self._demux_loop,
+            args=(result_queue, stop_event),
+            name="stt-shared-demux",
+            daemon=True,
+        )
+        demux.start()
+
+    def _demux_loop(self, result_queue: Any, stop_event: threading.Event) -> None:
+        """Fan results from the single shared result queue to per-job queues."""
+        while not stop_event.is_set():
+            try:
+                resp = result_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            with self._lock:
+                jq = self._pending.get(str(resp.get("job_id")))
+            if jq is not None:
+                with contextlib.suppress(queue.Full):
+                    jq.put_nowait(resp)
+
+    def _kill_process(self, proc: Any | None) -> None:
+        if proc is not None and proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=self._kill_grace_sec)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=self._kill_grace_sec)
+
+    def _restart_after_timeout(self, generation: int) -> None:
+        with self._restart_lock:
+            if generation != self._generation:
+                return  # another thread already recycled this supervisor
+            if self._demux_stop is not None:
+                self._demux_stop.set()
+            self._kill_process(self._process)
+            with self._lock:
+                pending = list(self._pending.values())
+            for jq in pending:  # collateral: fail siblings with a crash sentinel
+                with contextlib.suppress(queue.Full):
+                    jq.put_nowait({"ok": False, "error_class": _CRASH_SENTINEL})
+            self._start()
+
+    def transcribe(
+        self, audio: BinaryIO | str, timeout_sec: float | None = None
+    ) -> TranscribeResponse:
+        self._available.acquire()
+        job_id = str(uuid.uuid4())
+        jq: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+        with self._lock:
+            self._pending[job_id] = jq
+            task_queue = self._task_queue
+            process = self._process
+            generation = self._generation
+        try:
+            if process is None or not process.is_alive():
+                raise WorkerCrashedError("STT shared supervisor not running")
+            task_queue.put({"type": "transcribe", "job_id": job_id, "audio": _audio_payload(audio)})
+            try:
+                response = jq.get(timeout=timeout_sec) if timeout_sec is not None else jq.get()
+            except queue.Empty:
+                self._restart_after_timeout(generation)
+                raise WorkerTimeoutError("STT shared supervisor exceeded timeout") from None
+            error_class = str(response.get("error_class", "RuntimeError"))
+            if not response.get("ok"):
+                if error_class == _CRASH_SENTINEL:
+                    raise WorkerCrashedError("STT shared supervisor recycled mid-flight")
+                _raise_worker_error(error_class)
+            result = response["result"]
+            assert isinstance(result, dict)
+            self._model_loaded = True
+            return TranscribeResponse(**result)
+        finally:
+            with self._lock:
+                self._pending.pop(job_id, None)
+            self._available.release()
+
+    @property
+    def model_loaded(self) -> bool:
+        return self._model_loaded
+
+    def close(self) -> None:
+        with self._restart_lock:
+            if self._demux_stop is not None:
+                self._demux_stop.set()
+            if self._task_queue is not None:
+                try:
+                    self._task_queue.put_nowait({"type": "stop"})
+                except Exception as exc:  # noqa: BLE001 - best effort shutdown
+                    logger.debug(
+                        "Shared supervisor graceful stop failed",
+                        extra={"err_class": type(exc).__name__},
+                    )
+            if self._process is not None:
+                self._process.join(timeout=2)
+                if self._process.is_alive():
+                    self._kill_process(self._process)
+
+
 def build_worker_pool(settings: Settings) -> WorkerPool:
     if settings.worker_backend == "inline":
         return InlineWorkerPool(settings)
+    if settings.worker_backend == "shared":
+        return SharedModelWorkerPool(settings)
     return ProcessWorkerPool(settings)
