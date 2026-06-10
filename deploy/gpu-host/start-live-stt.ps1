@@ -7,7 +7,10 @@ param(
     [int]$Port = 8200,
     # Full path required: the task runs as SYSTEM, whose PATH does not include
     # per-user Python installs. install.ps1 resolves and passes this.
-    [string]$PythonExe = "python"
+    [string]$PythonExe = "python",
+    # Whisper model cache. SYSTEM's own cache is empty; install.ps1 passes the
+    # installing user's ~\.cache\huggingface so models are not re-downloaded.
+    [string]$HfHome = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +27,11 @@ $env:STT_LOG_LEVEL = "INFO"
 # on a GPU host. Align it so health reflects the real device.
 $env:STT_DEVICE = "cuda"
 $env:STT_COMPUTE_TYPE = "float16"
+
+if ($HfHome) {
+    $env:HF_HOME = $HfHome
+    $env:HUGGINGFACE_HUB_CACHE = Join-Path $HfHome "hub"
+}
 
 Set-Location $svc
 # Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native

@@ -47,6 +47,12 @@ foreach ($t in $tasks) {
 $pythonExe = (Get-Command python -ErrorAction Stop).Source
 Write-Host "Using Python: $pythonExe"
 
+# Whisper models are cached per-user (~\.cache\huggingface). SYSTEM has its own
+# empty cache and would re-download gigabytes on first start — point the task at
+# the installing user's cache instead.
+$hfHome = Join-Path $env:USERPROFILE ".cache\huggingface"
+Write-Host "Using HF cache: $hfHome"
+
 # A service port already in use means a manually started instance is running;
 # the task's uvicorn would fail to bind. Refuse and tell the operator.
 foreach ($port in 8200, 8300) {
@@ -59,8 +65,11 @@ foreach ($port in 8200, 8300) {
 
 foreach ($t in $tasks) {
     $scriptPath = Join-Path $deployDir $t.Script
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RepoRoot `"$RepoRoot`" -PythonExe `"$pythonExe`""
+    $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RepoRoot `"$RepoRoot`" -PythonExe `"$pythonExe`""
+    if ($t.Name -eq "platform-ai-live-stt") {
+        $arg += " -HfHome `"$hfHome`""
+    }
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet `
