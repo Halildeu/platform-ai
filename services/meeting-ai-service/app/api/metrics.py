@@ -18,6 +18,7 @@ class AnalyzeResult(str, Enum):
     IO_ERROR = "io_error"  # 500
     TIMEOUT = "timeout"  # 504
     NOT_IMPLEMENTED = "not_implemented"  # 501 (LLM stub)
+    BACKEND_ERROR = "backend_error"  # 502 (LLM backend unreachable/unusable)
 
 
 router = APIRouter()

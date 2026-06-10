@@ -32,6 +32,13 @@ class AnalysisDraft:
     action_items: list[ActionItem] = field(default_factory=list)
 
 
+class BackendUnavailableError(RuntimeError):
+    """Raised when a real LLM backend is unreachable or returns unusable output.
+
+    Message must stay transcript-free (KVKK): only error class/HTTP detail.
+    """
+
+
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 # Turkish + English cue words (lowercased match).
@@ -130,17 +137,25 @@ class OllamaAnalyzer:
             # Strip markdown code fences if Ollama wraps JSON
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip())
             data = json.loads(cleaned)
-        except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
-            raise RuntimeError(f"Ollama backend error: {exc}") from exc
+            draft = AnalysisDraft(
+                summary=str(data.get("summary", "")),
+                decisions=[str(d) for d in data.get("decisions", [])],
+                action_items=[
+                    ActionItem(text=str(a.get("text", "")), owner=a.get("owner"))
+                    for a in data.get("action_items", [])
+                ],
+            )
+        except httpx.HTTPError as exc:
+            # Transcript-free message (KVKK): class name + endpoint only.
+            raise BackendUnavailableError(
+                f"Ollama unreachable or returned HTTP error ({type(exc).__name__})"
+            ) from exc
+        except (json.JSONDecodeError, TypeError, KeyError, AttributeError) as exc:
+            raise BackendUnavailableError(
+                f"Ollama returned unparseable output ({type(exc).__name__})"
+            ) from exc
 
-        return AnalysisDraft(
-            summary=data.get("summary", ""),
-            decisions=data.get("decisions", []),
-            action_items=[
-                ActionItem(text=a.get("text", ""), owner=a.get("owner"))
-                for a in data.get("action_items", [])
-            ],
-        )
+        return draft
 
     @property
     def model_loaded(self) -> bool:
