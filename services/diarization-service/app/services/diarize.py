@@ -4,17 +4,22 @@ Issue #48 skeleton: the public API stays small — submit audio bytes, receive a
 `DiarizeResponse`. Two backends:
 
 - `mock` (default): deterministic speaker turns, no model/token needed, so the
-  skeleton is runnable and unit-testable on CPU.
-- `pyannote`: real pyannote.audio pipeline — intentionally a stub here; wiring
-  it needs a Hugging Face token + model download and is a follow-up.
+  service is runnable and unit-testable on CPU without heavy deps.
+- `pyannote`: real pyannote.audio pipeline (#48). Requires DIA_HF_TOKEN and
+  `pip install -r requirements-pyannote.txt`; lazy-loads on first request.
 
 No voiceprint/biometric storage in this phase.
 """
 
 from __future__ import annotations
 
+import contextlib
+import os
+import tempfile
+import threading
 import time
 import wave
+from collections.abc import Callable
 from io import BytesIO
 from typing import Protocol
 
@@ -91,21 +96,93 @@ class MockDiarizer:
         return True
 
 
-class PyannoteDiarizer:
-    """Real pyannote.audio backend — not wired in the #48 skeleton."""
+def _default_pipeline_factory(settings: Settings) -> object:
+    """Load the real pyannote.audio pipeline (import deferred: heavy deps)."""
+    from pyannote.audio import Pipeline
 
-    def __init__(self, settings: Settings) -> None:
+    pipeline = Pipeline.from_pretrained(
+        settings.model_name,
+        use_auth_token=settings.hf_token,
+    )
+    if settings.device == "cuda":
+        import torch  # type: ignore[import-not-found]
+
+        pipeline.to(torch.device("cuda"))
+    return pipeline
+
+
+class PyannoteDiarizer:
+    """Real pyannote.audio backend (#48).
+
+    The pipeline is lazy-loaded on first request (model download / GPU init
+    happens once). Inference is single-flight behind a lock: pyannote
+    pipelines are not guaranteed thread-safe. Output is anonymous
+    SPEAKER_XX turn labels only — no embeddings / voiceprints are stored or
+    returned (KVKK boundary for this phase).
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        pipeline_factory: Callable[[Settings], object] | None = None,
+    ) -> None:
         self._settings = settings
+        self._pipeline_factory = pipeline_factory or _default_pipeline_factory
+        self._pipeline: object | None = None
+        self._lock = threading.Lock()
+
+    def _ensure_pipeline(self) -> object:
+        if self._pipeline is None:
+            with self._lock:
+                if self._pipeline is None:
+                    self._pipeline = self._pipeline_factory(self._settings)
+        assert self._pipeline is not None
+        return self._pipeline
 
     def diarize(self, raw_audio: bytes) -> DiarizeResponse:
-        raise NotImplementedError(
-            "pyannote backend is not wired yet; run with DIA_BACKEND=mock. "
-            "Real pipeline needs a Hugging Face token + model download (follow-up)."
+        s = self._settings
+        pipeline = self._ensure_pipeline()
+        start = time.perf_counter()
+
+        # pyannote consumes a file path; spool the upload to a temp wav.
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        try:
+            tmp.write(raw_audio)
+            tmp.close()
+            with self._lock:
+                annotation = pipeline(tmp.name)  # type: ignore[operator]
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp.name)
+
+        segments: list[SpeakerSegment] = []
+        labels: set[str] = set()
+        last_end = 0.0
+        for segment, _track, label in annotation.itertracks(yield_label=True):
+            speaker = str(label)
+            labels.add(speaker)
+            seg_start = float(segment.start)
+            seg_end = float(segment.end)
+            last_end = max(last_end, seg_end)
+            segments.append(
+                SpeakerSegment(speaker=speaker, start=round(seg_start, 3), end=round(seg_end, 3))
+            )
+
+        duration = _wav_duration_sec(raw_audio, fallback=last_end)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return DiarizeResponse(
+            segments=segments,
+            num_speakers=len(labels),
+            duration=round(duration, 3),
+            elapsed_ms=elapsed_ms,
+            model=s.model_name,
+            device=s.device,
+            backend="pyannote",
         )
 
     @property
     def model_loaded(self) -> bool:
-        return False
+        return self._pipeline is not None
 
 
 def build_diarizer(settings: Settings) -> Diarizer:

@@ -42,14 +42,7 @@ def test_non_wav_falls_back_to_default_duration() -> None:
 
 def test_build_diarizer_selects_backend() -> None:
     assert isinstance(build_diarizer(_settings(backend="mock")), MockDiarizer)
-    assert isinstance(build_diarizer(_settings(backend="pyannote")), PyannoteDiarizer)
-
-
-def test_pyannote_stub_raises() -> None:
-    diar = PyannoteDiarizer(_settings(backend="pyannote"))
-    assert diar.model_loaded is False
-    try:
-        diar.diarize(make_wav(2.0))
-    except NotImplementedError:
-        return
-    raise AssertionError("expected NotImplementedError")
+    # pyannote backend requires an HF token (validated in config).
+    assert isinstance(
+        build_diarizer(_settings(backend="pyannote", hf_token="hf_test")), PyannoteDiarizer
+    )

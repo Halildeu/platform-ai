@@ -10,7 +10,7 @@ No voiceprint / biometric enrolment in this phase (separate consent flow).
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,8 @@ class Settings(BaseSettings):
       DIA_MODEL_NAME      pyannote pipeline id (default: pyannote/speaker-diarization-3.1)
       DIA_DEVICE          cpu / cuda (default: cpu — PoC)
       DIA_BACKEND         mock / pyannote (default: mock)
+      DIA_HF_TOKEN        Hugging Face token (REQUIRED when backend=pyannote;
+                          gated model access — never logged)
       DIA_MAX_AUDIO_MB    50 (default — DoS guard)
       DIA_MAX_SPEAKERS    10 (default — cardinality cap)
       DIA_LOG_LEVEL       INFO (default)
@@ -40,6 +42,7 @@ class Settings(BaseSettings):
     model_name: str = Field(default="pyannote/speaker-diarization-3.1")
     device: str = Field(default="cpu", description="cpu / cuda")
     backend: str = Field(default="mock", pattern="^(mock|pyannote)$")
+    hf_token: str = Field(default="", repr=False, description="HF token for gated pyannote models")
     max_audio_mb: int = Field(default=50, ge=1, le=500)
     max_speakers: int = Field(default=10, ge=1, le=50)
     log_level: str = Field(default="INFO")
@@ -47,6 +50,15 @@ class Settings(BaseSettings):
     mock_num_speakers: int = Field(default=2, ge=1, le=50)
     mock_turn_sec: float = Field(default=2.5, gt=0.0, le=60.0)
     mock_default_duration_sec: float = Field(default=6.0, gt=0.0, le=3600.0)
+
+    @model_validator(mode="after")
+    def _pyannote_requires_token(self) -> Settings:
+        """Fail fast at startup: the gated pyannote pipeline needs a HF token."""
+        if self.backend == "pyannote" and not self.hf_token:
+            raise ValueError(
+                "DIA_BACKEND=pyannote requires DIA_HF_TOKEN " "(gated Hugging Face model access)"
+            )
+        return self
 
 
 _settings: Settings | None = None

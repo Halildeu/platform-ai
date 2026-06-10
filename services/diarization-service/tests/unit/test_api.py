@@ -40,14 +40,18 @@ def test_diarize_wrong_content_type_400() -> None:
     assert resp.status_code == 400
 
 
-def test_diarize_pyannote_backend_501(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_diarize_pyannote_without_token_fails_fast(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """#48: pyannote backend without DIA_HF_TOKEN fails at config time —
+    misconfiguration is caught at startup, not as a runtime 5xx."""
+    import pydantic
+    import pytest
+
+    from app.core.config import Settings
+
     monkeypatch.setenv("DIA_BACKEND", "pyannote")
-    with TestClient(app) as client:
-        resp = client.post(
-            "/diarize",
-            files={"audio": ("a.wav", make_wav(2.0), "audio/wav")},
-        )
-    assert resp.status_code == 501
+    monkeypatch.delenv("DIA_HF_TOKEN", raising=False)
+    with pytest.raises(pydantic.ValidationError):
+        Settings()
 
 
 def test_health_ok() -> None:
