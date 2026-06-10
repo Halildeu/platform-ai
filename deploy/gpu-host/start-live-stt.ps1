@@ -33,6 +33,20 @@ if ($HfHome) {
     $env:HUGGINGFACE_HUB_CACHE = Join-Path $HfHome "hub"
 }
 
+# CUDA runtime DLLs (cudnn/cublas) are pip-installed under site-packages\nvidia\*\bin
+# and found via the user's PATH at inference time. SYSTEM's PATH has none of them,
+# so model load succeeds but the first transcribe throws ("Draft pass error").
+$sitePackages = Join-Path (Split-Path $PythonExe -Parent) "Lib\site-packages"
+$nvidiaRoot = Join-Path $sitePackages "nvidia"
+if (Test-Path $nvidiaRoot) {
+    $dllDirs = Get-ChildItem -Path $nvidiaRoot -Directory |
+        ForEach-Object { Join-Path $_.FullName "bin" } |
+        Where-Object { Test-Path $_ }
+    if ($dllDirs) {
+        $env:Path = ($dllDirs -join ";") + ";" + $env:Path
+    }
+}
+
 Set-Location $svc
 # Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native
 # stderr lines in error records, which $ErrorActionPreference=Stop turns into
