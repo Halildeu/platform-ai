@@ -12,10 +12,8 @@ from __future__ import annotations
 
 from enum import Enum
 
-from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
-
 from fastapi import APIRouter, Response
-
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 # ── Result enum (canonical set — Codex rev 019e8846) ──────────────────────────
 
@@ -101,6 +99,12 @@ stt_timeout_total = Counter(
     "stt_timeout_total",
     "Transcribe 504 timeout count",
     ["model"],
+)
+
+stt_worker_killed_total = Counter(
+    "stt_worker_killed_total",
+    "STT worker processes killed and respawned",
+    ["reason"],
 )
 
 stt_oom_total = Counter(

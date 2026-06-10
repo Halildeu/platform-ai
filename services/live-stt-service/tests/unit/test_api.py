@@ -152,6 +152,17 @@ def test_transcribe_worker_crash_maps_to_503(client) -> None:  # type: ignore[no
     assert "worker crashed" in r.json()["detail"].lower()
 
 
+def test_transcribe_worker_timeout_maps_to_504(client) -> None:  # type: ignore[no-untyped-def]
+    """Worker timeout is a controlled 504 failure."""
+    from app.services.worker import WorkerTimeoutError
+
+    _force_service_error(client, exc_to_raise=WorkerTimeoutError("timeout"))
+
+    r = client.post("/transcribe", files={"audio": ("c.wav", b"X" * 50, "audio/wav")})
+    assert r.status_code == 504
+    assert "timeout" in r.json()["detail"].lower()
+
+
 # ─── Codex 019e8846 absorb: metrics enum + format normalisation + PII patterns ──────
 
 

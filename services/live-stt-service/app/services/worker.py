@@ -29,10 +29,16 @@ class WorkerCrashedError(RuntimeError):
     """Raised when a child process exits before returning a response."""
 
 
+class WorkerTimeoutError(TimeoutError):
+    """Raised after a timed-out worker is terminated/killed and respawned."""
+
+
 class WorkerPool(Protocol):
     """Minimal interface used by TranscribeService."""
 
-    def transcribe(self, audio: BinaryIO | str) -> TranscribeResponse:
+    def transcribe(
+        self, audio: BinaryIO | str, timeout_sec: float | None = None
+    ) -> TranscribeResponse:
         """Run one transcription."""
 
     @property
@@ -190,7 +196,9 @@ class InlineWorkerPool:
             )
         return self._model
 
-    def transcribe(self, audio: BinaryIO | str) -> TranscribeResponse:
+    def transcribe(
+        self, audio: BinaryIO | str, timeout_sec: float | None = None
+    ) -> TranscribeResponse:
         model = self._ensure_model()
         payload = _audio_payload(audio)
         return TranscribeResponse(**_transcribe_with_model(model, self._cfg, payload))
@@ -247,12 +255,26 @@ class _WorkerSlot:
             self.process.join(timeout=2)
         self.process = None
 
+    def kill_for_timeout(self, grace_sec: float) -> None:
+        if self.process is not None and self.process.is_alive():
+            self.process.terminate()
+            self.process.join(timeout=grace_sec)
+            if self.process.is_alive():
+                self.process.kill()
+                self.process.join(timeout=grace_sec)
+        self.process = None
+        self.task_queue = self.ctx.Queue(maxsize=1)
+        self.result_queue = self.ctx.Queue(maxsize=1)
+        self.model_loaded = False
+        self.start()
+
 
 class ProcessWorkerPool:
     """Small supervised process pool with single-flight workers."""
 
     def __init__(self, settings: Settings) -> None:
         self._cfg = _WorkerConfig.from_settings(settings)
+        self._kill_grace_sec = settings.worker_kill_grace_sec
         self._slots = [
             _WorkerSlot(self._cfg, index=i) for i in range(settings.worker_max_workers)
         ]
@@ -282,10 +304,13 @@ class ProcessWorkerPool:
             self._busy.discard(slot.index)
         self._available.release()
 
-    def transcribe(self, audio: BinaryIO | str) -> TranscribeResponse:
+    def transcribe(
+        self, audio: BinaryIO | str, timeout_sec: float | None = None
+    ) -> TranscribeResponse:
         slot = self._acquire_slot()
         try:
             job_id = str(uuid.uuid4())
+            deadline = time.monotonic() + timeout_sec if timeout_sec is not None else None
             slot.task_queue.put(
                 {"type": "transcribe", "job_id": job_id, "audio": _audio_payload(audio)}
             )
@@ -293,8 +318,16 @@ class ProcessWorkerPool:
                 if not slot.is_alive():
                     slot.restart()
                     raise WorkerCrashedError("STT worker exited before response")
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        slot.kill_for_timeout(self._kill_grace_sec)
+                        raise WorkerTimeoutError("STT worker exceeded timeout")
+                    wait_sec = min(0.2, remaining)
+                else:
+                    wait_sec = 0.2
                 try:
-                    response = slot.result_queue.get(timeout=0.2)
+                    response = slot.result_queue.get(timeout=wait_sec)
                 except queue.Empty:
                     continue
                 if response.get("job_id") != job_id:

@@ -27,9 +27,11 @@ class TranscribeService:
         self._settings = settings
         self._worker_pool = worker_pool or build_worker_pool(settings)
 
-    def transcribe(self, audio: BinaryIO | str) -> TranscribeResponse:
+    def transcribe(
+        self, audio: BinaryIO | str, timeout_sec: float | None = None
+    ) -> TranscribeResponse:
         """Run inference and return API response."""
-        return self._worker_pool.transcribe(audio)
+        return self._worker_pool.transcribe(audio, timeout_sec=timeout_sec)
 
     @property
     def model_loaded(self) -> bool:
