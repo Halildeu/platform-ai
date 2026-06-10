@@ -198,9 +198,7 @@ async def transcribe_endpoint(
             detail=f"Audio {size_mb:.1f} MB > limit {settings.max_audio_mb} MB",
         )
     if not raw:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Empty audio body"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty audio body")
 
     service: TranscribeService = get_service(settings)
     corr_id: str = _correlation_id_from_request(request)
