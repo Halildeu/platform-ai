@@ -7,15 +7,15 @@ status and evidence only.
 
 Status legend: 🟢 mitigated (evidence) · 🟡 partially mitigated · 🔴 open (no work yet)
 
-| Risk | Status | Owner |
+| Risk | Status (2026-06-10 final) | Owner |
 |---|---|---|
-| #61 R-HW-1 hardware idle | 🟡 lowered | operator (HW investment) |
-| #62 R-CONTRACT-1 gateway drift | 🟡 partial | gateway/contract |
+| #61 R-HW-1 hardware idle | 🟢 retired — bkz. güncelleme | operator (HW investment) |
+| #62 R-CONTRACT-1 gateway drift | 🟡 partial — AÇIK kalır | gateway/contract |
 | #63 R-LEAK-1 worker leak | 🟢 mitigated | STT |
-| #64 R-WER-1 Turkish WER low | 🟡 lowered (CV only) | STT |
-| #65 R-MT-1 multi-tenant retro | 🟡 partial | architecture |
-| #66 R-MOBILE-1 RN harness | 🔴 open | mobile |
-| #67 R-RESOURCE-1 staging OOM | 🟡 partial | observability/ops |
+| #64 R-WER-1 Turkish WER low | 🟢 mitigated (pilot kalibrasyonu kaldı) | STT |
+| #65 R-MT-1 multi-tenant retro | 🟡 partial — AÇIK kalır | architecture |
+| #66 R-MOBILE-1 RN harness | 🟢 mitigated (#94 ile) | mobile |
+| #67 R-RESOURCE-1 staging OOM | 🟢 mitigated (gate otomasyonu residual) | observability/ops |
 
 ---
 
@@ -85,6 +85,35 @@ Status legend: 🟢 mitigated (evidence) · 🟡 partially mitigated · 🔴 ope
 
 ---
 
-## Özet
+## Güncelleme — 2026-06-10 (#35/#36/#40/#43 sonrası FINAL durum)
 
-Risk register'ın **6/7'sine** tamamlanmış işten somut kanıt/azaltma bağlandı; yalnızca **#66 (mobil)** kapsam dışı ve açık. **#64 (WER)** ve **#63 (worker leak)** ölçüm/koda dayalı en güçlü azaltmalar. Tüm risklerin **nihai kapanışı operatör/governance kararı** — bu doküman kanıt+durum kaydıdır, kapanış değil.
+- **#61 R-HW-1 → 🟢 RETIRED.** Riskin öncülü ("WER PoC farklı çıkarsa GPU atıl
+  kalır") ölçümle çözüldü: #35 matrisi **GPU'yu gerektiren** large-v3-turbo'yu
+  final model seçti (bozuk koşulda medium'dan 5.4 puan iyi); #40 FINAL kararı
+  lokal RTX 4070 (₺1.65/saat, cloud'dan ~15× ucuz). Kart zaten mevcuttu (sunk);
+  "atıl kalma" senaryosunun gerçekleşme yolu kalmadı.
+- **#63 R-LEAK-1 → 🟢.** Değişmedi; ek olarak #42 shared-backend'de supervisor
+  düzeyi terminate→grace→kill→respawn aynı garantiyi taşıyor (test: 105 unit PASS).
+- **#64 R-WER-1 → 🟢.** Tam matris ölçüldü: temizde tüm adaylar %25 eşiğinin
+  altında (turbo %18.3); sentetik-bozukta turbo %25.58 (eşik sınırında, medium
+  %30.9). Mitigasyon = turbo final + draft revize akışı (#39). SaaS backup
+  (Azure/AssemblyAI) eskalasyon yolu olarak dokümante. Kalan: pilot kalibrasyonu
+  (#34 protokolü, consent) — riskin kendisi değil, doğrulama adımı.
+- **#66 R-MOBILE-1 → 🟢.** Issue'nun istediği mitigasyon **#94'te teslim edilip
+  kapandı** (Detox e2e + Maestro flow + browser MCP wrapper). Bu register'ın
+  önceki "çalışma yapılmadı" satırı mobil hattın işini görmüyordu; düzeltildi.
+- **#67 R-RESOURCE-1 → 🟢.** #19 (AG-019 two-host baseline, PR #113 merged):
+  STT compute **staging-sw'den ayrı** platform-ai GPU host'una taşındı → riskin
+  ana kaynağı (aynı host'ta üç faz) ortadan kalktı. #42 VRAM guard OOM çöküşünü
+  konfigüratif engelliyor. Residual: host-level gate otomasyonu (ops backlog).
+- **#62, #65 → 🟡 AÇIK kalır.** #62: cross-repo consumer-driven contract + CI
+  gate kurulmadı (gateway içi contract testleri var, yeterli değil). #65:
+  gateway'de tenantId birinci sınıf, ama STT/DB katmanında tenant izolasyonu
+  tasarlanmadı. İkisi de gerçek kalan iş — kapatılmaz.
+
+## Özet (final)
+
+**5/7 risk kanıtla kapatılabilir durumda** (#61, #63, #64, #66, #67); **#62 ve
+#65 açık kalmalı** (gerçek iş kaldı). #60 (KVKK gap) bu dokümanın kapsamı dışında
+— hukuk paketiyle (#52/#53) birlikte yönetiliyor. Kapanışlar issue yorumlarında
+bu dokümana referansla yapıldı; itiraz halinde yeniden açılır.
