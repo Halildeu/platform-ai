@@ -1,0 +1,323 @@
+"""Subprocess worker pool for Whisper inference.
+
+PR-stt-03 / #20 scope:
+- Whisper inference runs in `multiprocessing.Process` workers by default.
+- Each worker is single-flight: one inference at a time.
+- The parent supervises worker liveness and respawns a crashed worker.
+- The model is lazy-loaded once inside each worker process.
+"""
+
+from __future__ import annotations
+
+import logging
+import multiprocessing as mp
+import queue
+import threading
+import time
+import uuid
+from dataclasses import dataclass
+from io import BytesIO
+from typing import Any, BinaryIO, Protocol
+
+from app.core.config import Settings
+from app.models.schemas import TranscribeResponse
+
+logger = logging.getLogger(__name__)
+
+
+class WorkerCrashedError(RuntimeError):
+    """Raised when a child process exits before returning a response."""
+
+
+class WorkerPool(Protocol):
+    """Minimal interface used by TranscribeService."""
+
+    def transcribe(self, audio: BinaryIO | str) -> TranscribeResponse:
+        """Run one transcription."""
+
+    @property
+    def model_loaded(self) -> bool:
+        """Whether at least one worker has loaded the model."""
+
+
+@dataclass(frozen=True)
+class _WorkerConfig:
+    model_name: str
+    compute_type: str
+    device: str
+    language: str
+    beam_size: int
+    vad_filter: bool
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> _WorkerConfig:
+        return cls(
+            model_name=settings.model_name,
+            compute_type=settings.compute_type,
+            device=settings.device,
+            language=settings.language,
+            beam_size=settings.beam_size,
+            vad_filter=settings.vad_filter,
+        )
+
+
+def _audio_payload(audio: BinaryIO | str) -> dict[str, bytes | str | None]:
+    if isinstance(audio, str):
+        return {"path": audio, "bytes": None}
+    return {"path": None, "bytes": audio.read()}
+
+
+def _audio_from_payload(payload: dict[str, bytes | str | None]) -> BytesIO | str:
+    path = payload.get("path")
+    if isinstance(path, str):
+        return path
+    raw = payload.get("bytes")
+    if not isinstance(raw, bytes):
+        raw = b""
+    return BytesIO(raw)
+
+
+def _transcribe_with_model(
+    model: object, cfg: _WorkerConfig, audio_payload: dict[str, bytes | str | None]
+) -> dict[str, Any]:
+    language = None if cfg.language == "auto" else cfg.language
+    start = time.perf_counter()
+    segments_iter, info = model.transcribe(  # type: ignore[attr-defined]
+        _audio_from_payload(audio_payload),
+        language=language,
+        beam_size=cfg.beam_size,
+        vad_filter=cfg.vad_filter,
+    )
+    segments = [
+        {
+            "id": idx,
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text.strip(),
+            "avg_logprob": getattr(seg, "avg_logprob", None),
+            "no_speech_prob": getattr(seg, "no_speech_prob", None),
+        }
+        for idx, seg in enumerate(segments_iter)
+    ]
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    full_text = " ".join(str(s["text"]) for s in segments).strip()
+    return {
+        "text": full_text,
+        "language": info.language,
+        "language_probability": info.language_probability,
+        "duration": info.duration,
+        "elapsed_ms": elapsed_ms,
+        "model": cfg.model_name,
+        "compute_type": cfg.compute_type,
+        "device": cfg.device,
+        "segments": segments,
+    }
+
+
+def _raise_worker_error(error_class: str) -> None:
+    if error_class == "MemoryError":
+        raise MemoryError(error_class)
+    if error_class == "OSError":
+        raise OSError(error_class)
+    if error_class == "ValueError":
+        raise ValueError(error_class)
+    raise RuntimeError(error_class)
+
+
+def _worker_main(
+    cfg: _WorkerConfig,
+    task_queue: Any,
+    result_queue: Any,
+) -> None:
+    model: object | None = None
+    while True:
+        task = task_queue.get()
+        if task.get("type") == "stop":
+            return
+
+        job_id = str(task["job_id"])
+        try:
+            if model is None:
+                from faster_whisper import WhisperModel
+
+                logger.info(
+                    "Loading Whisper model in worker",
+                    extra={
+                        "model": cfg.model_name,
+                        "device": cfg.device,
+                        "compute_type": cfg.compute_type,
+                    },
+                )
+                model = WhisperModel(
+                    cfg.model_name,
+                    device=cfg.device,
+                    compute_type=cfg.compute_type,
+                )
+            payload = task["audio"]
+            assert isinstance(payload, dict)
+            result_queue.put(
+                {
+                    "job_id": job_id,
+                    "ok": True,
+                    "result": _transcribe_with_model(model, cfg, payload),
+                }
+            )
+        except BaseException as exc:  # noqa: BLE001 - child must report sanitized class
+            result_queue.put(
+                {
+                    "job_id": job_id,
+                    "ok": False,
+                    "error_class": type(exc).__name__,
+                }
+            )
+
+
+class InlineWorkerPool:
+    """In-process backend used by tests; production default is process."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._cfg = _WorkerConfig.from_settings(settings)
+        self._model: object | None = None
+
+    def _ensure_model(self) -> object:
+        if self._model is None:
+            from faster_whisper import WhisperModel
+
+            self._model = WhisperModel(
+                self._cfg.model_name,
+                device=self._cfg.device,
+                compute_type=self._cfg.compute_type,
+            )
+        return self._model
+
+    def transcribe(self, audio: BinaryIO | str) -> TranscribeResponse:
+        model = self._ensure_model()
+        payload = _audio_payload(audio)
+        return TranscribeResponse(**_transcribe_with_model(model, self._cfg, payload))
+
+    @property
+    def model_loaded(self) -> bool:
+        return self._model is not None
+
+
+class _WorkerSlot:
+    def __init__(self, cfg: _WorkerConfig, index: int) -> None:
+        self.cfg = cfg
+        self.index = index
+        self.ctx = mp.get_context("spawn")
+        self.task_queue: Any = self.ctx.Queue(maxsize=1)
+        self.result_queue: Any = self.ctx.Queue(maxsize=1)
+        self.process: Any | None = None
+        self.model_loaded = False
+        self.start()
+
+    def start(self) -> None:
+        self.process = self.ctx.Process(
+            target=_worker_main,
+            args=(self.cfg, self.task_queue, self.result_queue),
+            name=f"stt-worker-{self.index}",
+            daemon=True,
+        )
+        self.process.start()
+
+    def is_alive(self) -> bool:
+        return self.process is not None and self.process.is_alive()
+
+    def restart(self) -> None:
+        self.stop()
+        self.task_queue = self.ctx.Queue(maxsize=1)
+        self.result_queue = self.ctx.Queue(maxsize=1)
+        self.model_loaded = False
+        self.start()
+
+    def stop(self) -> None:
+        if self.process is None:
+            return
+        if self.process.is_alive():
+            try:
+                self.task_queue.put_nowait({"type": "stop"})
+                self.process.join(timeout=2)
+            except Exception as exc:  # noqa: BLE001 - best effort shutdown
+                logger.debug(
+                    "Worker graceful stop failed",
+                    extra={"err_class": type(exc).__name__},
+                )
+        if self.process.is_alive():
+            self.process.terminate()
+            self.process.join(timeout=2)
+        self.process = None
+
+
+class ProcessWorkerPool:
+    """Small supervised process pool with single-flight workers."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._cfg = _WorkerConfig.from_settings(settings)
+        self._slots = [
+            _WorkerSlot(self._cfg, index=i) for i in range(settings.worker_max_workers)
+        ]
+        self._available = threading.BoundedSemaphore(value=len(self._slots))
+        self._lock = threading.Lock()
+        self._next_slot = 0
+        self._busy: set[int] = set()
+
+    def _acquire_slot(self) -> _WorkerSlot:
+        self._available.acquire()
+        with self._lock:
+            for offset in range(len(self._slots)):
+                idx = (self._next_slot + offset) % len(self._slots)
+                if idx not in self._busy:
+                    self._busy.add(idx)
+                    self._next_slot = (idx + 1) % len(self._slots)
+                    slot = self._slots[idx]
+                    if not slot.is_alive():
+                        logger.warning("Respawning crashed STT worker", extra={"worker": idx})
+                        slot.restart()
+                    return slot
+        self._available.release()
+        raise RuntimeError("No STT worker slot available")
+
+    def _release_slot(self, slot: _WorkerSlot) -> None:
+        with self._lock:
+            self._busy.discard(slot.index)
+        self._available.release()
+
+    def transcribe(self, audio: BinaryIO | str) -> TranscribeResponse:
+        slot = self._acquire_slot()
+        try:
+            job_id = str(uuid.uuid4())
+            slot.task_queue.put(
+                {"type": "transcribe", "job_id": job_id, "audio": _audio_payload(audio)}
+            )
+            while True:
+                if not slot.is_alive():
+                    slot.restart()
+                    raise WorkerCrashedError("STT worker exited before response")
+                try:
+                    response = slot.result_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if response.get("job_id") != job_id:
+                    continue
+                if not response.get("ok"):
+                    _raise_worker_error(str(response.get("error_class", "RuntimeError")))
+                result = response["result"]
+                assert isinstance(result, dict)
+                slot.model_loaded = True
+                return TranscribeResponse(**result)
+        finally:
+            self._release_slot(slot)
+
+    @property
+    def model_loaded(self) -> bool:
+        return any(slot.model_loaded for slot in self._slots)
+
+    def close(self) -> None:
+        for slot in self._slots:
+            slot.stop()
+
+
+def build_worker_pool(settings: Settings) -> WorkerPool:
+    if settings.worker_backend == "inline":
+        return InlineWorkerPool(settings)
+    return ProcessWorkerPool(settings)

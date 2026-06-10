@@ -19,6 +19,7 @@ def settings() -> Settings:
         language="tr",
         beam_size=5,
         vad_filter=True,
+        worker_backend="inline",
     )
 
 

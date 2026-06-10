@@ -141,6 +141,17 @@ def test_transcribe_error_message_sanitized(client) -> None:  # type: ignore[no-
     assert "RuntimeError" in r.json()["detail"]
 
 
+def test_transcribe_worker_crash_maps_to_503(client) -> None:  # type: ignore[no-untyped-def]
+    """Worker process crash is a service-side failure, not client bad audio."""
+    from app.services.worker import WorkerCrashedError
+
+    _force_service_error(client, exc_to_raise=WorkerCrashedError("worker exited"))
+
+    r = client.post("/transcribe", files={"audio": ("c.wav", b"X" * 50, "audio/wav")})
+    assert r.status_code == 503
+    assert "worker crashed" in r.json()["detail"].lower()
+
+
 # ─── Codex 019e8846 absorb: metrics enum + format normalisation + PII patterns ──────
 
 

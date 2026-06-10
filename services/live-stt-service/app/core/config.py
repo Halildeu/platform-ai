@@ -23,6 +23,8 @@ class Settings(BaseSettings):
       STT_VAD_FILTER       True (default — Whisper built-in VAD)
       STT_MAX_AUDIO_MB     50 (default — DoS guard)
       STT_LOG_LEVEL        INFO (default)
+      STT_WORKER_MAX_WORKERS 1 (default, subprocess worker pool size)
+      STT_WORKER_BACKEND    process / inline (default: process)
       STT_REQUEST_TIMEOUT  60 (default — sec, hard cap)
     """
 
@@ -45,6 +47,8 @@ class Settings(BaseSettings):
     # Lower bound 1s allows test-suite to assert timeout behaviour without slow sleeps;
     # production deploys should keep the default (60s) or higher per K8s readiness probe.
     request_timeout: int = Field(default=60, ge=1, le=300)
+    worker_max_workers: int = Field(default=1, ge=1, le=8)
+    worker_backend: str = Field(default="process", pattern="^(process|inline)$")
 
 
 _settings: Settings | None = None

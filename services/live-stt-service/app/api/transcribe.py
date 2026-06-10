@@ -31,6 +31,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import Settings, get_settings
 from app.models.schemas import TranscribeResponse
 from app.services.transcribe import TranscribeService, get_service
+from app.services.worker import WorkerCrashedError
 from app.api.metrics import (
     AudioFormat,
     TranscribeResult,
@@ -92,9 +93,9 @@ def _redact_log_value(value: str) -> str:
     return result
 
 
-def _log_extra(corr_id: str, **kwargs) -> dict:
+def _log_extra(corr_id: str, **kwargs: object) -> dict[str, object]:
     """Build structured log extra dict with correlation_id and PII redaction."""
-    extra = {"correlation_id": corr_id}
+    extra: dict[str, object] = {"correlation_id": corr_id}
     for k, v in kwargs.items():
         if isinstance(v, str):
             redacted = _redact_log_value(v)
@@ -208,6 +209,15 @@ async def transcribe_endpoint(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Resource exhaustion (memory)",
+        ) from exc
+    except WorkerCrashedError as exc:
+        logger.error(
+            "Transcribe worker crashed",
+            extra=_log_extra(corr_id, **log_meta, err_class=_sanitize_error(exc, corr_id)),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="STT worker crashed",
         ) from exc
     except (ValueError, RuntimeError) as exc:
         # faster-whisper raises RuntimeError on bad audio decode + inference,
