@@ -20,4 +20,7 @@ $log = Join-Path $logDir ("live-stt-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
 $env:STT_LOG_LEVEL = "INFO"
 
 Set-Location $svc
-& $PythonExe -m uvicorn app.main:app --host 0.0.0.0 --port $Port *>> $log
+# Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native
+# stderr lines in error records, which $ErrorActionPreference=Stop turns into
+# an immediate exit on the very first INFO line.
+& cmd.exe /c "`"$PythonExe`" -m uvicorn app.main:app --host 0.0.0.0 --port $Port >> `"$log`" 2>&1"
