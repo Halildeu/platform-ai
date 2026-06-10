@@ -140,7 +140,8 @@ async def stream_endpoint(
         try:
             text = await run_in_threadpool(final_service.transcribe_array, audio, True)
         except Exception as exc:  # noqa: BLE001 - keep stream alive, fall back to draft
-            logger.warning("Final pass error", extra={"err_class": type(exc).__name__})
+            # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
+            logger.warning("Final pass error err_class=%s", type(exc).__name__, exc_info=True)
             await send_debug("final_error", error=type(exc).__name__)
             text = last_draft
 
@@ -246,7 +247,10 @@ async def stream_endpoint(
             try:
                 draft = await run_in_threadpool(live_service.transcribe_array, live_audio, False)
             except Exception as exc:  # noqa: BLE001 - skip this tick, keep stream alive
-                logger.warning("Draft pass error", extra={"err_class": type(exc).__name__})
+                # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
+                logger.warning(
+                    "Draft pass error err_class=%s", type(exc).__name__, exc_info=True
+                )
                 await send_debug("draft_error", error=type(exc).__name__)
                 continue
 
