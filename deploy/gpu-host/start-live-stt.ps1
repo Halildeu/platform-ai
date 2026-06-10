@@ -19,6 +19,12 @@ $log = Join-Path $logDir ("live-stt-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
 # KVKK: logs are transcript-free by design (stream.py); do not enable STT_STREAM_DEBUG in prod.
 $env:STT_LOG_LEVEL = "INFO"
 
+# Streaming (live_*/final_*) already defaults to cuda per ADR-0031; the legacy
+# batch /transcribe service defaults to cpu/int8, which makes /health misleading
+# on a GPU host. Align it so health reflects the real device.
+$env:STT_DEVICE = "cuda"
+$env:STT_COMPUTE_TYPE = "float16"
+
 Set-Location $svc
 # Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native
 # stderr lines in error records, which $ErrorActionPreference=Stop turns into
