@@ -59,9 +59,11 @@ Write-Host "Using HF cache: $hfHome"
 # (we are running in the user's environment) and bake them into the task.
 $cudaDirs = @()
 foreach ($dll in "cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll", "cudnn64_8.dll", "zlibwapi.dll") {
-    $hits = where.exe $dll 2>$null
-    if ($hits) {
-        $cudaDirs += ($hits | ForEach-Object { Split-Path $_ -Parent })
+    # cmd /c keeps where.exe's stderr out of PowerShell's error pipeline
+    # (PS 5.1 + ErrorActionPreference=Stop would abort the install otherwise).
+    $hits = cmd.exe /c "where $dll 2>nul"
+    if ($LASTEXITCODE -eq 0 -and $hits) {
+        $cudaDirs += (@($hits) | ForEach-Object { Split-Path $_ -Parent })
     }
 }
 # pip layout fallback: site-packages\nvidia\*\bin next to the interpreter
