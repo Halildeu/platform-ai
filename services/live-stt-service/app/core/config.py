@@ -7,6 +7,7 @@ consensus gerektirir.
 
 from __future__ import annotations
 
+import socket
 from dataclasses import dataclass
 
 from pydantic import Field
@@ -33,6 +34,10 @@ class Settings(BaseSettings):
       STT_REQUEST_TIMEOUT  60 (default — sec, hard cap)
       STT_WORKER_VRAM_BUDGET_MB     0 (default=disabled; >0 enables CUDA admission)
       STT_WORKER_VRAM_PER_WORKER_MB 2100 (default; measured medium/fp16 on RTX 4070, #42)
+      STT_CHUNK_CONSUMER_ENABLED  False (default; PR-stt-04 #137 gateway stream consumer)
+      STT_REDIS_URL               redis://localhost:6379/0 (staging-sw Redis)
+      STT_CHUNK_STREAM_PREFIX     audio:chunks:p (ADR-0031 D3, 32 partitions)
+      STT_CHUNK_CONSUMER_GROUP    live-stt-v1
     """
 
     model_config = SettingsConfigDict(
@@ -78,6 +83,23 @@ class Settings(BaseSettings):
     # Comma-separated allowed origins for the browser streaming demo; empty =
     # CORS middleware not installed (internal service default).
     cors_origins: str = Field(default="")
+    # ── PR-stt-04 (#137): gateway Redis Streams chunk consumer ────────────────
+    # Contract fixed by platform-backend PR #534 (ADR-0031 D3): 32 partitions
+    # audio:chunks:p00..p31, consumer group live-stt-v1, messageId dedup,
+    # XACK + bounded trim on the consumer, XAUTOCLAIM crash recovery.
+    # Default OFF — CI/CPU paths and the HTTP/WS API are unaffected.
+    chunk_consumer_enabled: bool = Field(default=False)
+    redis_url: str = Field(default="redis://localhost:6379/0")
+    chunk_stream_prefix: str = Field(default="audio:chunks:p")
+    chunk_partition_count: int = Field(default=32, ge=1, le=100)
+    chunk_consumer_group: str = Field(default="live-stt-v1")
+    chunk_consumer_name: str = Field(default_factory=socket.gethostname)
+    chunk_block_ms: int = Field(default=2000, ge=100, le=60000)
+    chunk_batch_size: int = Field(default=16, ge=1, le=1000)
+    chunk_dedup_cache_size: int = Field(default=8192, ge=64, le=1_000_000)
+    chunk_claim_idle_ms: int = Field(default=60_000, ge=1000, le=3_600_000)
+    chunk_claim_every_loops: int = Field(default=30, ge=1, le=10_000)
+    chunk_trim_maxlen: int = Field(default=10_000, ge=100, le=1_000_000)
 
 
 _settings: Settings | None = None

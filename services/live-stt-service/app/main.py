@@ -73,7 +73,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "correlation_id": "startup",
         },
     )
+    # PR-stt-04 (#137): gateway Redis Streams chunk consumer — opt-in only,
+    # daemon thread so the HTTP/WS API stays the primary lifecycle owner.
+    consumer = None
+    consumer_thread = None
+    if settings.chunk_consumer_enabled:
+        import threading
+
+        from app.services.chunk_consumer import (
+            AudioChunkConsumer,
+            LoggingChunkHandler,
+            build_redis_client,
+        )
+
+        consumer = AudioChunkConsumer(settings, build_redis_client(settings), LoggingChunkHandler())
+        consumer_thread = threading.Thread(
+            target=consumer.run, name="chunk-consumer", daemon=True
+        )
+        consumer_thread.start()
+        logger.info(
+            "chunk consumer started",
+            extra={
+                "correlation_id": "startup",
+                "group": settings.chunk_consumer_group,
+                "partitions": settings.chunk_partition_count,
+            },
+        )
     yield
+    if consumer is not None and consumer_thread is not None:
+        consumer.stop()
+        consumer_thread.join(timeout=5)
     logger.info("live-stt-service stopping", extra={"correlation_id": "shutdown"})
 
 
