@@ -61,6 +61,23 @@ class Settings(BaseSettings):
     # figure is the value MEASURED on the target GPU, never an auto-guess.
     worker_vram_budget_mb: int = Field(default=0, ge=0, le=80000)
     worker_vram_per_worker_mb: int = Field(default=2100, ge=1, le=80000)
+    # #128 WebSocket streaming: two-stage models (ADR-0031: draft=medium int8,
+    # final=large-v3-turbo fp16). Lazy-loaded only when /ws/stream is used, so
+    # CPU/CI paths are unaffected by the cuda defaults.
+    live_model_name: str = Field(default="medium", description="fast draft model")
+    live_compute_type: str = Field(default="int8")
+    live_device: str = Field(default="cuda")
+    final_model_name: str = Field(
+        default="deepdml/faster-whisper-large-v3-turbo-ct2",
+        description="accurate final model (ADR-0031)",
+    )
+    final_compute_type: str = Field(default="float16")
+    final_device: str = Field(default="cuda")
+    # Transcript-free verbose debug events over WS (KVKK: default off, #30).
+    stream_debug: bool = Field(default=False)
+    # Comma-separated allowed origins for the browser streaming demo; empty =
+    # CORS middleware not installed (internal service default).
+    cors_origins: str = Field(default="")
 
 
 _settings: Settings | None = None

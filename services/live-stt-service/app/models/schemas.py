@@ -13,9 +13,7 @@ class TranscriptSegment(BaseModel):
     end: float = Field(description="End time (seconds)", ge=0.0)
     text: str = Field(description="Transcribed text")
     avg_logprob: float | None = Field(default=None, description="Mean token log-prob")
-    no_speech_prob: float | None = Field(
-        default=None, description="Probability segment is silence"
-    )
+    no_speech_prob: float | None = Field(default=None, description="Probability segment is silence")
 
 
 class TranscribeResponse(BaseModel):

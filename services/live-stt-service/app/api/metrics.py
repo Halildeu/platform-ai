@@ -17,25 +17,27 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 
 # ── Result enum (canonical set — Codex rev 019e8846) ──────────────────────────
 
+
 class TranscribeResult(str, Enum):
-    SUCCESS      = "success"      # 200
+    SUCCESS = "success"  # 200
     CLIENT_ERROR = "client_error"  # 400 / 413
-    IO_ERROR     = "io_error"      # 500
-    TIMEOUT      = "timeout"       # 504
-    OOM          = "oom"          # 503
+    IO_ERROR = "io_error"  # 500
+    TIMEOUT = "timeout"  # 504
+    OOM = "oom"  # 503
 
 
 # ── Normalised audio format enum (fixed set, cardinality-safe) ─────────────────
 
+
 class AudioFormat(str, Enum):
-    WAV       = "wav"
+    WAV = "wav"
     WEBM_OPUS = "webm-opus"
-    PCM16     = "pcm16"
-    MP3       = "mp3"
-    M4A       = "m4a"
-    OGG       = "ogg"
-    FLAC      = "flac"
-    OTHER     = "other"  # catch-all for unknown / unrecognised
+    PCM16 = "pcm16"
+    MP3 = "mp3"
+    M4A = "m4a"
+    OGG = "ogg"
+    FLAC = "flac"
+    OTHER = "other"  # catch-all for unknown / unrecognised
 
 
 def _normalise_format(content_type: str | None) -> AudioFormat:

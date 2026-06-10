@@ -8,16 +8,16 @@ from __future__ import annotations
 
 import logging
 import uuid
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, cast
 
 from fastapi import FastAPI, Request
-from starlette.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from app import __version__
-from app.api import health, metrics, transcribe
+from app.api import health, metrics, stream, transcribe
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -81,14 +81,28 @@ app = FastAPI(
     title="live-stt-service",
     version=__version__,
     description=(
-        "Faz 24 Meeting Intelligence — Whisper synchronous transcribe (PoC). "
-        "WebSocket streaming + diarization separate services."
+        "Faz 24 Meeting Intelligence — Whisper synchronous transcribe (PoC) "
+        "+ two-stage WebSocket live streaming (#128). Diarization separate."
     ),
     lifespan=lifespan,
 )
 
 app.add_middleware(CorrelationIdMiddleware)
 
+# #128 browser streaming demo: CORS only when explicitly configured.
+_cors = [o.strip() for o in get_settings().cors_origins.split(",") if o.strip()]
+if _cors:
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 app.include_router(health.router, tags=["health"])
 app.include_router(metrics.router, tags=["metrics"])
 app.include_router(transcribe.router, tags=["transcribe"])
+app.include_router(stream.router, tags=["stream"])
