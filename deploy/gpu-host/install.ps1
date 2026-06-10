@@ -53,6 +53,29 @@ Write-Host "Using Python: $pythonExe"
 $hfHome = Join-Path $env:USERPROFILE ".cache\huggingface"
 Write-Host "Using HF cache: $hfHome"
 
+# CUDA runtime DLLs (cublas/cudnn) are resolved through the *user's* PATH at
+# inference time; SYSTEM's PATH lacks them and the first transcribe throws
+# "Library cublas64_12.dll is not found". Resolve their real directories NOW
+# (we are running in the user's environment) and bake them into the task.
+$cudaDirs = @()
+foreach ($dll in "cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll", "cudnn64_8.dll", "zlibwapi.dll") {
+    $hits = where.exe $dll 2>$null
+    if ($hits) {
+        $cudaDirs += ($hits | ForEach-Object { Split-Path $_ -Parent })
+    }
+}
+# pip layout fallback: site-packages\nvidia\*\bin next to the interpreter
+$nvidiaRoot = Join-Path (Split-Path $pythonExe -Parent) "Lib\site-packages\nvidia"
+if (Test-Path $nvidiaRoot) {
+    $cudaDirs += (Get-ChildItem -Path $nvidiaRoot -Directory |
+        ForEach-Object { Join-Path $_.FullName "bin" } | Where-Object { Test-Path $_ })
+}
+$cudaBin = ($cudaDirs | Sort-Object -Unique) -join ";"
+if (-not $cudaBin) {
+    Write-Warning "No CUDA DLL dirs found (cublas64_12.dll not on PATH) - live-stt will fall back to CPU errors. Install CUDA libs or check PATH."
+}
+Write-Host "Using CUDA DLL dirs: $cudaBin"
+
 # A service port already in use means a manually started instance is running;
 # the task's uvicorn would fail to bind. Refuse and tell the operator.
 foreach ($port in 8200, 8300) {
@@ -68,6 +91,7 @@ foreach ($t in $tasks) {
     $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RepoRoot `"$RepoRoot`" -PythonExe `"$pythonExe`""
     if ($t.Name -eq "platform-ai-live-stt") {
         $arg += " -HfHome `"$hfHome`""
+        if ($cudaBin) { $arg += " -CudaBin `"$cudaBin`"" }
     }
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
     $trigger = New-ScheduledTaskTrigger -AtStartup
