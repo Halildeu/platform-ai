@@ -8,3 +8,4 @@ python-multipart==0.0.12
 faster-whisper==1.0.3
 structlog==24.4.0
 prometheus-client==0.21.0
+requests==2.32.5
