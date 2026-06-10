@@ -89,3 +89,39 @@ chosen client wiring. **No code is locked by this document.**
 This document is evidence organization. It does not select a provider, send any
 data anywhere, or wire a real LLM backend. Branch is on the contributor fork
 only; no upstream push.
+
+## Evidence Update (2026-06-10) — measured inputs are now in
+
+The "inputs still required" above are largely satisfied:
+
+| Input | Now measured | Source |
+|---|---|---|
+| STT WER / model choice | draft=medium-int8, final=large-v3-turbo (18.3% clean / 25.6% degraded) | `pr-wer-01-line-35-matrix-report.md`, ADR-0031 |
+| Local GPU capacity | STT toplam ~4.6 GB VRAM (12 GB kartta) → LLM için ~6-7 GB boş | #42 + #35 ölçümleri |
+| Local cost | ₺1.65/saat (elektrik+amorti); STT ile paylaşımlı | `issue-40-hardware-decision-final.md` |
+| KVKK boundary in code | redaction-before-LLM **zorunlu** (env ile kapatılamaz, mock hariç) | meeting-ai `config._enforce_kvkk_redaction_boundary` (#49) |
+
+### Somut kapasite gerçeği (issue metnindeki "Llama 3.3" üzerine dürüst not)
+Issue Option B örneği olarak "Ollama + Llama 3.3" verir; Llama 3.3 = **70B** →
+Q4 quantize bile ~40 GB VRAM ister, RTX 4070 (12 GB) üzerinde STT ile birlikte
+**çalışmaz**. Mevcut donanımda gerçekçi Option B = **8B sınıfı** model
+(örn. `llama3.1:8b` / `qwen2.5:7b`, Q4 ≈ 5 GB) → STT (4.6 GB) yanında sığar.
+
+### Önerilen yol (karar paketi — onay bekler)
+1. **Faz-1 (pilot): Option B — Ollama + 8B-sınıfı model, on-prem.**
+   Veri ülke içinde kalır (Madde 9 hiç tetiklenmez), ek maliyet ~sıfır
+   (mevcut kart), meeting-ai backend'i `ollama` zaten config'de tanımlı.
+   Riski: 8B'nin TR özet kalitesi → ölçülecek (aşağıda).
+2. **Kalite kapısı:** 5-10 redacted transcript üzerinde 8B çıktısı insan
+   değerlendirmesinden geçer (özet doğruluğu / karar-aksiyon yakalama).
+   Yeterliyse Option B kalıcı olur.
+3. **Eskalasyon: Option A (Anthropic/OpenAI), yalnız kalite kapısı geçilemezse.**
+   Kodda redaction zorunlu olduğu için dışarı yalnız redacted metin çıkar;
+   yine de Madde 9 uyumu için #52 hukuk review **ön şart** (standart sözleşme
+   maddeleri / açık rıza değerlendirmesi).
+
+### Bu neden hâlâ "öneri" (issue gereği)
+#54 açıkça **cross-AI consensus + kullanıcı onayı** istiyor. Bu doküman karar
+paketidir; issue, maintainer/müdür onayı ve Codex/Mavis mutabakatı sonrası
+kapanır. Onay gelirse uygulama: meeting-ai `MAI_BACKEND=ollama` + Ollama host
+kurulumu (#55 MinIO ile aynı compose'a eklenebilir) + kalite kapısı koşusu.
