@@ -1,0 +1,30 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "S", "BLE", "A", "C4", "T20", "SIM", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106", "RUF001"]
+"app/services/consumer.py" = ["A002"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*", "redis.*"]
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q -m 'not integration'"
+markers = [
+    "integration: requires an external service such as Redis",
+]
