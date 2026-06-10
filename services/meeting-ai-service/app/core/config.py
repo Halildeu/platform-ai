@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     request_timeout: int = Field(default=60, ge=1, le=300)
     summary_max_chars: int = Field(default=280, ge=40, le=4000)
+    # Option B (Ollama) settings — #54
+    ollama_host: str = Field(default="http://localhost:11434")
+    ollama_model: str = Field(default="llama3.1:8b")
 
     @model_validator(mode="after")
     def _enforce_kvkk_redaction_boundary(self) -> Settings:
