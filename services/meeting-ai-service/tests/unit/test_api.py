@@ -53,6 +53,19 @@ def test_analyze_llm_backend_501(monkeypatch) -> None:  # type: ignore[no-untype
     assert resp.status_code == 501
 
 
+def test_analyze_ollama_down_502(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import httpx
+
+    def _boom(*a, **k):  # type: ignore[no-untyped-def]
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setenv("MAI_BACKEND", "ollama")
+    monkeypatch.setattr(httpx, "post", _boom)
+    with TestClient(app) as client:
+        resp = client.post("/analyze", json={"transcript": "Bir metin."})
+    assert resp.status_code == 502
+
+
 def test_health_ok() -> None:
     with TestClient(app) as client:
         resp = client.get("/health")

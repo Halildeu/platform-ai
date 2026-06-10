@@ -44,9 +44,10 @@ def test_service_redaction_can_be_disabled() -> None:
 
 
 def test_build_analyzer_selects_backend() -> None:
+    from app.services.analyze import OllamaAnalyzer
     assert isinstance(build_analyzer(_settings(backend="mock")), MockAnalyzer)
     assert isinstance(build_analyzer(_settings(backend="anthropic")), LlmStubAnalyzer)
-    assert isinstance(build_analyzer(_settings(backend="ollama")), LlmStubAnalyzer)
+    assert isinstance(build_analyzer(_settings(backend="ollama")), OllamaAnalyzer)
 
 
 def test_llm_stub_raises() -> None:

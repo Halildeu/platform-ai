@@ -1,21 +1,22 @@
 """Meeting analysis service facade.
 
-Issue #49 skeleton. The service ALWAYS redacts PII before handing the transcript
-to an analyzer (mock or a future real LLM), enforcing the KVKK boundary in code.
-
 Backends:
 - `mock` (default): deterministic, keyword-based extractive summary/decisions/
   actions — no LLM call, no API key, unit-testable.
-- `anthropic` / `openai` / `ollama`: real LLM backends — stubs that return 501;
-  wiring needs the ADR-0030 Option A/B decision + secret handling (follow-up).
+- `ollama`: real LLM via local Ollama server (Option B, #54 decision).
+  Transcript never leaves the host — KVKK Madde 9 not triggered.
+- `anthropic` / `openai`: stubs (501); require ADR-0030 legal gate (#52).
 """
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Protocol
+
+import httpx
 
 from app.core.config import Settings
 from app.models.schemas import ActionItem, AnalyzeResponse
@@ -29,6 +30,13 @@ class AnalysisDraft:
     summary: str = ""
     decisions: list[str] = field(default_factory=list)
     action_items: list[ActionItem] = field(default_factory=list)
+
+
+class BackendUnavailableError(RuntimeError):
+    """Raised when a real LLM backend is unreachable or returns unusable output.
+
+    Message must stay transcript-free (KVKK): only error class/HTTP detail.
+    """
 
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -87,17 +95,87 @@ class MockAnalyzer:
         return True
 
 
+_OLLAMA_PROMPT = """\
+Sen Türkçe toplantı tutanakları analiz eden bir asistansın. Aşağıdaki toplantı \
+metnini incele ve JSON formatında yanıt ver.
+
+Metin:
+{transcript}
+
+Lütfen sadece geçerli JSON döndür, başka bir şey ekleme:
+{{
+  "summary": "<maksimum 3 cümle toplantı özeti>",
+  "decisions": ["<karar 1>", "<karar 2>"],
+  "action_items": [
+    {{"text": "<aksiyon açıklaması>", "owner": "<sorumlu kişi veya null>"}}
+  ]
+}}
+"""
+
+
+class OllamaAnalyzer:
+    """Local Ollama LLM backend (Option B, #54). Data stays on-host — no Madde 9 transfer."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    def analyze(self, transcript: str) -> AnalysisDraft:
+        prompt = _OLLAMA_PROMPT.format(transcript=transcript)
+        payload = {
+            "model": self._settings.ollama_model,
+            "prompt": prompt,
+            "stream": False,
+        }
+        try:
+            resp = httpx.post(
+                f"{self._settings.ollama_host}/api/generate",
+                json=payload,
+                timeout=self._settings.request_timeout,
+            )
+            resp.raise_for_status()
+            raw_text = resp.json().get("response", "")
+            # Strip markdown code fences if Ollama wraps JSON
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip())
+            data = json.loads(cleaned)
+            draft = AnalysisDraft(
+                summary=str(data.get("summary", "")),
+                decisions=[str(d) for d in data.get("decisions", [])],
+                action_items=[
+                    ActionItem(text=str(a.get("text", "")), owner=a.get("owner"))
+                    for a in data.get("action_items", [])
+                ],
+            )
+        except httpx.HTTPError as exc:
+            # Transcript-free message (KVKK): class name + endpoint only.
+            raise BackendUnavailableError(
+                f"Ollama unreachable or returned HTTP error ({type(exc).__name__})"
+            ) from exc
+        except (json.JSONDecodeError, TypeError, KeyError, AttributeError) as exc:
+            raise BackendUnavailableError(
+                f"Ollama returned unparseable output ({type(exc).__name__})"
+            ) from exc
+
+        return draft
+
+    @property
+    def model_loaded(self) -> bool:
+        try:
+            r = httpx.get(f"{self._settings.ollama_host}/api/tags", timeout=3)
+            return r.status_code == 200
+        except httpx.HTTPError:
+            return False
+
+
 class LlmStubAnalyzer:
-    """Real LLM backends (Anthropic/OpenAI/Ollama) — not wired in the skeleton."""
+    """Anthropic/OpenAI — stubs; require legal gate (#52/ADR-0030)."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
     def analyze(self, transcript: str) -> AnalysisDraft:
         raise NotImplementedError(
-            f"backend '{self._settings.backend}' is not wired yet; run with "
-            "MAI_BACKEND=mock. Real LLM needs the ADR-0030 Option A/B decision "
-            "+ API key / Ollama host (follow-up)."
+            f"backend '{self._settings.backend}' requires ADR-0030 legal approval (#52). "
+            "Use MAI_BACKEND=mock or MAI_BACKEND=ollama."
         )
 
     @property
@@ -108,6 +186,8 @@ class LlmStubAnalyzer:
 def build_analyzer(settings: Settings) -> Analyzer:
     if settings.backend == "mock":
         return MockAnalyzer(settings)
+    if settings.backend == "ollama":
+        return OllamaAnalyzer(settings)
     return LlmStubAnalyzer(settings)
 
 

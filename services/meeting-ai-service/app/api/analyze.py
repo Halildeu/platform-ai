@@ -21,7 +21,7 @@ from app.api.metrics import (
 )
 from app.core.config import Settings, get_settings
 from app.models.schemas import AnalyzeRequest, AnalyzeResponse
-from app.services.analyze import MeetingAnalysisService, get_service
+from app.services.analyze import BackendUnavailableError, MeetingAnalysisService, get_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ async def analyze_endpoint(
     body: AnalyzeRequest,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> AnalyzeResponse:
-    """Error map: 400 empty, 413 too large, 501 LLM stub, 504 timeout, 500 I/O."""
+    """Error map: 400 empty, 413 too large, 501 LLM stub, 502 backend down, 504 timeout, 500 I/O."""
     transcript = body.transcript
     if len(transcript) > settings.max_transcript_chars:
         raise HTTPException(
@@ -80,6 +80,18 @@ async def analyze_endpoint(
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail="Selected LLM backend is not wired yet",
+        ) from exc
+    except BackendUnavailableError as exc:
+        logger.error(
+            "Analyze backend unavailable",
+            extra={**log_extra, "err_class": type(exc).__name__},
+        )
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.BACKEND_ERROR.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
         ) from exc
     except OSError as exc:
         logger.error(
