@@ -1,35 +1,49 @@
-# #57 Browser Smoke Acceptance — e2e (mobile + web) çalıştırma kılavuzu
+# #57 Browser Smoke Acceptance — e2e (mobile + web)
 
-**Amaç:** Cutover gate G8. Gerçek tarayıcı/mobil istemciden uçtan uca akışın
-kabulü. Harness #94'te teslim edildi (Detox e2e + Maestro flow + browser MCP
-wrapper); bu doküman **kabul senaryolarını ve PASS kriterlerini** sabitler.
+**Amaç:** Cutover gate G8. Gerçek istemciden uçtan uca kabul. İki aşama:
+**Aşama-1** bugünkü kodla koşulabilir (direct-WS yolu, #128/#129);
+**Aşama-2** gateway+mobil zinciri ister (#106 merge + staging şart).
 
-## Web (browser MCP / manuel)
+KVKK sınırının kodda olduğu yer (kriterler buna göre yazıldı — UI'da ham
+transkript görünmesi üründür, redaction **loglarda** ve **LLM girdisinde**dir):
+- Loglar transcript-free (#30, stream.py)
+- meeting-ai: analyzer/LLM yalnız redacted metin görür (#49 guard)
+
+## Aşama-1 — Direct WS + servisler (BUGÜN koşulabilir, GPU host)
 | # | Senaryo | PASS kriteri |
 |---|---|---|
-| W1 | Login → meeting başlat → mikrofon izni | İzin akışı hatasız, oturum açılır |
-| W2 | 30 sn konuşma → canlı draft görünür | İlk partial < 2 sn, draft akışı kesintisiz |
-| W3 | Sessizlik → final segment | Final, draft'ı revize eder; halüsinasyon yok |
-| W4 | Meeting bitir → özet/karar/aksiyon | meeting-ai yanıtı redacted, alanlar dolu |
-| W5 | Transcript'te PII denemesi (test verisi: "TC: 12345678901") | UI'da ***REDACTED_TC*** görünür |
-| W6 | Ağ kopması 5 sn → yeniden bağlanma | Oturum düşmez veya temiz hata + devam |
+| S1 | Mikrofon → `/ws/stream` → canlı draft | `ready` event; ilk `partial` < 2 sn; konuşma boyunca draft güncellenir |
+| S2 | Konuşma sonrası final | `final` event draft'ı revize eder; metin doğru Türkçe |
+| S3 | Sessizlik/müzik → halüsinasyon yok | "izlediğiniz için teşekkürler" tipi artefakt UI'a düşmez |
+| S4 | Transcript → meeting-ai `/analyze` | Yanıtta `redacted: true`; TC/telefon içeren test cümlesi özette `***REDACTED_*` olarak görünür |
+| S5 | Sunucu logları transcript-free | Servis konsolunda konuşulan metinden TEK kelime yok (seq/ms/uzunluk serbest) |
+| S6 | WS kopması → yeniden bağlanma | Yeni bağlantı temiz `ready` alır; servis ayakta kalır |
 
-## Mobile (Detox/Maestro — #94 harness)
+## Aşama-2 — Gateway + Mobile (ÖN ŞART: #106 merge + staging)
 | # | Senaryo | PASS kriteri |
 |---|---|---|
-| M1 | expo-audio capture → WS gateway | Chunk'lar akar, STREAMING state (#102) |
+| G1 | Login → meeting başlat (gateway auth) | Oturum + X-Correlation-Id uçtan uca |
+| G2 | Client → audio-gateway → Redis → live-stt | STREAMING state (#102), chunk admission |
+| M1 | expo-audio capture → WS gateway | Chunk akışı, kayıpsız |
 | M2 | Draft→final state machine UI (#87) | draft/stabilizing/final/revised geçişleri |
-| M3 | Arka plana alma → geri dönme | Kayıt devam veya temiz duraklatma |
-| M4 | Düşük bant genişliği simülasyonu | Backpressure: 429/503 değil, kuyruk |
+| M3 | Arka plana alma → dönüş | Devam veya temiz duraklatma |
+| M4 | Düşük bant simülasyonu | Backpressure kuyruklar, oturum düşmez |
 
-## Çalıştırma
-- Web: staging URL + test hesabı; her senaryo ekran kaydı ile arşivlenir.
-- Mobile: `maestro test flows/` + `detox test` (#94 pipeline); rapor CI artefaktı.
-- **Gerçek kişisel veri KULLANILMAZ** — sabit test cümleleri + sentetik ses.
+Mobil koşular #94 harness'i ile (Detox + Maestro), rapor CI artefaktı.
+**Gerçek kişisel veri kullanılmaz** — sabit test cümleleri.
 
 ## Kabul
-6/6 web + 4/4 mobile PASS → G8 yeşil. Herhangi bir FAIL → cutover bloklanır,
-issue açılır. Sonuçlar bu dosyanın altına tarih+commit ile eklenir.
+- Aşama-1: 6/6 PASS → G8'in direct-WS yarısı yeşil (sonuçlar aşağı işlenir).
+- Aşama-2: 6/6 PASS → G8 tamamen yeşil → #57 kapanır.
+- Herhangi bir FAIL → cutover bloke, issue açılır.
 
 ## Koşu kayıtları
-*(henüz koşulmadı — staging penceresi bekleniyor)*
+### Aşama-1 — (tarih/commit işlenecek)
+| Senaryo | Sonuç | Not |
+|---|---|---|
+| S1 | | |
+| S2 | | |
+| S3 | | |
+| S4 | | |
+| S5 | | |
+| S6 | | |
