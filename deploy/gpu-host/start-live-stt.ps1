@@ -10,7 +10,10 @@ param(
     [string]$PythonExe = "python",
     # Whisper model cache. SYSTEM's own cache is empty; install.ps1 passes the
     # installing user's ~\.cache\huggingface so models are not re-downloaded.
-    [string]$HfHome = ""
+    [string]$HfHome = "",
+    # Semicolon-separated dirs containing cublas/cudnn DLLs, resolved by
+    # install.ps1 from the installing user's PATH (SYSTEM cannot see them).
+    [string]$CudaBin = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,18 +36,11 @@ if ($HfHome) {
     $env:HUGGINGFACE_HUB_CACHE = Join-Path $HfHome "hub"
 }
 
-# CUDA runtime DLLs (cudnn/cublas) are pip-installed under site-packages\nvidia\*\bin
-# and found via the user's PATH at inference time. SYSTEM's PATH has none of them,
-# so model load succeeds but the first transcribe throws ("Draft pass error").
-$sitePackages = Join-Path (Split-Path $PythonExe -Parent) "Lib\site-packages"
-$nvidiaRoot = Join-Path $sitePackages "nvidia"
-if (Test-Path $nvidiaRoot) {
-    $dllDirs = Get-ChildItem -Path $nvidiaRoot -Directory |
-        ForEach-Object { Join-Path $_.FullName "bin" } |
-        Where-Object { Test-Path $_ }
-    if ($dllDirs) {
-        $env:Path = ($dllDirs -join ";") + ";" + $env:Path
-    }
+# CUDA runtime DLLs (cublas/cudnn) are resolved via the user's PATH at inference
+# time; SYSTEM's PATH lacks them ("Library cublas64_12.dll is not found").
+# install.ps1 resolves the real dirs from the installing user's environment.
+if ($CudaBin) {
+    $env:Path = $CudaBin + ";" + $env:Path
 }
 
 Set-Location $svc
