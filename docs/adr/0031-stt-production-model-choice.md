@@ -1,9 +1,29 @@
 # ADR-0031: STT Production Model Choice
 
-- Status: PROVISIONAL - PILOT EVIDENCE PENDING
-- Date: 2026-06-08
+- Status: EVIDENCE-BACKED PROVISIONAL - PILOT CONFIRMATION PENDING
+- Date: 2026-06-08 (evidence update: 2026-06-10)
 - Issue: `#37 [PR-wer-01] ADR girdisi: medium int8 vs large-v3-turbo`
 - Decision scope: STT model roles before Workcube pilot WER evidence is available
+
+## Evidence Update (2026-06-10 — #35/#36 measured on RTX 4070)
+
+The #35 matrix (150 Common Voice TR samples, clean + synthetic-degraded) and
+the #36 triangulation now provide the measured WER this ADR was waiting for:
+
+| Candidate | Clean WER | Degraded WER | p50 | RTF | Peak VRAM |
+|---|---|---|---|---|---|
+| medium-int8 | 20.32% | 30.94% | 349 ms | 0.079 | 2004 MB |
+| large-v3-fp16 | 18.10% | — | 506 ms | 0.110 | 4340 MB |
+| **large-v3-turbo-fp16** | 18.30% | **25.58%** | **307 ms** | **0.069** | 2548 MB |
+
+Confirmed roles: **live draft = `medium-int8`**, **final = `large-v3-turbo`
+(fp16)** — turbo matches large-v3 accuracy within 0.2 pt at ~half the VRAM and
+lower latency than medium, and is markedly more robust under degraded
+conditions (gap widens 2 → 5.4 pt). Sources:
+`docs/pr-wer-01-line-35-matrix-report.md`, `docs/pr-wer-01-line-36-triangulate-report.md`.
+Remaining before full ACCEPTED: real-meeting pilot WER (#34 protocol, consent
+pending) to calibrate absolute numbers; relative ranking is already settled by
+two independent legs.
 
 ## Context
 
