@@ -1,7 +1,9 @@
 # ADR-0032: Transcript/DB Katmanında Tenant İzolasyonu
 
-**Durum:** DRAFT iter-2 — Halil review (2026-06-11): P1 sentinel kaldırıldı,
-P2 tip kuralı eklendi. ACCEPTED kararı maintainer'da.
+**Durum:** ACCEPTED (2026-06-11) — Halil review iter-1 REVISE (P1 sentinel +
+P2 tip) → Zeynep iter-2 absorb (PR #152) → maintainer kabulü. Cross-AI not:
+Codex (OpenAI) ikinci görüşü thread `019eb6ea` ("AGREE-with-fix — sentinel
+pattern kaldır, tip uyumu netleşsin") — iter-2 her iki şartı karşılar.
 
 ## Bağlam
 
@@ -47,6 +49,6 @@ DB şeması, meeting-ai çıktıları) tenant kimliği taşımıyor.
 
 ## Kabul kriterleri (#65 kapanışı için)
 
-- [ ] Bu ADR ACCEPTED'a yükseltilir (operatör onayı)
-- [ ] MinIO anahtar şablonu deploy/minio/README'ye işlenir
+- [x] Bu ADR ACCEPTED'a yükseltilir (operatör onayı — 2026-06-11)
+- [x] MinIO anahtar şablonu deploy/minio/README'ye işlenir (bu PR)
 - [ ] İlk kalıcı transcript yazan PR `tenant_id NOT NULL` ile gelir

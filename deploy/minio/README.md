@@ -15,6 +15,21 @@ Meeting ses chunk'ları ve transcript artefaktları için S3-uyumlu depo.
 `eso-externalsecret.yaml` apply edilir; gateway/transcript-service podları
 `minio-credentials` secret'ından `MINIO_*` env alır (Faz 22-23 ESO deseni).
 
+## Nesne anahtarı şablonu (ADR-0032 — ZORUNLU)
+
+Kalıcılaşan her meeting/transcript nesnesi tenant-prefix'li yazılır:
+
+```
+s3://meetings/{tenant_id}/{meeting_id}/...
+```
+
+- `{tenant_id}` = transport'tan gelen gerçek tenantId'nin **ondalık string**
+  temsili (`str(tenant_id)`, padding yok; kalıcı katman tipi BIGINT NOT NULL).
+  Sentinel/sabit değer YASAK (ADR-0032 karar 1-2).
+- Tenant prefix'i anahtarın İLK segmenti — bucket policy + KVKK md.11
+  (tenant bazlı silme/ihracat) prefix'ten beslenir.
+- "Tenant'sız okuma" yolu tanımlanmaz (ADR-0032 karar 4).
+
 ## KVKK notları
 - Ses/transcript bucket'ları **yalnız ülke-içi** host'ta (#40 kararı, lokal).
 - Erişim yalnız servis hesapları; console insan erişimi audit'lenir.
