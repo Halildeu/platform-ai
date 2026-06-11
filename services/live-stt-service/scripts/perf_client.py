@@ -120,7 +120,7 @@ def main() -> int:
     args = parser.parse_args()
 
     result = run(args.url, args.fixtures_dir, args.pattern, args.timeout)
-    print(json.dumps(result, indent=2, ensure_ascii=False))  # noqa: T201 - CLI output
+    print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result["summary"]["ok"] > 0 else 1
 
 

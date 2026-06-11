@@ -60,7 +60,9 @@ class DirectWhisperService:
     def model_loaded(self) -> bool:
         return self._model is not None
 
-    def transcribe_array(self, audio: np.ndarray, vad: bool) -> str:
+    def transcribe_array(
+        self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
+    ) -> str:
         """Transcribe a float32 PCM buffer; returns joined text.
 
         Decode thresholds follow the GPU demo tuning: no cross-window prompt

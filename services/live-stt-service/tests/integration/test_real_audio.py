@@ -35,7 +35,7 @@ pytestmark = [
 ]
 
 
-def _real_settings() -> "type":
+def _real_settings() -> type:
     """Real settings with medium model (not tiny mock)."""
     # Bypass conftest.py module mock — import real settings
     import sys
