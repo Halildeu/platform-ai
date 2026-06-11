@@ -1,7 +1,7 @@
 # ADR-0032: Transcript/DB Katmanında Tenant İzolasyonu
 
-**Durum:** DRAFT — #65 (R-MT-1) mitigation'ının kalan yarısı. Kabulü
-operatör/maintainer kararı.
+**Durum:** DRAFT iter-2 — Halil review (2026-06-11): P1 sentinel kaldırıldı,
+P2 tip kuralı eklendi. ACCEPTED kararı maintainer'da.
 
 ## Bağlam
 
@@ -20,21 +20,28 @@ DB şeması, meeting-ai çıktıları) tenant kimliği taşımıyor.
 ## Karar (önerilen)
 
 1. **Şema kuralı:** Kalıcılaşan her transcript/özet/karar kaydı `tenant_id`
-   alanını **NOT NULL** taşır. Tek-tenant MVP'de sabit değer yazılır
-   (`workcube`), ama alan ilk günden vardır — retroactive migration yok.
-2. **Nesne anahtarı kuralı (MinIO):** `s3://meetings/{tenant_id}/{meeting_id}/...`
+   alanını **NOT NULL** taşır ve değer **transport'tan gelen gerçek
+   `tenantId`'dir** (#534 producer'ın JWT `companyId`'den yazdığı alan) —
+   olduğu gibi persist edilir; **sentinel/sabit değer YASAK** (iter-1'deki
+   `workcube` sabiti kaldırıldı: transport↔persistence tutarsızlığı ve ileride
+   sabit→gerçek migration'ı üretirdi — ADR'nin önlediği şeyin ta kendisi).
+   MVP'de tek tenant olduğu için değer doğal olarak tekil olur.
+2. **Tip kuralı:** Kalıcı katmanda `tenant_id BIGINT NOT NULL` (JWT
+   `companyId` numeric); MinIO prefix'inde ondalık string temsili kullanılır
+   (`str(tenant_id)`, padding yok).
+3. **Nesne anahtarı kuralı (MinIO):** `s3://meetings/{tenant_id}/{meeting_id}/...`
    — tenant prefix'i anahtarın İLK segmenti; bucket policy'leri prefix bazlı
    kesilebilir (KVKK veri ayrımı da bundan beslenir).
-3. **Sorgu kuralı:** Servis katmanındaki her okuma yolu tenant filtresinden
+4. **Sorgu kuralı:** Servis katmanındaki her okuma yolu tenant filtresinden
    geçer (row-level guard); "tenant'sız okuma" API'si tanımlanmaz.
-4. **Sınır:** Cross-tenant rapor/analitik gereksinimi çıkarsa ayrı, açıkça
+5. **Sınır:** Cross-tenant rapor/analitik gereksinimi çıkarsa ayrı, açıkça
    yetkilendirilmiş bir aggregate servis ister — varsayılan yol DEĞİL.
 
 ## Sonuçlar
 
 - Retroactive multi-tenant maliyeti "tüm şema refactor"dan "konfig + onboarding"
   seviyesine iner (#65 impact'inin sönümlenmesi).
-- MVP'de ek karmaşıklık ~sıfır: tek sabit değer + prefix kuralı.
+- MVP'de ek karmaşıklık ~sıfır: transport zaten değeri taşıyor; prefix kuralı.
 - KVKK: tenant bazlı silme/ihracat (md.11 hakları) prefix/filtre ile
   uygulanabilir hale gelir.
 
