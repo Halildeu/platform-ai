@@ -31,6 +31,23 @@ $env:STT_LOG_LEVEL = "INFO"
 $env:STT_DEVICE = "cuda"
 $env:STT_COMPUTE_TYPE = "float16"
 
+# Operator-validated streaming tuning (PoC "best" run, 2026-06; overrides the
+# ADR-0031 code defaults). Live drafts in fp16, final on full large-v3, and a
+# snappier commit cadence — the deciding factor in perceived latency.
+$env:STT_LIVE_MODEL_NAME = "medium"
+$env:STT_LIVE_DEVICE = "cuda"
+$env:STT_LIVE_COMPUTE_TYPE = "float16"
+$env:STT_FINAL_MODEL_NAME = "large-v3"
+$env:STT_FINAL_DEVICE = "cuda"
+$env:STT_FINAL_COMPUTE_TYPE = "float16"
+$env:STT_LANGUAGE = "tr"
+$env:STT_LIVE_INFER_INTERVAL_MS = "700"
+$env:STT_LIVE_WINDOW_SEC = "3.0"
+$env:STT_FINAL_WINDOW_SEC = "8.0"
+$env:STT_FORCED_COMMIT_SEC = "4.0"
+$env:STT_SILENCE_RMS = "0.025"
+$env:STT_MIN_SPEECH_RMS = "0.03"
+
 if ($HfHome) {
     $env:HF_HOME = $HfHome
     $env:HUGGINGFACE_HUB_CACHE = Join-Path $HfHome "hub"
