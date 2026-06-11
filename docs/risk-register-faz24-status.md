@@ -10,7 +10,7 @@ Status legend: 🟢 mitigated (evidence) · 🟡 partially mitigated · 🔴 ope
 | Risk | Status (2026-06-10 final) | Owner |
 |---|---|---|
 | #61 R-HW-1 hardware idle | 🟢 retired — bkz. güncelleme | operator (HW investment) |
-| #62 R-CONTRACT-1 gateway drift | 🟡 partial — AÇIK kalır | gateway/contract |
+| #62 R-CONTRACT-1 gateway drift | 🟢 CLOSED (producer CDC live; consumer tarafı platform-web#808 / -mobile#12 / -desktop#12) | gateway/contract |
 | #63 R-LEAK-1 worker leak | 🟢 mitigated | STT |
 | #64 R-WER-1 Turkish WER low | 🟢 mitigated (pilot kalibrasyonu kaldı) | STT |
 | #65 R-MT-1 multi-tenant retro | 🟡 partial — AÇIK kalır | architecture |
@@ -29,15 +29,27 @@ Status legend: 🟢 mitigated (evidence) · 🟡 partially mitigated · 🔴 ope
   - #42 VRAM: medium ~2 GB/worker, 8 GB'a 2–3 paralel akış.
 - **Residual:** Nihai yatırım kararı pilot WER (#35/#36) + operatör onayı bekliyor. Cloud bridge hâlâ ara seçenek.
 
-## #62 — R-CONTRACT-1: Gateway contract drift 🟡
+## #62 — R-CONTRACT-1: Gateway contract drift 🟢 (CLOSED 2026-06-11 — strict-tracking'li devir)
 
 - **Risk:** PR-gw-01 kontratı donduktan sonra mobile/web/STT iki yere bağlı → sessiz drift.
 - **Issue mitigation:** Consumer-driven contract test + OpenAPI schema validation + CI gate.
 - **Evidence / current status:**
-  - #106 audio-gateway-service'te **contract testleri mevcut** (`ChunkAdmissionContractTest`, `ChunkDispatchContractTest`, `SessionLifecycleContractTest`, `StartSessionContractTest`).
-  - Sealed `DispatchOutcome` arayüzü (#421) tip-güvenli kontrat sağlıyor.
-  - OpenAPI (`/openapi.json`) HTTP route'ları expose ediyor.
-- **Residual:** Cross-repo (mobile/web/STT) consumer-driven contract + CI gate kurulumu hâlâ açık (ayrı PR'lar).
+  - **Producer-side CDC LIVE:** `docs/contracts/ws-stream-events.schema.json`
+    (Draft 2020-12, prod event'lerde `additionalProperties:false`) + live-stt'de
+    4 contract testi CI gate'inde (gerçek WS handshake + shape + unknown-event
+    reject) — main koşuları yeşil.
+  - Cross-server kontrat iki yanda testli: platform-backend #534 (producer,
+    14/14) + platform-ai #138 (consumer).
+  - #106 audio-gateway contract testleri + sealed `DispatchOutcome` (#421) +
+    OpenAPI expose — önceki kanıtlar geçerli.
+- **Devir (Halil kararı "c", Codex 019eb6ea teyitli):** consumer-side testler
+  istemci streaming implementasyonlarıyla BİRLİKTE gelir; kendi repolarında
+  izlenir: **platform-web#808** (mfe-meeting, Faz 24.12),
+  **platform-mobile#12** (RN/Expo, 24.11), **platform-desktop#12** (Electron,
+  24.13). Şema dağıtım kuralı: canonical `platform-ai/docs/contracts/`;
+  istemciler commit-SHA pin'iyle CI'da fetch+validate; breaking change =
+  version bump + consumer sign-off.
+- **Residual:** Yok (bu repo kapsamında); izleme yukarıdaki 3 istemci issue'sunda.
 
 ## #63 — R-LEAK-1: Worker thread/process leak 🟢
 
