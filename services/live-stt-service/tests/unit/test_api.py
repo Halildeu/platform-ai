@@ -28,7 +28,7 @@ def test_transcribe_happy_path(client) -> None:  # type: ignore[no-untyped-def]
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["text"] == "Merhaba dünya. Toplantı başlıyor."  # noqa: RUF001
+    assert body["text"] == "Merhaba dünya. Toplantı başlıyor."
     assert body["language"] == "tr"
     assert body["duration"] == 2.5
     assert body["model"] == "tiny"

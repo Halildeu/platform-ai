@@ -44,7 +44,7 @@ class _FakeWhisperModel:
         self.calls += 1
         segments = [
             _FakeSeg(0, 0.0, 1.2, "Merhaba dünya."),
-            _FakeSeg(1, 1.2, 2.5, "Toplantı başlıyor."),  # noqa: RUF001
+            _FakeSeg(1, 1.2, 2.5, "Toplantı başlıyor."),
         ]
         return segments, _FakeInfo()
 

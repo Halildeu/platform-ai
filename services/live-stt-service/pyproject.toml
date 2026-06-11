@@ -5,9 +5,14 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "S", "BLE", "A", "C4", "T20", "SIM", "RUF"]
 ignore = ["S101"]  # assert OK in tests
+# Turkish project: dotless-ı etc. in docstrings/fixtures are intentional,
+# not unicode confusable typos (RUF001/RUF002/RUF003).
+allowed-confusables = ["ı", "İ", "ş", "Ş", "ğ", "Ğ", "ö", "Ö", "ü", "Ü", "ç", "Ç"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106"]
+# Operator CLI tools: print is the UI, subprocess spawns are the job.
+"scripts/*" = ["T201", "S603", "S607", "S110", "SIM105"]
 
 [tool.mypy]
 python_version = "3.11"

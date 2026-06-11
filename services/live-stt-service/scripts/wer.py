@@ -24,7 +24,7 @@ def normalize_tr(text: str) -> list[str]:
     `I`/`İ` are mapped explicitly before lowercasing because Python's default
     `str.lower()` does not apply Turkish dotless/dotted-i rules.
     """
-    text = text.replace("İ", "i").replace("I", "ı")  # noqa: RUF001 - intentional TR mapping
+    text = text.replace("İ", "i").replace("I", "ı")
     text = text.lower()
     text = _NON_WORD.sub(" ", text)
     return text.split()

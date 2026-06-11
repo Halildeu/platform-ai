@@ -59,7 +59,7 @@ MIN_INFER_SAMPLES = int(_env_float("STT_MIN_INFER_SEC", 0.5) * SAMPLE_RATE)
 DEBUG_EVERY_SEC = _env_float("STT_DEBUG_EVERY_SEC", 1.0)
 
 
-def _audio_rms(audio: np.ndarray) -> float:
+def _audio_rms(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> float:
     if audio.size == 0:
         return 0.0
     return float(np.sqrt(np.mean(audio**2)))
@@ -104,7 +104,7 @@ async def stream_endpoint(
         extra={"live_model": settings.live_model_name, "final_model": settings.final_model_name},
     )
 
-    buffer = np.zeros(0, dtype=np.float32)
+    buffer: np.ndarray[tuple[int, ...], np.dtype[np.float32]] = np.zeros(0, dtype=np.float32)
     buffer_start_t: float | None = None
     last_live_infer_t = 0.0
     last_debug_t = 0.0

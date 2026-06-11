@@ -91,7 +91,7 @@ def main() -> int:
     args = parser.parse_args()
 
     result = run(args.url, args.audio, args.concurrency, args.timeout)
-    print(json.dumps(result, indent=2))  # noqa: T201 - CLI output
+    print(json.dumps(result, indent=2))
     # Non-zero exit if every request failed, so the orchestrator can react.
     return 0 if result["summary"]["ok"] > 0 else 1
 

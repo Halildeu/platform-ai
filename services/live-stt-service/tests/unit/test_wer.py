@@ -14,7 +14,7 @@ import wer  # noqa: E402
 
 
 def test_normalize_lowercases_turkish() -> None:
-    assert wer.normalize_tr("İSTANBUL Ilık") == ["istanbul", "ılık"]  # noqa: RUF001
+    assert wer.normalize_tr("İSTANBUL Ilık") == ["istanbul", "ılık"]
 
 
 def test_normalize_strips_punctuation() -> None:
@@ -62,7 +62,7 @@ def test_empty_reference_nonempty_hyp_is_one() -> None:
 def test_corpus_micro_average() -> None:
     pairs = [
         ("bir iki üç", "bir iki üç"),  # 0 errors, 3 words
-        ("dört beş", "dört altı"),  # 1 sub, 2 words  # noqa: RUF001
+        ("dört beş", "dört altı"),  # 1 sub, 2 words
     ]
     agg = wer.corpus_wer(pairs)
     assert agg["ref_words"] == 5
