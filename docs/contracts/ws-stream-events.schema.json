@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "platform-ai/ws-stream-events",
+  "title": "live-stt /ws/stream server events (producer contract, #62)",
+  "description": "Consumer-driven contract for web/mobile clients. CI gate: live-stt unit tests validate every event the server emits against this schema. Breaking changes require a version bump + consumer sign-off.",
+  "oneOf": [
+    { "$ref": "#/$defs/loading" },
+    { "$ref": "#/$defs/ready" },
+    { "$ref": "#/$defs/partial" },
+    { "$ref": "#/$defs/final" },
+    { "$ref": "#/$defs/error" },
+    { "$ref": "#/$defs/debug" }
+  ],
+  "$defs": {
+    "loading": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "loading" },
+        "stage": { "enum": ["live_model", "final_model"] }
+      },
+      "required": ["type", "stage"],
+      "additionalProperties": false
+    },
+    "ready": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "ready" },
+        "sample_rate": { "type": "integer", "minimum": 8000 },
+        "live_model": { "type": "string" },
+        "final_model": { "type": "string" }
+      },
+      "required": ["type", "sample_rate", "live_model", "final_model"],
+      "additionalProperties": false
+    },
+    "partial": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "partial" },
+        "seq": { "type": "integer", "minimum": 0 },
+        "confirmed": { "type": "string" },
+        "tentative": { "type": "string" },
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "rms": { "type": "number", "minimum": 0 },
+        "source": { "type": "string" }
+      },
+      "required": ["type", "seq", "confirmed", "tentative", "elapsed_ms", "rms", "source"],
+      "additionalProperties": false
+    },
+    "final": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "final" },
+        "seq": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string" },
+        "reason": { "type": "string" },
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "rms": { "type": "number", "minimum": 0 }
+      },
+      "required": ["type", "seq", "text", "reason", "elapsed_ms", "rms"],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "error" },
+        "msg": { "type": "string" }
+      },
+      "required": ["type", "msg"],
+      "additionalProperties": false
+    },
+    "debug": {
+      "type": "object",
+      "description": "Opt-in only (STT_STREAM_DEBUG); never enabled in prod (KVKK).",
+      "properties": {
+        "type": { "const": "debug" },
+        "event": { "type": "string" }
+      },
+      "required": ["type", "event"],
+      "additionalProperties": true
+    }
+  }
+}

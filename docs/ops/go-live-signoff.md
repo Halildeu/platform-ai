@@ -6,17 +6,17 @@ tarih+kanıt linki işlenir.
 
 | Gate | İçerik | Kanıt | Durum |
 |---|---|---|---|
-| G1 | Kod main'de (STT/GPU/streaming/skeleton'lar) | PR #107-#129 | ✅ 2026-06-10 |
-| G2 | Test deploy GPU doğrulaması | deploy-test, /transcribe 200 | ✅ 2026-06-10 |
+| G1 | Kod main'de (STT/GPU/streaming/skeleton'lar) | PR #107-#147; CI workflow aktif, 4/4 servis yeşil (run 27330362640) | ✅ 2026-06-10 |
+| G2 | GPU host PROD deploy (kalıcı, boot-dayanıklı) | deploy/gpu-host/ (PR #134-#145, Scheduled Tasks); canlı mikrofon e2e PASS | ✅ 2026-06-11 |
 | G3 | Model + donanım kararları | ADR-0031, #40 final | ✅ 2026-06-10 |
-| G4 | Hukuk: ADR-0030 ACCEPTED | #52 paketi: docs/legal/ | ⏳ danışman |
+| G4 | Hukuk: ADR-0030 ACCEPTED | #52 paketi: docs/legal/ | ⏳ danışman/risk kabulü |
 | G5 | VERBIS karar/güncelleme | #53: docs/legal/verbis-... | ⏳ operatör |
-| G6 | LLM Option A/B onayı | #54 paketi main'de | ⏳ müdür+consensus |
+| G6 | LLM Option A/B onayı | #54 CLOSED: Option B operatör onaylı (PR #133), Ollama GPU host'ta canlı | ✅ 2026-06-10 |
 | G7 | MinIO prod kurulumu | #55: deploy/minio/ apply | ⏳ host |
-| G8 | Browser smoke 10/10 PASS | #57: docs/ops/browser-smoke... | ⏳ staging koşusu |
+| G8 | Browser smoke 10/10 PASS | Aşama-1 6/6 PASS; Aşama-2 #106 merge ile bloksuz — runbook: stage2-smoke-runbook.md | ⏳ staging koşusu |
 | G9 | Rollback provası (snapshot restore test) | #58: docs/ops/warm-rollback... | ⏳ prova |
 | G10 | Pilot WER kalibrasyonu (consent sonrası) | #34 protokol, #36 Ek-A | ⏳ consent |
-| G11 | Açık mühendislik riskleri kabul/kapama | #62 (CDC gate), #65 (tenant ADR) | ⏳ karar |
+| G11 | Açık mühendislik riskleri kabul/kapama | #62: cross-server CDC kanıtlı (#534+#138), mobile/web CDC kaldı; #65: ADR-0032 taslak | ⏳ karar |
 
 **İmza bloğu**
 - Teknik hazır beyanı: ____________ (Zeynep) tarih: ______
