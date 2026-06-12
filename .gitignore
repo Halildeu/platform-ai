@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# GPU host local secrets (Stage-2 staging creds etc.) — never committed
+deploy/gpu-host/env.local.ps1
