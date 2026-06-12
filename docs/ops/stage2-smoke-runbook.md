@@ -46,3 +46,21 @@ loglar transcript-free kalır (S5 kuralı Aşama-2'de de geçerli).
   (`audio:chunks:p`, `live-stt-v1`), `STT_CHUNK_CONSUMER_ENABLED=true` mi?
 - Dedup şüphesi → consumer `messageId` (sessionId:chunkSeq) okur, Redis entry
   ID DEĞİL (#534 Javadoc kontratı).
+
+## Koşu sırasında öğrenilen tuzaklar (2026-06-12 — G1/G2 PASS koşusu)
+
+1. **Session gövdesi (#151'deki örnek ESKİ):** doğru şema şudur —
+   `{"meetingId":"MTG-2026-1","deviceId":"<token>","language":"tr","audioFormat":"PCM16","sampleRateHz":16000,"channels":1}`
+   - `audioFormat` kapalı enum: `WAV | WEBM_OPUS | PCM16` (PCM_S16LE DEĞİL)
+   - `meetingId` zorunlu, `^MTG-[0-9]{4}-[0-9]{1,8}$`; `deviceId` zorunlu
+2. **Idempotency-Key:** 16-128 kr, `[A-Za-z0-9._:-]`. PowerShell'de
+   `Get-Date -UFormat %s` Türkçe locale'de VİRGÜLLÜ saniye üretir → geçersiz.
+   Doğrusu: `[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()`.
+3. **PS 5.1 + curl.exe JSON tırnak kıyımı:** body'yi `Invoke-WebRequest
+   -UseBasicParsing -Body '<json>'` ile gönder (curl.exe -d tırnakları bozuyor).
+4. **Chunk header seti** (kaynaktan teyitli): `X-Audio-Chunk-Seq`,
+   `X-Audio-Chunk-Started-At-Ms`, `X-Audio-Format`, `X-Audio-Sample-Rate-Hz`,
+   `X-Audio-Channels`, `X-Audio-Byte-Length` + `Idempotency-Key`,
+   `Content-Type: application/octet-stream`.
+5. **GPU host doğrulaması:** başarı işareti live-stt logunda chunk POST
+   cevabındaki correlationId ile AYNI id'li `chunk_envelope_received` satırı.

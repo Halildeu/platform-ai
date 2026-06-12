@@ -13,7 +13,7 @@ tarih+kanıt linki işlenir.
 | G5 | VERBIS karar/güncelleme | #53: docs/legal/verbis-... | ⏳ operatör |
 | G6 | LLM Option A/B onayı | #54 CLOSED: Option B operatör onaylı (PR #133), Ollama GPU host'ta canlı | ✅ 2026-06-10 |
 | G7 | MinIO prod kurulumu | #55: deploy/minio/ apply | ⏳ host |
-| G8 | Browser smoke 10/10 PASS | Aşama-1 6/6 PASS — Halil KABUL ✓ (2026-06-11); staging kurulumunu Halil tarafı üstlendi (#57 yorumu); Aşama-2'de screenshot+console+network artifact ZORUNLU; parçalı koşu kabul (G1+G2 önce, M1-M4 harness sonrası) | ⏳ staging (Halil kuruyor) |
+| G8 | Browser smoke 10/10 PASS | Aşama-1 6/6 ✓; Aşama-2 G1+G2 **PASS** (2026-06-12, correlation-eşleşmeli e2e — browser-smoke-acceptance.md + #57 ekran kanıtları); kalan yalnız M1-M4 (#94 harness sonrası, parçalı kabul onaylı) | 🟡 M1-M4 kaldı |
 | G9 | Rollback provası (snapshot restore test) | #58: docs/ops/warm-rollback... | ⏳ prova |
 | G10 | Pilot WER kalibrasyonu (consent sonrası) | #34 protokol, #36 Ek-A | ⏳ consent |
 | G11 | Açık mühendislik riskleri kabul/kapama | #62 CLOSED ✓ (producer CDC live + 3 istemci repoya strict-tracking devri); #65 ADR-0032 iter-2 (P1/P2 işlendi, ACCEPTED bekler); YENİ: ADR-0031 D5 amendment — Windows GPU host + Scheduled Tasks deploy modelini mühürle veya k3s geçiş planı (Halil G2 review şartı) | ⏳ karar |
