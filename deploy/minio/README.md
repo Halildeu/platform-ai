@@ -8,8 +8,15 @@ Meeting ses chunk'ları ve transcript artefaktları için S3-uyumlu depo.
 2. `docker compose --profile test up -d` → test :9100 (console :9101)
 3. Doğrula: `curl http://localhost:9100/minio/health/ready` → 200
 4. Bucket'lar (mc ile): `meeting-audio`, `transcripts`, `audit-archive`
-   (audit 7 yıl retention — #32 ile uyumlu lifecycle policy uygula).
-5. Prod aynı akış, `--profile prod`, ayrı kimlikler.
+5. **Retention lifecycle uygula** (KVKK md.4/md.7 — #156 + #53 süre kararı):
+   ```sh
+   mc alias set loc http://localhost:9100 "$MINIO_TEST_ROOT_USER" "$MINIO_TEST_ROOT_PASSWORD"
+   sh setup-lifecycle.sh loc
+   ```
+   → meeting-audio 7 gün / transcripts 365 gün (1 yıl) / audit-archive 2557 gün
+   (~7 yıl). Idempotent (re-run güvenli). Canlı kanıt 2026-06-12: test MinIO
+   3 bucket lifecycle Enabled.
+6. Prod aynı akış, `--profile prod`, ayrı kimlikler + `setup-lifecycle.sh`.
 
 ## k8s tüketicileri
 `eso-externalsecret.yaml` apply edilir; gateway/transcript-service podları
@@ -33,5 +40,12 @@ s3://meetings/{tenant_id}/{meeting_id}/...
 ## KVKK notları
 - Ses/transcript bucket'ları **yalnız ülke-içi** host'ta (#40 kararı, lokal).
 - Erişim yalnız servis hesapları; console insan erişimi audit'lenir.
-- Retention: meeting-audio pilot sonrası silinir (consent şartı, #34);
-  audit-archive 7 yıl (#32).
+- **Retention (otomatik imha — `setup-lifecycle.sh`, #156/#53 karar):**
+  - meeting-audio: **7 gün** (ham ses — transkript-sonrası imha üst sınırı)
+  - transcripts: **365 gün** (1 yıl ham transkript)
+  - audit-archive: **2557 gün** (~7 yıl — #32; #52 hukuk teyidi pending)
+  - Özet/karar/aksiyon (2 yıl) → meeting-ai **DB** retention (MinIO'da değil;
+    DB persistence implement edilince #156 ikinci faz)
+- **VERBIS uyumu**: Süreler sekmesi beyanı ↔ bu lifecycle DAVRANIŞI eşleşmeli
+  (beyan ↔ gerçek uyumsuzluğu KVKK ihlali). VERBIS 13-İşitsel "Diğer:" metni:
+  kamera 1 ay + ses 7 gün + transkript 1 yıl + özet/karar 2 yıl (#53).
