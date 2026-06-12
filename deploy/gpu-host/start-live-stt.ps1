@@ -36,6 +36,16 @@ if ($HfHome) {
     $env:HUGGINGFACE_HUB_CACHE = Join-Path $HfHome "hub"
 }
 
+# Host-local overrides (SECRETS LIVE HERE, never in the repo): if
+# deploy\gpu-host\env.local.ps1 exists it is dot-sourced last, so it can set
+# or override any STT_* env (e.g. STT_CHUNK_CONSUMER_ENABLED + STT_REDIS_URL
+# with the Vault redis_password for the Stage-2 staging run, #151/#57).
+# The file is gitignored; template: env.local.ps1.example.
+$envLocal = Join-Path (Split-Path $PSCommandPath -Parent) "env.local.ps1"
+if (Test-Path $envLocal) {
+    . $envLocal
+}
+
 # CUDA runtime DLLs (cublas/cudnn) are resolved via the user's PATH at inference
 # time; SYSTEM's PATH lacks them ("Library cublas64_12.dll is not found").
 # install.ps1 resolves the real dirs from the installing user's environment.
