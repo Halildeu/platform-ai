@@ -64,3 +64,24 @@ dikkat) + stt-frontend (vite, laptop) `?ws=` parametresiyle.
 
 **Aşama-1 = 6/6 PASS → G8'in direct-WS yarısı YEŞİL.** Kalan: Aşama-2
 (gateway+mobil; ön şart #106 merge + staging).
+
+### Aşama-2 koşusu (parçalı, G1+G2) — 2026-06-12, staging (#151 sonrası)
+Kurulum: audio-gateway k3d-test (testai.acik.com) + Redis Streams staging-sw
+(10.9.10.53:6379, requirepass) + GPU host live-stt consumer
+(`STT_CHUNK_CONSUMER_ENABLED=true`, env.local.ps1 ile — PR #154).
+Persona: faz24-smoke@acik.com. Koşucu: Zeynep (operatör). Gerçek kişisel veri
+kullanılmadı (sentetik 3200B PCM16 chunk — ADR-0031 D2 synthetic istisnası).
+
+| Senaryo | Sonuç | Kanıt |
+|---|---|---|
+| G1 | **PASS** | Keycloak password-grant token (frontend client) → `POST /sessions` **201** + `SES-f954aad7-…`; X-Correlation-Id zinciri: session `5f0c7557…`, chunk `c54663af…` — aynı ID GPU host consumer logunda (aşağıda) |
+| G2 | **PASS** | Chunk POST **200** (`chunkSeq:0, chunkCount:1, replayed:false`) → staging-sw Redis → GPU host: `chunk_envelope_received [c54663af-9ada-4d3c-93f4-d6956a64f3da]` (09:58:34) — client→gateway→Redis→live-stt **correlation eşleşmeli** uçtan uca. Consumer ayrıca D29 kalıntısı 2 chunk'ı bağlanır bağlanmaz tüketti (backlog drain kanıtı) |
+| M1-M4 | ⏳ | #94 mobil harness sonrası ikinci tur (parçalı kabul: Halil onayı, #57) |
+
+Ekran kanıtları (HARD RULE seti): #57 koşu yorumuna eklendi (201 çıktısı,
+chunk 200 çıktısı, GPU log correlation eşleşmesi).
+
+**Negatif yol notları (koşu sırasında doğrulanan korumalar):**
+- Bilinmeyen `audioFormat` (PCM_S16LE) → 400 `AUDIO_GATEWAY_VALIDATION` (kapalı enum çalışıyor)
+- Geçersiz Idempotency-Key karakteri → 400 `AUDIO_GATEWAY_IDEMPOTENCY_INVALID` (regex gate çalışıyor)
+- JWT'siz istek → 401 (D29'da kanıtlı, tekrarlanmadı)
