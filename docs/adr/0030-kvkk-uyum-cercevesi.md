@@ -30,7 +30,7 @@ Option B (Ollama on-prem) ile zaten düştüğünden kalan kapsam dar:
 | Redaction-before-LLM (env ile kapatılamaz) | meeting-ai `_enforce_kvkk_redaction_boundary` (#49) |
 | Transcript-free loglar | stream.py (#30); prod Loki ingestion transcript-free |
 | Ülke-içi işleme (yurt dışı aktarım yok) | #54 Option B (Ollama), VERBIS "Yabancı Ülkeler" boş |
-| Saklama/imha otomasyonu | MinIO lifecycle (#156/#158): ses 7g / transkript 1y / audit 2y/7y |
+| Saklama/imha otomasyonu | MinIO lifecycle (#156/#158): ses 7g / transkript 1y / audit-archive 7y; KVKK m.12 logu 2y (DB, ikinci faz) |
 | Anonim diarizasyon | SPEAKER_XX, voiceprint/biyometrik yok (#48) |
 
 ## Audit retention — İKİ AYRI katman (karıştırma!)
