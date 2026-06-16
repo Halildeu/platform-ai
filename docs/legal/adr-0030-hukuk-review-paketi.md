@@ -15,7 +15,8 @@ diarizasyon (anonim SPEAKER_XX, **voiceprint/biyometrik YOK**) → LLM ile
 | Ses (chunk) | Ülke-içi MinIO, şifreli volume, pilot sonrası imha | deploy/minio + #34 |
 | Transkript | Loglar transcript-free (#30); UI'da PII redaction | stream.py KVKK notları, #97 |
 | PII (TC/IBAN/tel/email/secret) | Regex redaction; **LLM'e gitmeden ÖNCE zorunlu** (env ile kapatılamaz) | meeting-ai `_enforce_kvkk_redaction_boundary` (#49) |
-| Audit | 7 yıl retention, ayrı consumer | #31/#32 |
+| Audit olay kayıtları (audit-archive) | 7 yıl retention (denetim/uyuşmazlık ispatı; scope-limit korunur), ayrı consumer | #31/#32, MinIO lifecycle #158 |
+| KVKK m.12 erişim/işleme logu | 2 yıl retention (kim/ne zaman/hangi kişisel veriye erişti; meeting-ai DB, ikinci faz) | ADR-0030, #156 |
 | Konuşmacı kimliği | Yalnız anonim etiket; enrolment ayrı consent fazına ertelendi | #48 |
 
 ## 3. Consent çerçevesi (hazır şablonlar)
@@ -31,7 +32,9 @@ Katılımcı aydınlatma + açık rıza: `docs/templates/wer-pilot-consent-email
 3. LLM Option A senaryosunda (yurt dışı API, yalnız redacted metin) md.9
    aktarım rejimi: standart sözleşme / açık rıza / yeterlilik — hangisi?
    (Öneri paketi: `docs/issue-54-llm-option-decision-support.md`)
-4. 7 yıl audit retention'ın dayanağı ve kapsam sınırı uygun mu?
+4. **KVKK m.12 erişim/işleme logları (2 yıl önerisi) ile 7 yıllık audit olay
+   kayıtları ayrı saklama rejimleri olarak değerlendirilebilir mi? TTK m.82 /
+   VUK m.253 bunlardan herhangi birine uygulanır mı?**
 5. VERBIS kaydı gerekli mi (bkz. `verbis-bildirim-karari.md`, #53)?
 
 ## 5. İstenen çıktı
