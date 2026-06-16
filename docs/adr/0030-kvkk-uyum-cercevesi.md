@@ -1,6 +1,6 @@
 # ADR-0030: Faz 24 Meeting Intelligence KVKK Uyum Çerçevesi
 
-**Durum:** ACCEPTED (2026-06-12) — hibrit karar (yönetim + teknik değerlendirme,
+**Durum:** ACCEPTED (2026-06-16) — hibrit karar (yönetim + teknik değerlendirme,
 #52). Karar: (b) yönetim risk kabulüyle şimdi ilerle + (a) dış hukuk görüşü
 paralel async başlatıldı. Cross-AI not: #534/#65 review zinciri + Codex teyitleri.
 
@@ -34,7 +34,7 @@ Option B (Ollama on-prem) ile zaten düştüğünden kalan kapsam dar:
 | Anonim diarizasyon | SPEAKER_XX, voiceprint/biyometrik yok (#48) |
 
 ## Audit retention — İKİ AYRI katman (karıştırma!)
-KVKK m.12 / yönetim netleştirmesi (2026-06-12) ile iki ayrı saklama katmanı:
+KVKK m.12 / yönetim netleştirmesi (2026-06-16) ile iki ayrı saklama katmanı:
 
 1. **Audit olay kayıtları (audit-archive)** = **7 yıl.** Dispatcher audit sink;
    denetim/uyuşmazlık ispatı. MinIO `audit-archive` lifecycle 2557g (#158) —
