@@ -1,7 +1,7 @@
 # ADR-0034: Intelligence LLM Backend Flexibility
 
-- Status: EVIDENCE-BACKED PROVISIONAL — G-INT NUMBERS PENDING (GPU pilot)
-- Date: 2026-06-17
+- Status: EVIDENCE-BACKED PROVISIONAL — REAL-MEETING PILOT PENDING
+- Date: 2026-06-17 (G-INT evidence: 2026-06-17, RTX 4070)
 - Issue: `#162 [Faz24 T-C] Intelligence — LLM özet/karar/aksiyon + kaynaklı çıktı` (PR-time ADR)
 - Decision scope: how the Intelligence layer (summary/decisions/actions + ask-AI)
   selects and isolates its LLM backend.
@@ -19,6 +19,23 @@ A regulated customer cannot be forced onto a single deployment mode: some
 tenants require fully on-prem self-host (no data leaves the cluster), others
 accept a private-cloud / transcript-only LLM. The issue is explicit: *"self-host'u
 tek mod yapma"* — do not make self-host the only mode.
+
+## G-INT Evidence (2026-06-17 — RTX 4070, 8 synthetic neutral meetings)
+
+`scripts/intel_eval.py` run against both locally-hosted Ollama models, redaction
+on, `format=json`. Evidence: `docs/evidence/intel-eval-2026-06-17.jsonl`.
+
+| Model | Faithfulness | Action P / R | F1 | p50 |
+|---|---|---|---|---|
+| **llama3.1:8b** | **95.8%** | 68.8% / 62.5% | 58.3% | 13.4 s |
+| qwen2.5:7b | 72.9% | 25.0% / 37.5% | 25.0% | 13.7 s |
+
+**Self-host default = `llama3.1:8b`.** It is markedly more faithful (95.8% vs
+72.9% — qwen fabricates decisions/actions absent from the transcript on this
+set) and stronger on action extraction. The faithfulness result confirms the
+core G-INT claim — grounded, non-hallucinated output — holds on a real on-prem
+LLM. Action precision/recall is mid-range and measured on a *synthetic* set with
+strict token-overlap matching; absolute calibration awaits a real-meeting pilot.
 
 ## Decision
 
@@ -46,10 +63,10 @@ Hard constraints, enforced in code (`app/core/config.py`):
 
 - A tenant switches deployment mode by config (`MAI_BACKEND`), not a code change;
   self-host is one mode among several, satisfying the "tek mod yapma" requirement.
-- G-INT **logic** is testable on CPU today (`scripts/intel_eval.py`, mock backend:
-  faithfulness + action precision/recall/F1 + citation coverage). Real target
-  numbers require running the same runner against `ollama` on the RTX 4070 GPU PC
-  (Kartal) — that is the only remaining step before this ADR is fully ACCEPTED.
+- G-INT is measurable end-to-end: CPU/mock for logic in CI, and real numbers via
+  `intel_eval.py` against `ollama` on the RTX 4070 (measured 2026-06-17, above).
+  The remaining gap to full ACCEPTED is a *real-meeting* pilot (not synthetic) to
+  calibrate absolute action precision/recall.
 - Timestamped citations: `Citation` currently carries the source-sentence char
   span (`start_char`/`end_char`). Mapping to wall-clock timestamps is deferred
   until the transcript carries STT word timings; the char span is the stable join
@@ -57,6 +74,8 @@ Hard constraints, enforced in code (`app/core/config.py`):
 
 ## Status promotion criteria
 
-Promote to **ACCEPTED** when `intel_eval.py` has been run with `MAI_BACKEND=ollama`
-on real meeting transcripts and faithfulness + action precision/recall meet the
-G-INT target. Evidence file: `docs/evidence/intel-eval-<date>.jsonl`.
+Synthetic G-INT numbers are in (2026-06-17, `llama3.1:8b`). Promote to **ACCEPTED**
+when `intel_eval.py` has been run on a **real-meeting** transcript (consent +
+neutral content, recording imha'd after measurement) and faithfulness + action
+precision/recall meet the G-INT target. Evidence file:
+`docs/evidence/intel-eval-<date>.jsonl`.
