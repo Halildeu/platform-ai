@@ -6,3 +6,6 @@ httpx==0.27.2
 ruff==0.6.9
 mypy==1.11.2
 black==24.10.0
+# scripts/ tools (diar_matrix, make_synthetic_diar) use numpy. Not in prod
+# requirements (only pyannote pulled it transitively); needed for tests.
+numpy==2.2.6
