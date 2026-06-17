@@ -29,6 +29,11 @@ import time
 import wave as wave_mod
 from pathlib import Path
 
+from cost import (  # same scripts/ dir — #161 cost/dakika (DRY, reuses #43 model)
+    audio_minutes_per_wall_hour,
+    cost_per_audio_minute,
+    local_cost_per_hour,
+)
 from wer import corpus_wer, normalize_tr  # noqa: F401 - same scripts/ dir
 
 
@@ -72,6 +77,12 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="0 = all")
     ap.add_argument("--beam", type=int, default=5)
     ap.add_argument("--tag", default="", help="label for the JSON result row")
+    # #161 cost/dakika — parametric (operator supplies real numbers, no baked-in
+    # assumptions). elec-price 0 → cost skipped (reported as null).
+    ap.add_argument("--power-w", type=float, default=200.0, help="GPU power draw (W)")
+    ap.add_argument("--elec-price-kwh", type=float, default=0.0, help="price/kWh; 0 = skip cost")
+    ap.add_argument("--hw-cost", type=float, default=0.0, help="hardware cost for amortization")
+    ap.add_argument("--amort-hours", type=float, default=0.0, help="amortization horizon (hours)")
     args = ap.parse_args()
 
     samples_dir = Path(args.samples_dir)
@@ -119,6 +130,17 @@ def main() -> None:
     lat_sorted = sorted(latencies)
     p95 = lat_sorted[min(len(lat_sorted) - 1, int(0.95 * len(lat_sorted)))]
     proc_sec = sum(latencies) / 1000.0
+    rtf_val = proc_sec / audio_sec_total if audio_sec_total else None
+
+    # #161 cost/dakika: only when operator supplies an electricity price; the
+    # #43 cost model (cost.py) turns RTF + power/price into per-audio-minute cost.
+    cost_per_min: float | None = None
+    if args.elec_price_kwh > 0 and rtf_val and rtf_val > 0:
+        cph = local_cost_per_hour(
+            args.power_w, args.elec_price_kwh, args.hw_cost, args.amort_hours
+        )["total"]
+        cost_per_min = round(cost_per_audio_minute(cph, audio_minutes_per_wall_hour(rtf_val)), 5)
+
     row = {
         "tag": args.tag or f"{args.model}-{args.compute}",
         "model": args.model,
@@ -134,14 +156,16 @@ def main() -> None:
         "p50_ms": round(statistics.median(latencies)),
         "p95_ms": round(p95),
         "audio_sec": round(audio_sec_total, 1),
-        "rtf": round(proc_sec / audio_sec_total, 3) if audio_sec_total else None,
+        "rtf": round(rtf_val, 3) if rtf_val else None,
+        "cost_per_audio_min": cost_per_min,
         "model_load_sec": round(load_sec, 1),
         "peak_vram_mb": peak["mb"],
     }
     print(json.dumps(row, ensure_ascii=False))
+    _cost = f", cost/dk {cost_per_min}" if cost_per_min is not None else ""
     print(
         f"== {row['tag']}: WER {float(row['wer']):.2%} on {row['n_samples']} samples, "
-        f"p50 {row['p50_ms']}ms, RTF {row['rtf']}, peak VRAM {row['peak_vram_mb']}MB",
+        f"p50 {row['p50_ms']}ms, RTF {row['rtf']}, peak VRAM {row['peak_vram_mb']}MB{_cost}",
         file=sys.stderr,
     )
 
