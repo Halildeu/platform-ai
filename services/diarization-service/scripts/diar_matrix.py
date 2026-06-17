@@ -102,7 +102,9 @@ def run_pyannote(model: str, device: str, token: str) -> tuple[object, float]:
     _orig_load = torch.load
 
     def _trusted_load(*a: object, **k: object) -> object:
-        k.setdefault("weights_only", False)
+        # Force-override: lightning passes weights_only=True explicitly, so
+        # setdefault is not enough — pyannote weights are trusted.
+        k["weights_only"] = False
         return _orig_load(*a, **k)
 
     torch.load = _trusted_load  # type: ignore[assignment]
