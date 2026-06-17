@@ -93,13 +93,23 @@ def main() -> None:
     ap.add_argument("--turns", type=int, default=9)
     ap.add_argument("--gap-sec", type=float, default=0.4)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument(
+        "--speaker-offset",
+        type=int,
+        default=0,
+        help="pick wavs[offset:offset+num_speakers] — lets a sweep build distinct "
+        "fixtures from different CV-TR voices (more diverse n>1 baseline).",
+    )
     args = ap.parse_args()
 
     src = Path(args.src)
-    wavs = sorted(src.glob("*.wav"))[: args.num_speakers]
+    all_wavs = sorted(src.glob("*.wav"))
+    off = max(0, args.speaker_offset)
+    wavs = all_wavs[off : off + args.num_speakers]
     if len(wavs) < args.num_speakers:
         print(
-            f"need {args.num_speakers} distinct wavs in {src}, found {len(wavs)}",
+            f"need {args.num_speakers} distinct wavs in {src} at offset {off}, "
+            f"found {len(wavs)} (total {len(all_wavs)})",
             file=sys.stderr,
         )
         sys.exit(2)

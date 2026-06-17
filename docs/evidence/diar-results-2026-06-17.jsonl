@@ -1,0 +1,1 @@
+{"tag": "pyannote-3.1", "backend": "pyannote", "model": "pyannote/speaker-diarization-3.1", "device": "cuda", "n_samples": 1, "der": 0.4504, "der_p95": 0.4504, "p50_ms": 866, "p95_ms": 866, "audio_sec": 24.3, "rtf": 0.036, "model_load_sec": 6.7, "peak_vram_mb": 2129}

@@ -1,0 +1,8 @@
+# Alternative diarization backend for diar_matrix.py (#161 "pyannote vs alternatif").
+# SpeechBrain ECAPA speaker embeddings + energy-VAD + cosine clustering.
+# Model: speechbrain/spkrec-ecapa-voxceleb — NON-gated (no HF token needed).
+# Install on the inference host only (heavy: torch):
+#   pip install -r requirements.txt -r requirements-speechbrain.txt
+speechbrain==1.0.2
+torch==2.5.1
+torchaudio==2.5.1
