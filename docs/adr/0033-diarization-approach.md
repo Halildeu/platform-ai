@@ -38,16 +38,18 @@ a model's reputation. Two hard constraints frame the decision:
 
 | Candidate | License | Gated model? | TR DER | Peak VRAM | RTF | Notes |
 |---|---|---|---|---|---|---|
-| **pyannote 3.1** (primary) | MIT (model: gated, free) | yes (HF token) | **50.14%** (n=6, synthetic) | 2155 MB | 0.024 | end-to-end pipeline; wired + measured |
-| **speechbrain ECAPA** (alternative) | Apache-2.0 | **no** (free) | PENDING (harness wired, GPU run pending) | PENDING | PENDING | energy-VAD + ECAPA embeddings + cosine clustering |
+| **pyannote 3.1** (primary) | MIT (model: gated, free) | yes (HF token) | **50.14%** (n=6, synthetic) | 2155 MB | 0.024 | most accurate; end-to-end pipeline |
+| **speechbrain ECAPA** (alternative) | Apache-2.0 | **no** (free) | **56.64%** (n=6, synthetic) | **307 MB** | **0.006** | ~6.5pt worse DER but 7× less VRAM, 9× faster |
 | NeMo | Apache-2.0 | no | PENDING (adapter not wired) | PENDING | PENDING | heavier install; candidate only if pyannote fails target |
 | Cloud (Azure/Google) | commercial | n/a | not measured | n/a | n/a | **m.9 cross-border → ADR-0030 boundary**; rejected unless on-prem fails |
 | VAD-only fallback | — | no | n/a (no speaker sep.) | minimal | minimal | degraded fallback if no GPU model fits |
 
 Both running backends share one harness so the comparison is apples-to-apples
-(same fixtures, same DER scorer). The alternative requirement of #161
-("pyannote vs alternatif") is satisfied by the **speechbrain** column once its
-GPU run lands; NeMo/cloud are compared here on license/VRAM/KVKK criteria.
+(same 6 fixtures, same DER scorer, both on GPU). The alternative requirement of
+#161 ("pyannote vs alternatif") is **met**: pyannote and speechbrain are both
+measured. NeMo/cloud are compared here on license/VRAM/KVKK criteria only.
+Evidence: `docs/pr-diar-01-line-161-matrix-report.md`,
+`docs/evidence/diar-results-2026-06-17.jsonl`.
 
 ## Speaker → person mapping
 
@@ -63,9 +65,12 @@ GPU run lands; NeMo/cloud are compared here on license/VRAM/KVKK criteria.
 
 1. **Placement:** diarization runs as **post-processing batch**, not a live model
    (8 GB constraint). This part is firm regardless of backend choice.
-2. **Backend:** **pyannote 3.1 is the provisional primary**, with **speechbrain
-   ECAPA as the measured alternative**. Final selection is deferred until the
-   sweep (n>1) and the speechbrain run produce comparable DER/VRAM/RTF.
+2. **Backend:** **pyannote 3.1 is the provisional primary** (most accurate:
+   50.14% vs 56.64% DER on the n=6 synthetic set), with **speechbrain ECAPA as a
+   viable lightweight fallback** (7× less VRAM at 307 MB, 9× faster) — attractive
+   under the 8 GB budget if its accuracy proves acceptable on real meetings.
+   Final lock deferred to the pilot DER (absolute numbers; synthetic only settles
+   relative ranking).
 3. **Identity:** anonymous labels canonical; names only via human-confirmed
    overlay (KVKK).
 
@@ -79,11 +84,11 @@ GPU run lands; NeMo/cloud are compared here on license/VRAM/KVKK criteria.
 ## Reopen / Promote-to-ACCEPTED Triggers
 
 Promote only when ALL hold:
-- pyannote sweep (n≥5, mixed 2/3-speaker fixtures) recorded;
-- speechbrain alternative measured on the same fixtures;
+- pyannote sweep (n≥5) recorded — ✅ done (n=6);
+- speechbrain alternative measured on the same fixtures — ✅ done (n=6);
 - a real-meeting (pilot) DER calibrates absolute numbers (gated on go-live #59 /
-  consent, like ADR-0031's pilot leg);
-- chosen backend meets the agreed diarization DER target (G-WER).
+  consent, like ADR-0031's pilot leg) — ⬜ pending;
+- chosen backend meets the agreed diarization DER target (G-WER) — ⬜ pending.
 
 ## Cross-AI Consensus
 
