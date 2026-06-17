@@ -1,0 +1,8 @@
+{"samples": [
+  {"transcript": "Bütçe artışı yönetim kurulunda onaylandı. Ali raporu cuma gününe kadar hazırlayacak.",
+   "expected_decisions": ["Bütçe artışı onaylandı"],
+   "expected_actions": ["Ali raporu hazırlayacak"]},
+  {"transcript": "Yeni ürünün lansmanı eylülde yapılacak. Pazarlama ekibi sunum hazırlayacak.",
+   "expected_decisions": ["Lansman eylülde"],
+   "expected_actions": ["Pazarlama ekibi sunum hazırlayacak"]}
+]}

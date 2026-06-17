@@ -17,7 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from app import __version__
-from app.api import analyze, health, metrics
+from app.api import analyze, ask, health, metrics
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -84,3 +84,4 @@ app.add_middleware(CorrelationIdMiddleware)
 app.include_router(health.router, tags=["health"])
 app.include_router(metrics.router, tags=["metrics"])
 app.include_router(analyze.router, tags=["analyze"])
+app.include_router(ask.router, tags=["ask"])

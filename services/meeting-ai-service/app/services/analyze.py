@@ -19,7 +19,8 @@ from typing import Protocol
 import httpx
 
 from app.core.config import Settings
-from app.models.schemas import ActionItem, AnalyzeResponse
+from app.models.schemas import ActionItem, AnalyzeResponse, Citation
+from app.services.citation import ground_claims
 from app.services.redact import redact_pii
 
 
@@ -207,12 +208,30 @@ class MeetingAnalysisService:
 
         # The analyzer only ever sees redacted text.
         draft = self._analyzer.analyze(redacted)
+
+        # #162: ground every decision/action to a transcript sentence (citation)
+        # and flag the ungrounded ones (hallucination guard). Grounded against the
+        # SAME redacted text the analyzer saw, so claims and sources line up.
+        claims = list(draft.decisions) + [a.text for a in draft.action_items]
+        grounded, ungrounded = ground_claims(claims, redacted)
+        citations = [
+            Citation(
+                claim=c.claim,
+                source_index=c.source_index,
+                source_text=c.source_text,
+                similarity=c.similarity,
+                grounded=c.grounded,
+            )
+            for c in grounded
+        ]
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
         return AnalyzeResponse(
             summary=draft.summary,
             decisions=draft.decisions,
             action_items=draft.action_items,
+            citations=citations,
+            ungrounded_count=ungrounded,
             redacted=self._settings.redact_pii,
             redaction_count=count,
             backend=self._settings.backend,
