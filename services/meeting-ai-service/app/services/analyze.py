@@ -126,6 +126,7 @@ class OllamaAnalyzer:
             "model": self._settings.ollama_model,
             "prompt": prompt,
             "stream": False,
+            "format": "json",  # force structured JSON (llama3.1 else returns prose)
         }
         try:
             resp = httpx.post(
