@@ -89,22 +89,23 @@ if ($built -eq 0) {
 }
 Write-Host "== built $built fixtures; running diar_matrix ($Backend) over them" -ForegroundColor Cyan
 
-# Capture stdout (JSON row) only; stderr (per-file DER + summary) goes to a log.
+# --model only applies to pyannote; speechbrain uses its own (non-gated) default.
+# diar_matrix appends the JSON row itself via --evidence, and we redirect its
+# stdout/stderr to files (robust: avoids PowerShell swallowing captured output).
+$modelArg = if ($Backend -eq "pyannote") { "--model `"$Model`"" } else { "" }
+$outFile = "$env:TEMP\diar_matrix_$Backend.out"
 $runLog = "$env:TEMP\diar_matrix_$Backend.log"
-$json = cmd /c "python scripts\diar_matrix.py --backend $Backend --model `"$Model`" --device cuda --audio-dir `"$Dst`" --tag $Tag 2> `"$runLog`""
+cmd /c "python scripts\diar_matrix.py --backend $Backend $modelArg --device cuda --audio-dir `"$Dst`" --tag $Tag --evidence `"$EvidenceFile`" 1> `"$outFile`" 2> `"$runLog`""
+$code = $LASTEXITCODE
 
-Write-Host "---- diar_matrix stderr (progress) ----" -ForegroundColor DarkGray
-Get-Content $runLog | ForEach-Object { Write-Host $_ -ForegroundColor DarkGray }
+Write-Host "---- diar_matrix progress ----" -ForegroundColor DarkGray
+Get-Content $runLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ -ForegroundColor DarkGray }
 
-if (-not $json) {
-    Write-Error "diar_matrix produced no JSON row — see $runLog"
+$json = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
+if ($code -ne 0 -or -not $json) {
+    Write-Error "diar_matrix failed (exit $code) — see $runLog"
     exit 3
 }
 
-# Append the evidence row (one JSON object per line — same format as wer-results).
-$evDir = Split-Path -Parent $EvidenceFile
-if (-not (Test-Path $evDir)) { New-Item -ItemType Directory -Force -Path $evDir | Out-Null }
-Add-Content -Path $EvidenceFile -Value $json -Encoding utf8
-
 Write-Host "`n== DONE. Appended to $EvidenceFile :" -ForegroundColor Green
-Write-Host $json -ForegroundColor Green
+Write-Host $json.Trim() -ForegroundColor Green

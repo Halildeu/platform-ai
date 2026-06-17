@@ -15,9 +15,13 @@
 
 | Tag | Backend | n | DER | DER p95 | p50 ms | RTF | model_load s | Peak VRAM |
 |---|---|---|---|---|---|---|---|---|
-| pyannote-3.1 (smoke) | pyannote | 1 | **45.04%** | 45.04% | 866 | 0.036 | 6.7 | 2129 MB |
-| pyannote-3.1 (sweep) | pyannote | ≥5 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
-| speechbrain-ecapa | speechbrain | ≥5 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| pyannote-3.1 (smoke) | pyannote | 1 | 45.04% | 45.04% | 866 | 0.036 | 6.7 | 2129 MB |
+| **pyannote-3.1 (sweep)** | pyannote | **6** | **50.14%** | 55.27% | 1290 | 0.024 | 2.9 | 2155 MB |
+| speechbrain-ecapa | speechbrain | 6 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+
+Per-fixture DER (n=6, 2-speaker TR synthetic, varied turns/gap): 46.3 / 54.9 /
+46.1 / 45.1 / 55.3 / 53.2 → mean 50.14%, p95 55.27%. Same fixtures will be
+reused for the speechbrain row (apples-to-apples).
 
 ## Bulgular (şu ana kadar)
 

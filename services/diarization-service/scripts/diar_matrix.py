@@ -347,6 +347,7 @@ def main() -> None:
     ap.add_argument("--tag", default="", help="label for the JSON result row")
     ap.add_argument("--num-speakers", type=int, default=0, help="0 = auto (speechbrain clustering)")
     ap.add_argument("--cluster-threshold", type=float, default=0.7, help="speechbrain cosine cut")
+    ap.add_argument("--evidence", default="", help="if set, append the JSON row to this file")
     args = ap.parse_args()
 
     if args.backend == "nemo":
@@ -426,12 +427,19 @@ def main() -> None:
         "model_load_sec": round(load_sec, 1),
         "peak_vram_mb": peak["mb"],
     }
-    print(json.dumps(row, ensure_ascii=False))
+    line = json.dumps(row, ensure_ascii=False)
+    print(line)
     print(
         f"== {row['tag']}: DER {row['der']:.2%} on {row['n_samples']} samples, "
         f"p50 {row['p50_ms']}ms, RTF {row['rtf']}, peak VRAM {row['peak_vram_mb']}MB",
         file=sys.stderr,
     )
+    if args.evidence:
+        ev = Path(args.evidence)
+        ev.parent.mkdir(parents=True, exist_ok=True)
+        with ev.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        print(f"== appended evidence row → {ev}", file=sys.stderr)
 
 
 if __name__ == "__main__":

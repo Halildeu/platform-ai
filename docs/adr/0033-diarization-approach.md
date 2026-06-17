@@ -38,7 +38,7 @@ a model's reputation. Two hard constraints frame the decision:
 
 | Candidate | License | Gated model? | TR DER | Peak VRAM | RTF | Notes |
 |---|---|---|---|---|---|---|
-| **pyannote 3.1** (primary) | MIT (model: gated, free) | yes (HF token) | smoke **45.04%** (n=1) → sweep PENDING | 2129 MB (n=1) | 0.036 | end-to-end pipeline; wired + measured |
+| **pyannote 3.1** (primary) | MIT (model: gated, free) | yes (HF token) | **50.14%** (n=6, synthetic) | 2155 MB | 0.024 | end-to-end pipeline; wired + measured |
 | **speechbrain ECAPA** (alternative) | Apache-2.0 | **no** (free) | PENDING (harness wired, GPU run pending) | PENDING | PENDING | energy-VAD + ECAPA embeddings + cosine clustering |
 | NeMo | Apache-2.0 | no | PENDING (adapter not wired) | PENDING | PENDING | heavier install; candidate only if pyannote fails target |
 | Cloud (Azure/Google) | commercial | n/a | not measured | n/a | n/a | **m.9 cross-border → ADR-0030 boundary**; rejected unless on-prem fails |
