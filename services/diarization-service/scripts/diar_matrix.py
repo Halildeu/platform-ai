@@ -93,13 +93,25 @@ def _vram_mb() -> int:
 
 def run_pyannote(model: str, device: str, token: str) -> tuple[object, float]:
     """Load pyannote pipeline; return (pipeline, load_sec). Heavy import deferred."""
+    import torch  # type: ignore[import-not-found]
     from pyannote.audio import Pipeline
 
-    t0 = time.perf_counter()
-    pipeline = Pipeline.from_pretrained(model, use_auth_token=token)
-    if device == "cuda":
-        import torch  # type: ignore[import-not-found]
+    # pyannote 3.x checkpoints predate torch 2.6's weights_only=True default.
+    # The official pyannote weights are a trusted source, so load with
+    # weights_only=False just for the pipeline load, then restore the default.
+    _orig_load = torch.load
 
+    def _trusted_load(*a: object, **k: object) -> object:
+        k.setdefault("weights_only", False)
+        return _orig_load(*a, **k)
+
+    torch.load = _trusted_load  # type: ignore[assignment]
+    try:
+        t0 = time.perf_counter()
+        pipeline = Pipeline.from_pretrained(model, use_auth_token=token)
+    finally:
+        torch.load = _orig_load  # type: ignore[assignment]
+    if device == "cuda":
         pipeline.to(torch.device("cuda"))
     return pipeline, time.perf_counter() - t0
 
