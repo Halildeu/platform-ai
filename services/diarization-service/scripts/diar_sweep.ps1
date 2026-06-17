@@ -43,18 +43,30 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not $Tag) { $Tag = "$Backend-sweep" }
 
-# (seed, num-speakers, speaker-offset) — distinct files (seed is the unique key),
-# mixing 2- and 3-speaker conversations and different CV voices for a fairer DER.
+# Adapt to however many distinct single-speaker voices the source has: with only
+# 2 voices we still build several DISTINCT 2-speaker conversations by varying the
+# seed / turn-count / gap (different order + length → real DER variance, n>1).
+# If ≥3 voices exist, some 3-speaker conversations are added automatically.
+$srcWavCount = @(Get-ChildItem -Path (Join-Path $Src "*.wav") -ErrorAction SilentlyContinue).Count
+if ($srcWavCount -lt 2) {
+    Write-Error "need >=2 single-speaker wavs in $Src (found $srcWavCount)"
+    exit 2
+}
+$maxSpk = [Math]::Min(3, $srcWavCount)
+Write-Host "== diar_sweep: backend=$Backend, source voices=$srcWavCount (maxSpeakers=$maxSpk)" -ForegroundColor Cyan
+
+# (seed, num-speakers, turns, gap) — seed is the unique filename key. n is capped
+# at the available voices so nothing is skipped for lack of speakers.
 $combos = @(
-    @{ seed = 11; n = 2; off = 0 },
-    @{ seed = 12; n = 3; off = 0 },
-    @{ seed = 13; n = 2; off = 1 },
-    @{ seed = 14; n = 3; off = 1 },
-    @{ seed = 15; n = 2; off = 2 },
-    @{ seed = 16; n = 3; off = 0 }
+    @{ seed = 11; n = 2; turns = 8; gap = 0.40 },
+    @{ seed = 12; n = 2; turns = 10; gap = 0.30 },
+    @{ seed = 13; n = 2; turns = 6; gap = 0.60 },
+    @{ seed = 14; n = $maxSpk; turns = 9; gap = 0.40 },
+    @{ seed = 15; n = $maxSpk; turns = 12; gap = 0.50 },
+    @{ seed = 16; n = 2; turns = 9; gap = 0.35 }
 )
 
-Write-Host "== diar_sweep: backend=$Backend, building $($combos.Count) fixtures into $Dst" -ForegroundColor Cyan
+Write-Host "== building $($combos.Count) fixtures into $Dst" -ForegroundColor Cyan
 
 # Fresh fixture dir so n reflects exactly this sweep (old files would inflate n).
 if (Test-Path $Dst) { Remove-Item "$Dst\synthetic-diar-*.wav", "$Dst\synthetic-diar-*.rttm" -ErrorAction SilentlyContinue }
@@ -63,11 +75,11 @@ New-Item -ItemType Directory -Force -Path $Dst | Out-Null
 $built = 0
 foreach ($c in $combos) {
     $genLog = "$env:TEMP\diar_gen_$($c.seed).log"
-    cmd /c "python scripts\make_synthetic_diar.py --src `"$Src`" --dst `"$Dst`" --num-speakers $($c.n) --turns 9 --gap-sec 0.4 --seed $($c.seed) --speaker-offset $($c.off) 2> `"$genLog`""
+    cmd /c "python scripts\make_synthetic_diar.py --src `"$Src`" --dst `"$Dst`" --num-speakers $($c.n) --turns $($c.turns) --gap-sec $($c.gap) --seed $($c.seed) 2> `"$genLog`""
     if ($LASTEXITCODE -eq 0) {
         $built++
     } else {
-        Write-Warning "fixture seed=$($c.seed) n=$($c.n) off=$($c.off) skipped: $(Get-Content $genLog -Raw)"
+        Write-Warning "fixture seed=$($c.seed) n=$($c.n) skipped: $(Get-Content $genLog -Raw)"
     }
 }
 
