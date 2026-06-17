@@ -64,6 +64,34 @@ def test_empty_claims_skipped() -> None:
     assert citations == [] and ungrounded == 0
 
 
+def test_no_segments_means_no_timestamp() -> None:
+    # backward-compatible: without STT timing, start_sec stays None
+    sents = split_sentences(TRANSCRIPT)
+    assert all(s.start_sec is None for s in sents)
+    c = ground_claim("Ali raporu hazırlayacak", sents)
+    assert c.start_sec is None
+
+
+def test_segments_attach_timestamp_to_citation() -> None:
+    # STT-style timing → each sentence/citation gets its segment start_sec
+    segments = [
+        {"text": "Bütçe artışı yönetim kurulunda onaylandı.", "start": 0.0, "end": 4.0},
+        {"text": "Ali raporu cuma gününe kadar hazırlayacak.", "start": 4.0, "end": 8.5},
+        {"text": "Bir sonraki toplantı pazartesi yapılacak.", "start": 8.5, "end": 12.0},
+    ]
+    c = ground_claim("Ali raporu hazırlayacak", split_sentences(TRANSCRIPT, segments))
+    assert c.grounded is True
+    assert c.source_index == 1
+    assert c.start_sec == 4.0
+
+    citations, _ = ground_claims(
+        ["Bütçe artışı onaylandı", "Toplantı pazartesi yapılacak"],
+        TRANSCRIPT,
+        segments=segments,
+    )
+    assert [c.start_sec for c in citations] == [0.0, 8.5]
+
+
 def test_service_response_carries_citations() -> None:
     """End-to-end: MeetingAnalysisService grounds mock decisions/actions."""
     from app.core.config import Settings

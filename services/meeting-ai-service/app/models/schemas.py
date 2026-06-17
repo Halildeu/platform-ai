@@ -28,6 +28,9 @@ class Citation(BaseModel):
     source_text: str = Field(default="", description="The transcript sentence it came from")
     similarity: float = Field(description="Token-overlap score with the source", ge=0.0, le=1.0)
     grounded: bool = Field(description="False = ungrounded (possible hallucination)")
+    start_sec: float | None = Field(
+        default=None, description="Source sentence start (sec) when STT timing is available"
+    )
 
 
 class AnalyzeResponse(BaseModel):

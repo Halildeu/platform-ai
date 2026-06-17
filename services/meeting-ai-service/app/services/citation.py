@@ -37,6 +37,7 @@ class Sentence:
     text: str
     start_char: int
     end_char: int
+    start_sec: float | None = None  # wall-clock start when STT timing is provided
 
 
 @dataclass(frozen=True)
@@ -48,10 +49,54 @@ class Citation:
     source_text: str
     similarity: float
     grounded: bool
+    start_sec: float | None = None  # source sentence start (sec), None if no timing
 
 
-def split_sentences(transcript: str) -> list[Sentence]:
-    """Split into sentences, keeping each one's char offset in the transcript."""
+def _segment_spans(
+    transcript: str, segments: list[dict[str, object]]
+) -> list[tuple[int, float]]:
+    """Locate each STT segment in the transcript → (start_char, start_sec), sorted.
+
+    Segments are Whisper-style dicts ({"text","start",...}). The char position is
+    found by searching the transcript so the mapping survives whitespace/joining
+    differences between the segment list and the assembled transcript.
+    """
+    spans: list[tuple[int, float]] = []
+    pos = 0
+    for seg in segments:
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        loc = transcript.find(text, pos)
+        if loc < 0:
+            loc = pos
+        raw_start = seg.get("start", 0.0)
+        start_sec = float(raw_start) if isinstance(raw_start, int | float | str) else 0.0
+        spans.append((loc, start_sec))
+        pos = loc + len(text)
+    return spans
+
+
+def _sec_for_char(start_char: int, spans: list[tuple[int, float]]) -> float | None:
+    """Start-second of the last segment that begins at/before this char offset."""
+    sec: float | None = None
+    for seg_start_char, seg_sec in spans:
+        if seg_start_char <= start_char:
+            sec = seg_sec
+        else:
+            break
+    return sec
+
+
+def split_sentences(
+    transcript: str, segments: list[dict[str, object]] | None = None
+) -> list[Sentence]:
+    """Split into sentences, keeping each one's char offset in the transcript.
+
+    When `segments` (STT timing) is given, each sentence also carries the
+    wall-clock `start_sec` of the segment its offset falls into.
+    """
+    spans = _segment_spans(transcript, segments) if segments else []
     out: list[Sentence] = []
     pos = 0
     idx = 0
@@ -63,7 +108,15 @@ def split_sentences(transcript: str) -> list[Sentence]:
         if start < 0:
             start = pos
         end = start + len(s)
-        out.append(Sentence(index=idx, text=s, start_char=start, end_char=end))
+        out.append(
+            Sentence(
+                index=idx,
+                text=s,
+                start_char=start,
+                end_char=end,
+                start_sec=_sec_for_char(start, spans) if spans else None,
+            )
+        )
         pos = end
         idx += 1
     return out
@@ -98,14 +151,21 @@ def ground_claim(claim: str, sentences: list[Sentence], threshold: float = 0.4) 
         source_text=sentences[best_i].text if grounded else "",
         similarity=round(best_sim, 3),
         grounded=grounded,
+        start_sec=sentences[best_i].start_sec if grounded else None,
     )
 
 
 def ground_claims(
-    claims: list[str], transcript: str, threshold: float = 0.4
+    claims: list[str],
+    transcript: str,
+    threshold: float = 0.4,
+    segments: list[dict[str, object]] | None = None,
 ) -> tuple[list[Citation], int]:
-    """Ground every claim; return (citations, ungrounded_count) — the guard metric."""
-    sentences = split_sentences(transcript)
+    """Ground every claim; return (citations, ungrounded_count) — the guard metric.
+
+    Pass `segments` (STT timing) to attach a `start_sec` to each citation.
+    """
+    sentences = split_sentences(transcript, segments)
     citations = [ground_claim(c, sentences, threshold) for c in claims if c.strip()]
     ungrounded = sum(1 for c in citations if not c.grounded)
     return citations, ungrounded

@@ -200,7 +200,9 @@ class MeetingAnalysisService:
         self._settings = settings
         self._analyzer = analyzer or build_analyzer(settings)
 
-    def analyze(self, transcript: str) -> AnalyzeResponse:
+    def analyze(
+        self, transcript: str, segments: list[dict[str, object]] | None = None
+    ) -> AnalyzeResponse:
         start = time.perf_counter()
         if self._settings.redact_pii:
             redacted, count = redact_pii(transcript)
@@ -213,8 +215,9 @@ class MeetingAnalysisService:
         # #162: ground every decision/action to a transcript sentence (citation)
         # and flag the ungrounded ones (hallucination guard). Grounded against the
         # SAME redacted text the analyzer saw, so claims and sources line up.
+        # Optional STT `segments` attach a wall-clock start_sec to each citation.
         claims = list(draft.decisions) + [a.text for a in draft.action_items]
-        grounded, ungrounded = ground_claims(claims, redacted)
+        grounded, ungrounded = ground_claims(claims, redacted, segments=segments)
         citations = [
             Citation(
                 claim=c.claim,
@@ -222,6 +225,7 @@ class MeetingAnalysisService:
                 source_text=c.source_text,
                 similarity=c.similarity,
                 grounded=c.grounded,
+                start_sec=c.start_sec,
             )
             for c in grounded
         ]

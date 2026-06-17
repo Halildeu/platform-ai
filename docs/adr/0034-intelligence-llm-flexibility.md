@@ -67,10 +67,11 @@ Hard constraints, enforced in code (`app/core/config.py`):
   `intel_eval.py` against `ollama` on the RTX 4070 (measured 2026-06-17, above).
   The remaining gap to full ACCEPTED is a *real-meeting* pilot (not synthetic) to
   calibrate absolute action precision/recall.
-- Timestamped citations: `Citation` currently carries the source-sentence char
-  span (`start_char`/`end_char`). Mapping to wall-clock timestamps is deferred
-  until the transcript carries STT word timings; the char span is the stable join
-  key for that later mapping.
+- Timestamped citations: `Citation` carries the source-sentence char span plus an
+  optional `start_sec`. When `analyze()` is given STT `segments` (Whisper-style
+  `{text,start}`), each citation is stamped with its segment's wall-clock start;
+  without timing it stays `None` (backward compatible). The char span remains the
+  stable join key.
 
 ## Status promotion criteria
 
