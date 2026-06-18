@@ -4,6 +4,9 @@
 > Voiceprint **biyometrik / özel nitelikli kişisel veridir (KVKK m.6).** ADR-0033 amend (#169 MERGED)
 > ile yasak **şarta bağlandı**: kod yazılabilir, **canlı biyometrik işleme bu paket tamamlanmadan AÇILAMAZ.**
 >
+> **Mimari posture (Halil, 2026-06-18):** voiceprint **OPSİYONEL + VARSAYILAN KAPALI** — düşürülmez, inşa edilir;
+> **istendiğinde bağlam-başına GATED açılır** (serbest flip değil — §0.5). Varsayılan = non-biyometrik (sıfır m.6 işleme).
+>
 > **Veri sorumlusu = ŞİRKET** (tüzel kişi). **Halil = veri sorumlusu temsilcisi / karar sahibi** + hukuk danışmanı (teyit + imza).
 > **Bu doküman hukuki görüş DEĞİLDİR** — yapısal süreç iskeleti + danışmana sorular. İnsan/hukuk onayı
 > olmadan "hukuki dayanak" olarak kullanılamaz. Hazırlık: AI ajanı + cross-AI (Codex) istişare, Halil adına.
@@ -19,6 +22,29 @@
 2. Çalışan açık rızası, güç asimetrisi nedeniyle kırılgan → **maliyetsiz opt-out** rızayı özgür kılar (**zorunlu teminat, ama tek başına yeterli DEĞİL**).
 3. Açık rıza olsa BİLE biyometrik işleme **gerekli + orantılı** olmak zorunda — manuel-etiketleme tam çalışıyorken voiceprint neden gerekli? Bu **ayrı değerlendirme** (§1.5) zorunlu.
 4. m.6 ek yükümlülükler: güvenlik tedbirleri (§5.5), consent-enforcement teknik kanıt (§5.6), alt-işleyen/aktarım kontrolü (§5.7), etki değerlendirmesi (§1.5).
+5. **Voiceprint = OPSİYONEL yetenek, VARSAYILAN KAPALI** (§0.5) — düşürülmez, inşa edilir; risk default-off + gated-açma ile yönetilir.
+
+---
+
+## §0.5 — Mimari posture: opsiyonel + default-OFF + gated-enablement (Halil direktifi, 2026-06-18)
+
+**Karar:** Riskli biyometrik voiceprint **düşürülmez — opsiyonel yapılır.** *"Hepsi olacak":* voiceprint dahil
+tüm yetenekler **kodlanır/inşa edilir** (ADR-0033 amend; kod serbest). Risk, **özellik kapısı** ile yönetilir,
+özelliği silerek değil.
+
+- **VARSAYILAN KAPALI:** Varsayılan ürün = non-biyometrik diarizasyon (anonim SPEAKER_xx) + manuel/profil
+  etiketleme. **Varsayılan kurulumda HİÇ biyometrik işleme YOK** → varsayılan dağıtım m.6 açısından zaten
+  uyumlu (özel-nitelikli veri işlenmiyor; bu hâlde gate gerekmez). Bu, *privacy-by-default + veri minimizasyonu*.
+- **"İstendiğinde açılabilsin" = GATED açma, SERBEST FLİP DEĞİL:** Voiceprint'i bir bağlamda
+  (tenant/org/dağıtım) AÇMAK, o bağlam için go-live gate'inin (§7 G2-G12) sağlanmasını gerektiren **açık,
+  denetlenebilir, geri-alınabilir (kill-switch)** bir yönetici aksiyonudur. O bağlam için rıza/gerekçe/güvenlik/
+  imza yoksa açılamaz. Açma kararı + kanıtı **per-bağlam loglanır**.
+- **Sonuç (D7 yeniden çerçeveleme):** Gereklilik/orantılılık artık **global go/no-go DEĞİL, bağlam-başına
+  gerekçe** (§1.5). Yetenek her yerde mevcut ama yalnız **gerekçeli + rızalı** bağlamlarda aktif. "Hepsini inşa
+  et + her açmayı gerekçelendir" — en savunulabilir çerçeve (privacy-by-default + per-context justification).
+- **Teknik:** capability flag `voiceprint.enabled` **default false**; per-bağlam override yalnız gated
+  enablement workflow ile; flag açık olsa bile **rıza yoksa işleme yok** (fail-closed, §5.6); kill-switch ile
+  her an geri-kapatılır (geri-döndürülebilirlik).
 
 ---
 
@@ -42,6 +68,9 @@ uygulanabilir zemin **gibi durur**. Kesin hüküm **danışman teyidine** (D1) b
 ---
 
 ## §1.5 — Gereklilik & Orantılılık (biyometrik için ZORUNLU — en kritik açık)
+
+> **Per-enablement (§0.5):** Bu test artık **global go/no-go DEĞİL** — voiceprint varsayılan KAPALI; gereklilik
+> **her açma (tenant/org/dağıtım) için ayrı** belgelenir. Aşağıdaki değerlendirme her enablement bağlamında yapılır.
 
 **Sorun (Codex'in en güçlü itirazı):** "Manuel-etiketleme ile sistem tam çalışıyor" (§6) diyorsak, danışman/
 denetçi haklı olarak sorar: **o halde biyometrik voiceprint neden gerekli ve orantılı?** Açık rıza biyometriği
@@ -166,7 +195,11 @@ teknik+organizasyonel ayağı.
 
 ---
 
-## §7 — Go-Live Gate (HEPSİ ✓ + imzalı olmadan voiceprint CANLI tanıma YOK)
+## §7 — Per-Enablement Gate (bir bağlamda voiceprint AÇMAK için HEPSİ ✓ + imza; VARSAYILAN KAPALI gate gerektirmez)
+
+> **§0.5 gereği:** Voiceprint varsayılan KAPALI → biyometrik işleme yok → gate gerekmez. Aşağıdaki gate, voiceprint'i
+> **bir bağlamda (tenant/org/dağıtım) AÇMAK** istendiğinde o bağlam için işler; G1-G12 sağlanmadan o bağlamda açılamaz.
+
 
 - [x] **G1 — ADR-0033 amend** (voiceprint şarta-bağlı) — #169 MERGED.
 - [ ] **G2 — Hukuki zemin teyidi** (§1): m.6 açık-rıza-tek-zemin (D1, 7499-sonrası tam set).
@@ -210,7 +243,10 @@ D12 (§2) rıza yenileme + İK no-detriment + baskı-yasağı + şikayet kanalı
   negatif-test, fallback canlı, mimari/aktarım teyidi) — engineering/ops (agent/Zeynep) üretir.
 - **Faz L2 — Go-Live Legal Sign-off**: hukuk + şirket temsilcisi kanıt paketini görerek **G12** imzalar → #168 kapanır → voiceprint canlı açılabilir.
 
-**Önemli sonuç:** D7 cevabı "gereklilik zayıf" çıkarsa, meşru sonuç voiceprint'i **açmamak** (manuel/non-biyometrik ile devam) olabilir — bu da geçerli bir gate çıktısıdır.
+**Önemli sonuç (§0.5 ile):** Voiceprint **VARSAYILAN KAPALI** — yetenek inşa edilir, varsayılan non-biyometrik
+çalışır. D7 cevabı bir bağlamda "gereklilik zayıf" çıkarsa → **o bağlamda AÇMA** (varsayılan ile devam); gerekçe +
+rıza güçlü başka bir bağlamda gated açılabilir. Yani "açmama" global red **değil** — default-off + per-context
+gated açma. Hiçbir bağlamda gerekçe doğmazsa yetenek inşa edilmiş ama uyumadan inert kalır (risk sıfır).
 
 ---
 
