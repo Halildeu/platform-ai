@@ -70,6 +70,24 @@ Hard constraints, enforced in code (`app/core/config.py`):
    the G-INT citation requirement holds for self-host and cloud alike.
 3. **Transcript is never logged** — only lengths/metadata/correlation-id.
 
+### Network boundary — deployment contract (not app-level)
+
+The "no data leaves the cluster" guarantee for `ollama` is enforced at the
+**network layer, not in application code** (review #166, Codex MAJOR). An app-level
+allowlist on `ollama_host` is weak security (a misconfigured DNS name passes a
+string check) and gives false assurance. The contract instead:
+
+- `ollama_host` MUST resolve to a cluster-local / on-prem endpoint; egress to
+  the public internet from the Intelligence pod MUST be blocked by a Kubernetes
+  `NetworkPolicy` (default-deny egress + allow only the in-cluster Ollama
+  service). This is the actual KVKK enforcement point.
+- `anthropic` / `openai` backends are the *explicit* "data may leave" modes,
+  chosen per tenant with consent — they are not accidents to be guarded against
+  but deliberate deployment choices.
+
+Tracking: the NetworkPolicy lives in platform-k8s-gitops (deploy-time), not in
+this service. This ADR records the requirement; the manifest is its enforcement.
+
 ## Consequences
 
 - A tenant switches deployment mode by config (`MAI_BACKEND`), not a code change;
