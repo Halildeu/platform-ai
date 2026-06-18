@@ -82,6 +82,7 @@ denetçi haklı olarak sorar: **o halde biyometrik voiceprint neden gerekli ve o
 **gerekli + orantılı** olmaya zorlar. "Ürün kolaylığı" biyometrik için zayıf gerekçedir.
 
 **Yapılacak — Biyometrik Gereklilik & Etki Değerlendirmesi (DPIA-benzeri ayrı belge, G-gate):**
+*(Doldurulabilir şablon: [`voiceprint-necessity-assessment-template.md`](./voiceprint-necessity-assessment-template.md) — her enablement için ayrı kopya doldurulur.)*
 - **Daha az müdahaleci alternatifler neden yetmiyor?** non-biyometrik diarizasyon (anonim SPEAKER_xx), kullanıcı
   profil seçimi ("ben Halil'im" manuel atama), tek-seferlik manuel etiketleme — hangi **ölçülebilir** ihtiyacı
   çözmüyor ki voiceprint gereksin? (Bu sorunun dürüst cevabı zayıfsa → voiceprint'ten vazgeçmek de bir sonuç.)
@@ -210,7 +211,7 @@ teknik+organizasyonel ayağı.
 - [x] **G1 — ADR-0033 amend** (voiceprint şarta-bağlı) — #169 MERGED.
 - [ ] **G2 — Hukuki zemin teyidi** (§1): m.6 açık-rıza-tek-zemin (D1, 7499-sonrası tam set).
 - [ ] **G3 — Açık rıza geçerlilik** (§2): 5-unsur + opt-out (D2, D12) + İK no-detriment politikası.
-- [ ] **G4 — Gereklilik & Etki Değerlendirmesi** (§1.5): DPIA-benzeri belge + daha-az-müdahaleci-alternatif analizi (D7, D9) — imzalı.
+- [ ] **G4 — Gereklilik & Etki Değerlendirmesi** (§1.5): DPIA-benzeri belge + daha-az-müdahaleci-alternatif analizi (D7, D9) — imzalı. Şablon: [`voiceprint-necessity-assessment-template.md`](./voiceprint-necessity-assessment-template.md).
 - [ ] **G5 — Aydınlatma metni** (§3) hazır + danışman onayı (D3).
 - [ ] **G6 — VERBİS güncelleme** (§4) yapıldı (go-live öncesi) + danışman (D4).
 - [ ] **G7 — Saklama/imha** (§5) yazıldı + imha mekanizması **test edildi** + geçmiş-veri politikası (D5, D11).
