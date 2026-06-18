@@ -22,6 +22,6 @@ async def health(
         status="ok" if service.model_loaded else "loading",
         version=__version__,
         backend=settings.backend,
-        model=settings.model_name,
+        model=settings.effective_model,
         redact_pii=settings.redact_pii,
     )

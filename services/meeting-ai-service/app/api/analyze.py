@@ -60,9 +60,12 @@ async def analyze_endpoint(
         "backend": settings.backend,
     }
 
+    segments = (
+        [s.model_dump() for s in body.segments] if body.segments else None
+    )
     try:
         result = await asyncio.wait_for(
-            run_in_threadpool(service.analyze, transcript),
+            run_in_threadpool(service.analyze, transcript, segments),
             timeout=settings.request_timeout,
         )
     except (asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041

@@ -49,6 +49,18 @@ class Settings(BaseSettings):
     ollama_host: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="llama3.1:8b")
 
+    @property
+    def effective_model(self) -> str:
+        """The model actually serving requests, for honest provenance everywhere.
+
+        For `ollama` the real model is `ollama_model` (e.g. llama3.1:8b), not the
+        generic `model_name` placeholder. Used by /analyze, /health, startup log
+        and eval so reported provenance is consistent (review #166).
+        """
+        if self.backend == "ollama":
+            return self.ollama_model
+        return self.model_name
+
     @model_validator(mode="after")
     def _enforce_kvkk_redaction_boundary(self) -> Settings:
         """Issue #49 hard requirement: PII redaction BEFORE any LLM call.

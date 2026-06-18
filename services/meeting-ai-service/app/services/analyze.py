@@ -4,7 +4,8 @@ Backends:
 - `mock` (default): deterministic, keyword-based extractive summary/decisions/
   actions — no LLM call, no API key, unit-testable.
 - `ollama`: real LLM via local Ollama server (Option B, #54 decision).
-  Transcript never leaves the host — KVKK Madde 9 not triggered.
+  Intended on-prem (transcript stays in-cluster); the actual network boundary is
+  enforced at deploy time by a GitOps NetworkPolicy, not by this code (ADR-0034).
 - `anthropic` / `openai`: stubs (501); require ADR-0030 legal gate (#52).
 """
 
@@ -19,7 +20,8 @@ from typing import Protocol
 import httpx
 
 from app.core.config import Settings
-from app.models.schemas import ActionItem, AnalyzeResponse
+from app.models.schemas import ActionItem, AnalyzeResponse, Citation
+from app.services.citation import ground_claims
 from app.services.redact import redact_pii
 
 
@@ -114,7 +116,8 @@ Lütfen sadece geçerli JSON döndür, başka bir şey ekleme:
 
 
 class OllamaAnalyzer:
-    """Local Ollama LLM backend (Option B, #54). Data stays on-host — no Madde 9 transfer."""
+    """Local Ollama LLM backend (Option B, #54). Intended on-prem; the on-host
+    boundary is enforced by a deploy-time NetworkPolicy, not by this code (ADR-0034)."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -125,6 +128,7 @@ class OllamaAnalyzer:
             "model": self._settings.ollama_model,
             "prompt": prompt,
             "stream": False,
+            "format": "json",  # force structured JSON (llama3.1 else returns prose)
         }
         try:
             resp = httpx.post(
@@ -198,7 +202,9 @@ class MeetingAnalysisService:
         self._settings = settings
         self._analyzer = analyzer or build_analyzer(settings)
 
-    def analyze(self, transcript: str) -> AnalyzeResponse:
+    def analyze(
+        self, transcript: str, segments: list[dict[str, object]] | None = None
+    ) -> AnalyzeResponse:
         start = time.perf_counter()
         if self._settings.redact_pii:
             redacted, count = redact_pii(transcript)
@@ -207,18 +213,43 @@ class MeetingAnalysisService:
 
         # The analyzer only ever sees redacted text.
         draft = self._analyzer.analyze(redacted)
+
+        # #162: ground every decision/action to a transcript sentence (citation)
+        # and flag the ungrounded ones (hallucination guard). Grounded against the
+        # SAME redacted text the analyzer saw, so claims and sources line up.
+        # Optional STT `segments` attach a wall-clock start_sec to each citation.
+        claims = list(draft.decisions) + [a.text for a in draft.action_items]
+        grounded, ungrounded = ground_claims(claims, redacted, segments=segments)
+        citations = [
+            Citation(
+                claim=c.claim,
+                source_index=c.source_index,
+                source_text=c.source_text,
+                similarity=c.similarity,
+                grounded=c.grounded,
+                start_sec=c.start_sec,
+            )
+            for c in grounded
+        ]
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
         return AnalyzeResponse(
             summary=draft.summary,
             decisions=draft.decisions,
             action_items=draft.action_items,
+            citations=citations,
+            ungrounded_count=ungrounded,
             redacted=self._settings.redact_pii,
             redaction_count=count,
             backend=self._settings.backend,
-            model=self._settings.model_name,
+            model=self.effective_model,
             elapsed_ms=elapsed_ms,
         )
+
+    @property
+    def effective_model(self) -> str:
+        """The model actually used (delegates to Settings for one source of truth)."""
+        return self._settings.effective_model
 
     @property
     def model_loaded(self) -> bool:
