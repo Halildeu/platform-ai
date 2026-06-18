@@ -240,9 +240,20 @@ class MeetingAnalysisService:
             redacted=self._settings.redact_pii,
             redaction_count=count,
             backend=self._settings.backend,
-            model=self._settings.model_name,
+            model=self.effective_model,
             elapsed_ms=elapsed_ms,
         )
+
+    @property
+    def effective_model(self) -> str:
+        """Report the model actually used so evidence provenance is correct.
+
+        For `ollama` the real model is `ollama_model` (e.g. llama3.1:8b), not the
+        generic `model_name` placeholder (review: provenance mismatch).
+        """
+        if self._settings.backend == "ollama":
+            return self._settings.ollama_model
+        return self._settings.model_name
 
     @property
     def model_loaded(self) -> bool:

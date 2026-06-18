@@ -66,6 +66,37 @@ def test_analyze_ollama_down_502(monkeypatch) -> None:  # type: ignore[no-untype
     assert resp.status_code == 502
 
 
+def test_analyze_segments_attach_timestamps(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # #162: STT segments in the request → citations carry wall-clock start_sec
+    monkeypatch.setenv("MAI_REDACT_PII", "False")  # mock backend: keep text verbatim
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze",
+            json={
+                "transcript": "Bütçe artışı onaylandı. Ali raporu hazırlayacak.",
+                "segments": [
+                    {"text": "Bütçe artışı onaylandı.", "start": 0.0, "end": 3.0},
+                    {"text": "Ali raporu hazırlayacak.", "start": 3.0, "end": 6.0},
+                ],
+            },
+        )
+    assert resp.status_code == 200
+    citations = resp.json()["citations"]
+    grounded = [c for c in citations if c["grounded"]]
+    assert grounded, "expected at least one grounded citation"
+    assert all(c["start_sec"] is not None for c in grounded)
+
+
+def test_analyze_without_segments_has_no_timestamps() -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze",
+            json={"transcript": "Bütçe artışı onaylandı. Ali raporu hazırlayacak."},
+        )
+    assert resp.status_code == 200
+    assert all(c["start_sec"] is None for c in resp.json()["citations"])
+
+
 def test_health_ok() -> None:
     with TestClient(app) as client:
         resp = client.get("/health")

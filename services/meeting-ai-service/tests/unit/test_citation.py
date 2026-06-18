@@ -92,6 +92,17 @@ def test_segments_attach_timestamp_to_citation() -> None:
     assert [c.start_sec for c in citations] == [0.0, 8.5]
 
 
+def test_mismatched_segments_fail_closed_no_timestamp() -> None:
+    # a segment that does not appear in the transcript → no stamping at all,
+    # rather than a misleading wrong timestamp (fail-closed)
+    bad_segments = [
+        {"text": "Tamamen alakasız bir cümle.", "start": 0.0, "end": 4.0},
+        {"text": "Ali raporu cuma gününe kadar hazırlayacak.", "start": 4.0, "end": 8.5},
+    ]
+    sents = split_sentences(TRANSCRIPT, bad_segments)
+    assert all(s.start_sec is None for s in sents)
+
+
 def test_service_response_carries_citations() -> None:
     """End-to-end: MeetingAnalysisService grounds mock decisions/actions."""
     from app.core.config import Settings

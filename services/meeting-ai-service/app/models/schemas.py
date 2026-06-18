@@ -5,12 +5,24 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class TranscriptSegment(BaseModel):
+    """An STT segment with wall-clock timing (Whisper-style)."""
+
+    text: str = Field(description="Segment text")
+    start: float = Field(description="Segment start (seconds)", ge=0.0)
+    end: float | None = Field(default=None, description="Segment end (seconds)")
+
+
 class AnalyzeRequest(BaseModel):
     """Transcript analysis request."""
 
     transcript: str = Field(description="Meeting transcript text", min_length=1)
     meeting_id: str | None = Field(default=None, max_length=64)
     session_id: str | None = Field(default=None, max_length=64)
+    segments: list[TranscriptSegment] | None = Field(
+        default=None,
+        description="Optional STT timing; enables wall-clock start_sec on citations",
+    )
 
 
 class ActionItem(BaseModel):

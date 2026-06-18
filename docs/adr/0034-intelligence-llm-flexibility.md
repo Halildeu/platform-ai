@@ -12,8 +12,8 @@
 ("AI dedi" değil "şu cümleden çıkarıldı"). The 2-AI istişare (Claude + Codex
 `019ed1f5`) concluded that for a regulated (KVKK) sector the differentiator is
 **grounded output**, not raw summarization. The acceptance gate is **G-INT**:
-summary faithfulness + action-item precision/recall ≥ target + every output
-carries a citation.
+summary grounding (lexical proxy for faithfulness) + action-item
+precision/recall ≥ target + every output carries a citation.
 
 A regulated customer cannot be forced onto a single deployment mode: some
 tenants require fully on-prem self-host (no data leaves the cluster), others
@@ -25,17 +25,28 @@ tek mod yapma"* — do not make self-host the only mode.
 `scripts/intel_eval.py` run against both locally-hosted Ollama models, redaction
 on, `format=json`. Evidence: `docs/evidence/intel-eval-2026-06-17.jsonl`.
 
-| Model | Faithfulness | Action P / R | F1 | p50 |
-|---|---|---|---|---|
-| **llama3.1:8b** | **95.8%** | 68.8% / 62.5% | 58.3% | 13.4 s |
-| qwen2.5:7b | 72.9% | 25.0% / 37.5% | 25.0% | 13.7 s |
+> **Metric honesty (review #166).** "Grounding rate" is *lexical* — the fraction
+> of claims whose tokens overlap a transcript sentence above threshold. It is a
+> hallucination **floor** (catches fabricated claims), NOT semantic faithfulness:
+> a claim that reuses words but inverts meaning ("onaylandı"→"reddedildi") still
+> counts as grounded. Action/decision P/R use one-to-one token-overlap matching
+> on a synthetic set. Real semantic faithfulness (entailment/NLI) and absolute
+> P/R calibration await a real-meeting pilot.
 
-**Self-host default = `llama3.1:8b`.** It is markedly more faithful (95.8% vs
-72.9% — qwen fabricates decisions/actions absent from the transcript on this
-set) and stronger on action extraction. The faithfulness result confirms the
-core G-INT claim — grounded, non-hallucinated output — holds on a real on-prem
-LLM. Action precision/recall is mid-range and measured on a *synthetic* set with
-strict token-overlap matching; absolute calibration awaits a real-meeting pilot.
+Initial run (first-pass, many-to-one matcher) — relative ranking:
+
+| Model | Grounding rate | Action P / R |
+|---|---|---|
+| **llama3.1:8b** | **95.8%** | 68.8% / 62.5% |
+| qwen2.5:7b | 72.9% | 25.0% / 37.5% |
+
+**Self-host default = `llama3.1:8b`.** It is markedly higher on grounding (95.8%
+vs 72.9% — qwen fabricates decisions/actions absent from the transcript) and on
+action extraction. The decisive, reproducible signal is the grounding gap.
+
+> Action/decision P/R will be re-measured with the corrected one-to-one matcher
+> and decision scoring (this PR) and refreshed directly from `intel_eval.py`
+> output; the grounding-rate ranking is unaffected (same formula).
 
 ## Decision
 
@@ -77,6 +88,7 @@ Hard constraints, enforced in code (`app/core/config.py`):
 
 Synthetic G-INT numbers are in (2026-06-17, `llama3.1:8b`). Promote to **ACCEPTED**
 when `intel_eval.py` has been run on a **real-meeting** transcript (consent +
-neutral content, recording imha'd after measurement) and faithfulness + action
-precision/recall meet the G-INT target. Evidence file:
+neutral content, recording imha'd after measurement) and grounding rate +
+decision/action precision/recall meet the G-INT target — ideally with a semantic
+faithfulness check (entailment), not lexical-only. Evidence file:
 `docs/evidence/intel-eval-<date>.jsonl`.

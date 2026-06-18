@@ -54,12 +54,13 @@ class Citation:
 
 def _segment_spans(
     transcript: str, segments: list[dict[str, object]]
-) -> list[tuple[int, float]]:
+) -> list[tuple[int, float]] | None:
     """Locate each STT segment in the transcript → (start_char, start_sec), sorted.
 
-    Segments are Whisper-style dicts ({"text","start",...}). The char position is
-    found by searching the transcript so the mapping survives whitespace/joining
-    differences between the segment list and the assembled transcript.
+    Segments are Whisper-style dicts ({"text","start",...}). Fail-closed: if any
+    non-empty segment cannot be located in the transcript (redaction/whitespace
+    drift), return None so NO citation gets a wrong timestamp — better no stamp
+    than a misleading one (review: silent mis-stamping).
     """
     spans: list[tuple[int, float]] = []
     pos = 0
@@ -69,7 +70,7 @@ def _segment_spans(
             continue
         loc = transcript.find(text, pos)
         if loc < 0:
-            loc = pos
+            return None  # fail-closed: segments don't match transcript
         raw_start = seg.get("start", 0.0)
         start_sec = float(raw_start) if isinstance(raw_start, int | float | str) else 0.0
         spans.append((loc, start_sec))
