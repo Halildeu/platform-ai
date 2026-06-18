@@ -36,7 +36,7 @@ tüm yetenekler **kodlanır/inşa edilir** (ADR-0033 amend; kod serbest). Risk, 
   etiketleme. **Varsayılan kurulumda HİÇ biyometrik işleme YOK** → varsayılan dağıtım m.6 açısından zaten
   uyumlu (özel-nitelikli veri işlenmiyor; bu hâlde gate gerekmez). Bu, *privacy-by-default + veri minimizasyonu*.
 - **"İstendiğinde açılabilsin" = GATED açma, SERBEST FLİP DEĞİL:** Voiceprint'i bir bağlamda
-  (tenant/org/dağıtım) AÇMAK, o bağlam için go-live gate'inin (§7 G2-G12) sağlanmasını gerektiren **açık,
+  (tenant/org/dağıtım) AÇMAK, o bağlam için go-live gate'inin (§7 G2-G14) sağlanmasını gerektiren **açık,
   denetlenebilir, geri-alınabilir (kill-switch)** bir yönetici aksiyonudur. O bağlam için rıza/gerekçe/güvenlik/
   imza yoksa açılamaz. Açma kararı + kanıtı **per-bağlam loglanır**.
 - **Sonuç (D7 yeniden çerçeveleme):** Gereklilik/orantılılık artık **global go/no-go DEĞİL, bağlam-başına
@@ -204,7 +204,7 @@ teknik+organizasyonel ayağı.
 ## §7 — Per-Enablement Gate (bir bağlamda voiceprint AÇMAK için HEPSİ ✓ + imza; VARSAYILAN KAPALI gate gerektirmez)
 
 > **§0.5 gereği:** Voiceprint varsayılan KAPALI → biyometrik işleme yok → gate gerekmez. Aşağıdaki gate, voiceprint'i
-> **bir bağlamda (tenant/org/dağıtım) AÇMAK** istendiğinde o bağlam için işler; G1-G12 sağlanmadan o bağlamda açılamaz.
+> **bir bağlamda (tenant/org/dağıtım) AÇMAK** istendiğinde o bağlam için işler; G1-G14 sağlanmadan o bağlamda açılamaz.
 
 
 - [x] **G1 — ADR-0033 amend** (voiceprint şarta-bağlı) — #169 MERGED.
@@ -253,8 +253,8 @@ D12 (§2) rıza yenileme + İK no-detriment + baskı-yasağı + şikayet kanalı
 
 **Yürütme — 3 faz (Codex, "12 soru 1 saatte kapanır" gerçekçi değil):**
 - **Faz L1 — Hukuki Tasarım Triage** (~60-90 dk danışman, ön-okuma sonrası): D1-D12'ye yazılı kısa
-  **RAG/verdict** (AGREE / REVISE / RED / needs-evidence) + revizyon notları. G2-G5 + G6-G11'in *hukuki gereksinim* tarafı.
-- **Faz E1 — Operasyonel/Teknik Kanıt Paketi**: G6-G11 kanıtları (VERBİS güncelleme, imha testi, enforcement
+  **RAG/verdict** (AGREE / REVISE / RED / needs-evidence) + revizyon notları. G2-G5 + G6-G14.in *hukuki gereksinim* tarafı.
+- **Faz E1 — Operasyonel/Teknik Kanıt Paketi**: G6-G14 kanıtları (VERBİS güncelleme, imha testi, enforcement
   negatif-test, fallback canlı, mimari/aktarım teyidi) — engineering/ops (agent/Zeynep) üretir.
 - **Faz L2 — Go-Live Legal Sign-off**: hukuk + şirket temsilcisi kanıt paketini görerek **G12** imzalar +
   enablement **G13-G14** governance işler → o bağlamda voiceprint açılır (#168 gate o bağlam için kapanır).
