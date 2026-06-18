@@ -42,9 +42,13 @@ tüm yetenekler **kodlanır/inşa edilir** (ADR-0033 amend; kod serbest). Risk, 
 - **Sonuç (D7 yeniden çerçeveleme):** Gereklilik/orantılılık artık **global go/no-go DEĞİL, bağlam-başına
   gerekçe** (§1.5). Yetenek her yerde mevcut ama yalnız **gerekçeli + rızalı** bağlamlarda aktif. "Hepsini inşa
   et + her açmayı gerekçelendir" — en savunulabilir çerçeve (privacy-by-default + per-context justification).
-- **Teknik:** capability flag `voiceprint.enabled` **default false**; per-bağlam override yalnız gated
-  enablement workflow ile; flag açık olsa bile **rıza yoksa işleme yok** (fail-closed, §5.6); kill-switch ile
+- **Teknik:** capability flag `voiceprint.enabled` **default false**; per-bağlam override yalnız **gated
+  enablement workflow** ile — **server-side enforced (sadece UI toggle DEĞİL) + RBAC + bypass-edilemez +
+  immutable audit** (G13). Flag açık olsa bile **rıza yoksa işleme yok** (fail-closed, §5.6); kill-switch ile
   her an geri-kapatılır (geri-döndürülebilirlik).
+- **TEST sınırı (Codex 019edc7b):** "kod serbest" yalnız **sentetik/anonim fixture** içindir. Geliştirme/test'te
+  **gerçek çalışan sesi / gerçek voiceprint vektörü / pilot enrollment / prod-like kayıt** kullanmak artık "sadece
+  kod" değil → **m.6 işleme başlar** → o da gate (G2-G14) kapsamındadır.
 
 ---
 
@@ -124,7 +128,9 @@ rıza (m.6/2), *meşru menfaat değil* · **amaç** = otomatik konuşmacı tanı
 
 Şirket **kayıtlı**, **24-Biyometrik kategorisi mevcut (15 yıl)**. Voiceprint = **yeni kayıt değil, GÜNCELLEME**:
 amaç ekle/teyit ("otomatik konuşmacı tanıma — biyometrik ses imzası") · saklama §5 ile hizala (15 yıl
-**tavan** ≠ fiili) · alıcı = **hedef mimari: yok** (§5.7 teknik teyide bağlı) · zamanlama = go-live (#59) ÖNCESİ.
+**tavan** ≠ fiili) · alıcı = **hedef mimari: yok** (§5.7 teknik teyide bağlı) · zamanlama = **bir bağlamda ilk
+biyometrik işleme/enrollment açılmadan ÖNCE** (per-enablement). Mevcut 24-Biyometrik kaydı voiceprint amacı/alıcı/
+saklama/aktarımı zaten tam kapsıyorsa "güncelleme" yerine **kapsam-teyidi + evidence kaydı** yeterli olabilir — ama o da açmadan önce.
 
 > **Danışmana D4:** 24-Biyometrik mevcut amaç beyanı voiceprint'i kapsıyor mu, amaç eklenmeli mi?
 
@@ -213,11 +219,20 @@ teknik+organizasyonel ayağı.
 - [ ] **G10 — Alt-işleyen/aktarım** (§5.7): mimari teyit (alıcı/m.9 yok) + gerekirse DPA (D10).
 - [ ] **G11 — Opt-out fallback canlı** (§6) + kapsam sınırı (dış katılımcı kapalı).
 - [ ] **G12 — Şirket (veri sorumlusu) + hukuk imzası** — tüm pozisyonlar onaylı.
+- [ ] **G13 — Enablement governance & audit evidence** (Codex 019edc7b): bir bağlamda voiceprint açma yalnız
+  **yetkili rol** tarafından, **hukuk/veri-sorumlusu-temsilcisi + security/ops ÇİFT-ONAY** ile yapılır;
+  **server-side enforced** (sadece UI toggle değil — RBAC + bypass-edilemez). Enablement kararına: context ID,
+  amaç, kapsam, kişi grubu, rıza-metni versiyonu, etki-değerlendirmesi (G4) ID, VERBİS teyidi, retention-policy ID,
+  security-evidence (G8) ID, approver'lar, timestamp, expiry/review tarihi → **immutable audit log**. Break-glass
+  açma **yasak** (veya ayrı incident kaydı + otomatik kill-switch review).
+- [ ] **G14 — Per-context revalidation**: bağlam/amaç/katılımcı tipi/alt-işleyen/model-telemetry/saklama süresi/
+  veri-sorumlusu rolü değişirse enablement **otomatik "needs-review"**; G4/G6/G8/G10/G12 yeniden geçilmeden açık kalamaz.
 
 **Kapanış disiplini:** Danışman cevabı (D1-D12) yalnız **hukuki gereksinim/tasarım pozisyonunu** kapatır;
-**G6-G11'in operasyonel/teknik kapanışı ayrıca kanıt ister** (VERBİS güncelleme, imha testi, enforcement
-negatif-test, fallback canlı, mimari teyit) — danışman teyidiyle otomatik kapanmaz. Voiceprint **KODU** bu
-gate'ten bağımsız yazılabilir (ADR-0033 amend); yalnız **canlı biyometrik işleme** G1-G12 tamamlanınca açılır.
+**G6-G14'ün operasyonel/teknik/yönetişim kapanışı ayrıca kanıt ister** (VERBİS güncelleme, imha testi, enforcement
+negatif-test, fallback canlı, mimari teyit, enablement çift-onay+audit) — danışman teyidiyle otomatik kapanmaz.
+Voiceprint **KODU** bu gate'ten bağımsız yazılabilir (ADR-0033 amend); yalnız **canlı biyometrik işleme** (bir
+bağlamda) G1-G14 tamamlanınca açılır.
 
 ---
 
@@ -241,12 +256,15 @@ D12 (§2) rıza yenileme + İK no-detriment + baskı-yasağı + şikayet kanalı
   **RAG/verdict** (AGREE / REVISE / RED / needs-evidence) + revizyon notları. G2-G5 + G6-G11'in *hukuki gereksinim* tarafı.
 - **Faz E1 — Operasyonel/Teknik Kanıt Paketi**: G6-G11 kanıtları (VERBİS güncelleme, imha testi, enforcement
   negatif-test, fallback canlı, mimari/aktarım teyidi) — engineering/ops (agent/Zeynep) üretir.
-- **Faz L2 — Go-Live Legal Sign-off**: hukuk + şirket temsilcisi kanıt paketini görerek **G12** imzalar → #168 kapanır → voiceprint canlı açılabilir.
+- **Faz L2 — Go-Live Legal Sign-off**: hukuk + şirket temsilcisi kanıt paketini görerek **G12** imzalar +
+  enablement **G13-G14** governance işler → o bağlamda voiceprint açılır (#168 gate o bağlam için kapanır).
 
 **Önemli sonuç (§0.5 ile):** Voiceprint **VARSAYILAN KAPALI** — yetenek inşa edilir, varsayılan non-biyometrik
 çalışır. D7 cevabı bir bağlamda "gereklilik zayıf" çıkarsa → **o bağlamda AÇMA** (varsayılan ile devam); gerekçe +
 rıza güçlü başka bir bağlamda gated açılabilir. Yani "açmama" global red **değil** — default-off + per-context
-gated açma. Hiçbir bağlamda gerekçe doğmazsa yetenek inşa edilmiş ama uyumadan inert kalır (risk sıfır).
+gated açma. Hiçbir bağlamda gerekçe doğmazsa yetenek inşa edilmiş ama **teknik olarak inert** kalır → canlı m.6
+işleme riski oluşmaz; ancak **bypass / yanlış-konfigürasyon / supply-chain residual** riski **G13-G14**
+(server-side enforce + immutable audit + revalidation) ile yönetilir (mutlak "sıfır" değil).
 
 ---
 
