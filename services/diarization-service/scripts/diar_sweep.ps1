@@ -54,9 +54,9 @@ if ($srcWavCount -lt 2) {
 }
 $maxSpk = [Math]::Min(3, $srcWavCount)
 Write-Host "== diar_sweep: backend=$Backend, source voices=$srcWavCount (maxSpeakers=$maxSpk)" -ForegroundColor Cyan
-Write-Host "== NOTE: produces a SYNTHETIC-SMOKE DER (pipeline/determinism harness), NOT a baseline." -ForegroundColor Yellow
+Write-Host "== NOTE: produces a SYNTHETIC-SMOKE DER, not a baseline." -ForegroundColor Yellow
 if ($Backend -eq "pyannote") {
-    Write-Host "== SETUP: install pyannote in an ISOLATED venv (.venv-diar); requirements-pyannote.txt can clobber a CUDA torch — reinstall torch==<cuxx> after if your GPU torch downgrades to +cpu." -ForegroundColor Yellow
+    Write-Host "== SETUP: use the isolated diar venv. pyannote reqs can downgrade CUDA torch to cpu; reinstall the cuda torch wheel afterwards." -ForegroundColor Yellow
 }
 
 # (seed, num-speakers, turns, gap, offset) — seed is the unique filename key.
