@@ -38,20 +38,21 @@ a model's reputation. Two hard constraints frame the decision:
 
 | Candidate | License | Gated model? | TR DER | Peak VRAM | RTF | Notes |
 |---|---|---|---|---|---|---|
-| **pyannote 3.1** | MIT (model: gated, free) | yes (HF token) | 50.14%¹ | 2155 MB | 0.024 | end-to-end pipeline |
-| **speechbrain ECAPA** | Apache-2.0 | **no** (free) | 56.64%¹ | **307 MB** | **0.006** | 7× less VRAM, 9× faster |
+| **pyannote 3.1** | MIT (model: gated, free) | yes (HF token) | 47.8%¹ | 2155 MB | 0.024 | end-to-end pipeline |
+| **speechbrain ECAPA** | Apache-2.0 | **no** (free) | 54.6%¹ | **307 MB** | **0.003** | 7× less VRAM, faster |
 | NeMo | Apache-2.0 | no | PENDING (adapter not wired) | PENDING | PENDING | heavier install; candidate only if pyannote fails target |
 | Cloud (Azure/Google) | commercial | n/a | not measured | n/a | n/a | **m.9 cross-border → ADR-0030 boundary**; rejected unless on-prem fails |
 | VAD-only fallback | — | no | n/a (no speaker sep.) | minimal | minimal | degraded fallback if no GPU model fits |
 
-> ¹ **synthetic-smoke, NOT a baseline DER (review #164).** These numbers were
-> produced with `collar=0` on a synthetic fixture whose per-speaker clips repeat
-> byte-identically and never overlap. That means they measure mainly
-> over-segmentation, **not speaker confusion or overlap** — the hardest, most
-> product-relevant part of DER. With the dscore-standard `collar=0.25` (now the
-> `diar_matrix.py` default) and a realistic fixture/pilot, absolute DER and the
-> pyannote↔speechbrain gap will both move. **No ranking claim is drawn from these
-> cells**; they prove the harness runs and is deterministic, nothing more.
+> ¹ **synthetic-smoke, NOT a baseline DER (review #164).** Measured at the
+> dscore-standard `collar=0.25` (n=6) on `2026-06-17`, but on a synthetic fixture
+> whose per-speaker clips repeat byte-identically and never overlap. They measure
+> mainly over-segmentation, **not speaker confusion or overlap** — the hardest,
+> most product-relevant part of DER. (For reference, collar=0 gave 50.1% / 56.6%;
+> the collar moved both ~2pt but not the ordering.) A realistic fixture (distinct,
+> non-identical audio + overlap) and a real-meeting pilot will move absolute DER
+> and the pyannote↔speechbrain gap. **No ranking claim is drawn from these cells**;
+> they prove the harness runs and is deterministic, nothing more.
 
 Both running backends share one harness (same fixtures, same scorer, both on
 GPU). The #161 "pyannote vs alternatif" requirement is **met** in that both are
@@ -103,9 +104,10 @@ cannot rank backends).
 ## Reopen / Promote-to-ACCEPTED Triggers
 
 Promote only when ALL hold:
-- pyannote + speechbrain harness runs (n≥5) — ✅ done (n=6, synthetic-smoke only);
-- a **collar=0.25 measurement on a realistic fixture** (overlap + distinct,
-  non-identical speaker audio) — ⬜ pending (current cells are collar=0 smoke);
+- pyannote + speechbrain harness runs (n≥5) — ✅ done (n=6, synthetic-smoke);
+- collar=0.25 scoring — ✅ done (now the default; 47.8% / 54.6% on the smoke set);
+- the same on a **realistic fixture** (overlap + distinct, non-identical speaker
+  audio) — ⬜ pending (current cells are still synthetic-smoke);
 - a real-meeting (pilot) DER calibrates absolute numbers (gated on go-live #59 /
   consent, like ADR-0031's pilot leg) — ⬜ pending;
 - chosen backend meets the agreed diarization DER target (G-WER) — ⬜ pending.
