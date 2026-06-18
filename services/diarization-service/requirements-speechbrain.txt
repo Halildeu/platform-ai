@@ -1,0 +1,13 @@
+# Alternative diarization backend for diar_matrix.py (#161 "pyannote vs alternatif").
+# SpeechBrain ECAPA speaker embeddings + energy-VAD + cosine clustering.
+# Model: speechbrain/spkrec-ecapa-voxceleb — NON-gated (no HF token needed).
+#
+# IMPORTANT: do NOT pin torch here. The inference host already has a CUDA-enabled
+# torch installed for pyannote (requirements-pyannote.txt). Re-pinning torch makes
+# pip pull the CPU-only PyPI wheel and CLOBBER the CUDA build
+# ("Torch not compiled with CUDA enabled"). speechbrain reuses the present torch.
+#   pip install -r requirements-speechbrain.txt
+# If a CUDA torch was already clobbered, restore it (RTX 4070, torch 2.5.1):
+#   pip install --force-reinstall torch==2.5.1 torchaudio==2.5.1 \
+#       --index-url https://download.pytorch.org/whl/cu121
+speechbrain==1.0.2
