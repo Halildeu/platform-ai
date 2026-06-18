@@ -4,7 +4,8 @@ Backends:
 - `mock` (default): deterministic, keyword-based extractive summary/decisions/
   actions — no LLM call, no API key, unit-testable.
 - `ollama`: real LLM via local Ollama server (Option B, #54 decision).
-  Transcript never leaves the host — KVKK Madde 9 not triggered.
+  Intended on-prem (transcript stays in-cluster); the actual network boundary is
+  enforced at deploy time by a GitOps NetworkPolicy, not by this code (ADR-0034).
 - `anthropic` / `openai`: stubs (501); require ADR-0030 legal gate (#52).
 """
 
@@ -115,7 +116,8 @@ Lütfen sadece geçerli JSON döndür, başka bir şey ekleme:
 
 
 class OllamaAnalyzer:
-    """Local Ollama LLM backend (Option B, #54). Data stays on-host — no Madde 9 transfer."""
+    """Local Ollama LLM backend (Option B, #54). Intended on-prem; the on-host
+    boundary is enforced by a deploy-time NetworkPolicy, not by this code (ADR-0034)."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -246,14 +248,8 @@ class MeetingAnalysisService:
 
     @property
     def effective_model(self) -> str:
-        """Report the model actually used so evidence provenance is correct.
-
-        For `ollama` the real model is `ollama_model` (e.g. llama3.1:8b), not the
-        generic `model_name` placeholder (review: provenance mismatch).
-        """
-        if self._settings.backend == "ollama":
-            return self._settings.ollama_model
-        return self._settings.model_name
+        """The model actually used (delegates to Settings for one source of truth)."""
+        return self._settings.effective_model
 
     @property
     def model_loaded(self) -> bool:

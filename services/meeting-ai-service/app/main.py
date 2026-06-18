@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         extra={
             "version": __version__,
             "backend": settings.backend,
-            "model": settings.model_name,
+            "model": settings.effective_model,
             "redact_pii": settings.redact_pii,
             "correlation_id": "startup",
         },
