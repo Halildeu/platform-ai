@@ -115,4 +115,5 @@ if ($code -ne 0 -or -not $json) {
 }
 
 Write-Host "`n== DONE. Appended to $EvidenceFile :" -ForegroundColor Green
-Write-Host $json.Trim() -ForegroundColor Green
+if ($json) { Write-Host ([string]$json).Trim() -ForegroundColor Green }
+else { Write-Host "(row written to evidence file)" -ForegroundColor Green }
