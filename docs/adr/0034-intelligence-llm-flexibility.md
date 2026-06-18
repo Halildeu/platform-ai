@@ -33,20 +33,22 @@ on, `format=json`. Evidence: `docs/evidence/intel-eval-2026-06-17.jsonl`.
 > on a synthetic set. Real semantic faithfulness (entailment/NLI) and absolute
 > P/R calibration await a real-meeting pilot.
 
-Initial run (first-pass, many-to-one matcher) — relative ranking:
+Reproducible run (one-to-one matcher + decision scoring, direct `intel_eval.py`
+output — `docs/evidence/intel-eval-2026-06-17.jsonl`):
 
-| Model | Grounding rate | Action P / R |
-|---|---|---|
-| **llama3.1:8b** | **95.8%** | 68.8% / 62.5% |
-| qwen2.5:7b | 72.9% | 25.0% / 37.5% |
+| Model | Grounding rate | Action P / R | Decision P / R | p50 |
+|---|---|---|---|---|
+| **llama3.1:8b** | 81.2% | 50% / 50% | 37.5% / 31.2% | 12.5 s |
+| qwen2.5:7b | 77.1% | 43.8% / 50% | 31.2% / 31.2% | 15.5 s |
 
-**Self-host default = `llama3.1:8b`.** It is markedly higher on grounding (95.8%
-vs 72.9% — qwen fabricates decisions/actions absent from the transcript) and on
-action extraction. The decisive, reproducible signal is the grounding gap.
-
-> Action/decision P/R will be re-measured with the corrected one-to-one matcher
-> and decision scoring (this PR) and refreshed directly from `intel_eval.py`
-> output; the grounding-rate ranking is unaffected (same formula).
+> **Single-shot variance — read with care.** An earlier llama3.1 run scored
+> grounding 95.8%; this run 81.2%. The models are non-deterministic and n=8 is
+> tiny, so absolute numbers swing run-to-run and the two models are closer than a
+> single run suggests. **No "clear winner" claim is justified from this set.**
+> What holds: grounding stays the highest-signal metric, llama3.1 is marginally
+> ahead and is a reasonable self-host default, and P/R are low enough that
+> prompt/extraction work is needed. A trustworthy decision needs a **real-meeting
+> pilot with multiple seeds**, not this synthetic single-shot.
 
 ## Decision
 
