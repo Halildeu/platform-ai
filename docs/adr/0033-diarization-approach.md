@@ -27,9 +27,15 @@ a model's reputation. Two hard constraints frame the decision:
    (`medium-int8` live + `large-v3-turbo` final, ADR-0031) plus Ollama already
    press 8 GB. Diarization therefore cannot run as a third concurrent live model
    → it is a **post-processing / batch** step, not a live path.
-2. **KVKK (ADR-0030):** diarization emits ANONYMOUS `SPEAKER_xx` labels only.
-   **No voiceprint / biometric enrolment** in this phase. Speaker→person linking
-   is a contextual, human-confirmed overlay (see "Speaker → person" below).
+2. **KVKK (ADR-0030):** diarization emits ANONYMOUS `SPEAKER_xx` labels by
+   default. **Amended by ADR-0035 (Karar 2, 2026-06-18):** voiceprint / biometric
+   enrolment is now **approved** for automatic speaker identification — but it is
+   biometric / special-category data (KVKK m.6), so **live processing is GATED on
+   the legal track** (explicit-consent framework + VERBİS/aydınlatma +
+   retention/erasure policy + opt-out fallback to manual labelling). Code may be
+   written; real-voiceprint processing must NOT go live until that gate clears.
+   Until then, speaker→person linking stays anonymous + human-confirmed (see
+   "Speaker → person" below).
 
 ## Candidate Matrix
 
