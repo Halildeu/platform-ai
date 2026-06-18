@@ -34,7 +34,37 @@ from cost import (  # same scripts/ dir — #161 cost/dakika (DRY, reuses #43 mo
     cost_per_audio_minute,
     local_cost_per_hour,
 )
-from wer import corpus_wer, normalize_tr  # noqa: F401 - same scripts/ dir
+from wer import corpus_wer  # same scripts/ dir
+
+
+def _cost_per_audio_min(
+    rtf: float | None,
+    power_w: float,
+    elec_price_kwh: float,
+    hw_cost: float,
+    amort_hours: float,
+) -> float | None:
+    """Per-audio-minute cost from measured RTF + operator cost inputs (₺/dk).
+
+    Returns None unless the operator supplied a *complete* cost input — either a
+    real electricity cost (power_w > 0 AND price > 0) or a real amortization cost
+    (hw_cost > 0 AND amort_hours > 0). This decouples cost-enable from "price > 0"
+    alone, so a hardware-only cost is not silently dropped, and a price without a
+    power figure does not produce a misleading number (review #165, Codex MAJOR).
+    """
+    if not rtf or rtf <= 0:
+        return None
+    has_elec = power_w > 0 and elec_price_kwh > 0
+    has_amort = hw_cost > 0 and amort_hours > 0
+    if not (has_elec or has_amort):
+        return None
+    cph = local_cost_per_hour(
+        power_w if has_elec else 0.0,
+        elec_price_kwh if has_elec else 0.0,
+        hw_cost if has_amort else 0.0,
+        amort_hours if has_amort else 0.0,
+    )["total"]
+    return round(cost_per_audio_minute(cph, audio_minutes_per_wall_hour(rtf)), 5)
 
 
 def _wav_duration(path: Path) -> float:
@@ -77,13 +107,28 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="0 = all")
     ap.add_argument("--beam", type=int, default=5)
     ap.add_argument("--tag", default="", help="label for the JSON result row")
-    # #161 cost/dakika — parametric (operator supplies real numbers, no baked-in
-    # assumptions). elec-price 0 → cost skipped (reported as null).
-    ap.add_argument("--power-w", type=float, default=200.0, help="GPU power draw (W)")
-    ap.add_argument("--elec-price-kwh", type=float, default=0.0, help="price/kWh; 0 = skip cost")
+    # #161 cost/dakika — fully parametric, no baked-in assumptions. Cost is
+    # reported only when the operator supplies a complete cost input (see
+    # _cost_per_audio_min); otherwise null.
+    ap.add_argument("--power-w", type=float, default=0.0, help="GPU power draw (W); 0 = unset")
+    ap.add_argument("--elec-price-kwh", type=float, default=0.0, help="price/kWh; 0 = unset")
     ap.add_argument("--hw-cost", type=float, default=0.0, help="hardware cost for amortization")
     ap.add_argument("--amort-hours", type=float, default=0.0, help="amortization horizon (hours)")
+    ap.add_argument("--currency", default="TRY", help="currency label for cost provenance")
     args = ap.parse_args()
+
+    # Warn on partial cost inputs so a silently-dropped term isn't mistaken for
+    # "no cost" (review #165): price without power, or hardware without horizon.
+    if args.elec_price_kwh > 0 and args.power_w <= 0:
+        print(
+            "WARN: --elec-price-kwh set but --power-w missing → electricity cost skipped",
+            file=sys.stderr,
+        )
+    if args.hw_cost > 0 and args.amort_hours <= 0:
+        print(
+            "WARN: --hw-cost set but --amort-hours missing → amortization skipped",
+            file=sys.stderr,
+        )
 
     samples_dir = Path(args.samples_dir)
     refs = _load_refs(samples_dir, Path(args.manifest) if args.manifest else None)
@@ -132,14 +177,10 @@ def main() -> None:
     proc_sec = sum(latencies) / 1000.0
     rtf_val = proc_sec / audio_sec_total if audio_sec_total else None
 
-    # #161 cost/dakika: only when operator supplies an electricity price; the
-    # #43 cost model (cost.py) turns RTF + power/price into per-audio-minute cost.
-    cost_per_min: float | None = None
-    if args.elec_price_kwh > 0 and rtf_val and rtf_val > 0:
-        cph = local_cost_per_hour(
-            args.power_w, args.elec_price_kwh, args.hw_cost, args.amort_hours
-        )["total"]
-        cost_per_min = round(cost_per_audio_minute(cph, audio_minutes_per_wall_hour(rtf_val)), 5)
+    # #161 cost/dakika via the saf, test-edilebilir helper (review #165).
+    cost_per_min = _cost_per_audio_min(
+        rtf_val, args.power_w, args.elec_price_kwh, args.hw_cost, args.amort_hours
+    )
 
     row = {
         "tag": args.tag or f"{args.model}-{args.compute}",
@@ -158,11 +199,20 @@ def main() -> None:
         "audio_sec": round(audio_sec_total, 1),
         "rtf": round(rtf_val, 3) if rtf_val else None,
         "cost_per_audio_min": cost_per_min,
+        # Cost provenance (review #165): a bare cost figure is meaningless without
+        # the inputs + currency it was produced from.
+        "cost_inputs": {
+            "power_w": args.power_w,
+            "elec_price_kwh": args.elec_price_kwh,
+            "hw_cost": args.hw_cost,
+            "amort_hours": args.amort_hours,
+            "currency": args.currency,
+        },
         "model_load_sec": round(load_sec, 1),
         "peak_vram_mb": peak["mb"],
     }
     print(json.dumps(row, ensure_ascii=False))
-    _cost = f", cost/dk {cost_per_min}" if cost_per_min is not None else ""
+    _cost = f", cost/dk {cost_per_min} {args.currency}" if cost_per_min is not None else ""
     print(
         f"== {row['tag']}: WER {float(row['wer']):.2%} on {row['n_samples']} samples, "
         f"p50 {row['p50_ms']}ms, RTF {row['rtf']}, peak VRAM {row['peak_vram_mb']}MB{_cost}",
