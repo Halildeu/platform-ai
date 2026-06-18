@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "platform-ai/voiceprint-enablement-audit",
+  "title": "Voiceprint per-enablement governance audit ledger record (G13/G14, #168)",
+  "description": "Tamper-evident append-only ledger record for each voiceprint enable/disable/revalidate action. MACHINE-ENFORCED governance: a voiceprint capability MUST NOT be active for a context unless the LATEST hash-chain-verified ledger record for that context is action=enable/revalidate with resulting_state=enabled, unexpired, no open G14 needs-review, and consent still valid (runtime check — see test-spec §2). Captures evidence pointers from the legal gate (G2-G14, voiceprint-m6-hukuk-sureci.md). NOT legal advice. SCHEMA-LIMIT: distinct-approver (two different principals), expiry>decided_at, and hash-chain continuity are RUNTIME invariants (test-spec T3b/T11/T13) — JSON Schema validates structure, not these cross-record/cross-field relations.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": [
+    "schema_version", "record_kind", "record_id", "ledger_id", "context_id", "context_sequence",
+    "action", "previous_record_id", "previous_record_hash", "canonical_payload_hash", "record_hash",
+    "writer_service_id", "resulting_state", "server_side_enforced", "default_state", "decided_at", "effective_at"
+  ],
+  "$defs": {
+    "gate_ref": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "oneOf": [
+        { "required": ["evidence_id"], "properties": { "evidence_id": { "type": "string", "minLength": 1 } } },
+        { "required": ["not_applicable_reason"], "properties": { "not_applicable_reason": { "type": "string", "minLength": 1 } } }
+      ]
+    },
+    "iso_dt": { "type": "string", "minLength": 1, "format": "date-time" }
+  },
+  "properties": {
+    "schema_version": { "const": "2.0.0" },
+    "record_kind": { "const": "voiceprint_enablement_decision" },
+
+    "record_id": { "type": "string", "minLength": 1, "description": "Unique id of THIS ledger record." },
+    "ledger_id": { "type": "string", "minLength": 1, "description": "Per-context append-only ledger id." },
+    "context_id": { "type": "string", "minLength": 1, "description": "tenant/org/deployment this decision applies to." },
+    "context_sequence": { "type": "integer", "minimum": 0, "description": "Monotonic seq within this context ledger (0 = genesis)." },
+    "previous_record_id": { "type": ["string", "null"], "minLength": 1, "description": "Prior record id; null only at genesis (context_sequence=0)." },
+    "previous_record_hash": { "type": ["string", "null"], "minLength": 1, "description": "Hash of prior record; null only at genesis." },
+    "canonical_payload_hash": { "type": "string", "minLength": 1, "description": "Hash of the canonical decision payload (tamper-evidence)." },
+    "record_hash": { "type": "string", "minLength": 1, "description": "Hash over (canonical_payload_hash + previous_record_hash) — chain link." },
+    "writer_service_id": { "type": "string", "minLength": 1, "description": "Service principal that wrote the record (server-side)." },
+    "signature_ref": { "type": "string", "minLength": 1, "description": "KMS/HMAC signature reference (optional but recommended)." },
+
+    "action": { "enum": ["enable", "disable", "revalidate"] },
+    "resulting_state": { "enum": ["enabled", "disabled", "needs_review"] },
+    "decided_at": { "$ref": "#/$defs/iso_dt", "description": "When the decision was made (immutable)." },
+    "effective_at": { "$ref": "#/$defs/iso_dt", "description": "When the resulting_state takes effect." },
+    "expiry_review_date": { "$ref": "#/$defs/iso_dt", "description": "G14 per-context revalidation deadline (RUNTIME: past → auto needs-review)." },
+
+    "default_state": { "const": "disabled", "description": "INVARIANT: voiceprint capability default OFF (privacy-by-default, §0.5)." },
+    "server_side_enforced": { "const": true, "description": "INVARIANT: server-side enforced (RBAC + un-bypassable), not a UI-only toggle (Codex 019edc7b)." },
+    "consequential_use_permitted": { "const": false, "description": "INVARIANT: voiceprint output MUST NOT drive HR/performance/disciplinary/legal/customer-dispute decisions (§2.0)." },
+
+    "purpose": { "type": "string", "minLength": 1 },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["participant_group", "external_participants"],
+      "properties": {
+        "participant_group": { "type": "string", "minLength": 1 },
+        "meeting_types": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "external_participants": { "const": false, "description": "INVARIANT: external/customer/supplier voiceprint OFF by default (§6)." }
+      }
+    },
+    "necessity_assessment_evidence_id": { "type": "string", "minLength": 1, "description": "Filled G4/G9 necessity-assessment form instance id." },
+    "consent_text_version": { "type": "string", "minLength": 1 },
+    "retention_policy_id": { "type": "string", "minLength": 1 },
+    "security_evidence_id": { "type": "string", "minLength": 1 },
+    "verbis_confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reference", "before_first_processing"],
+      "properties": {
+        "status": { "enum": ["updated", "scope_confirmed"] },
+        "reference": { "type": "string", "minLength": 1 },
+        "before_first_processing": { "const": true, "description": "INVARIANT: VERBİS done BEFORE first biometric processing/enrollment (G6/§4)." }
+      }
+    },
+    "gate_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-gate evidence pointer (G1-G14). Each gate: evidence_id OR not_applicable_reason.",
+      "required": ["G2", "G3", "G4", "G5", "G6", "G7", "G8", "G10", "G11", "G12"],
+      "properties": {
+        "G2": { "$ref": "#/$defs/gate_ref" }, "G3": { "$ref": "#/$defs/gate_ref" }, "G4": { "$ref": "#/$defs/gate_ref" },
+        "G5": { "$ref": "#/$defs/gate_ref" }, "G6": { "$ref": "#/$defs/gate_ref" }, "G7": { "$ref": "#/$defs/gate_ref" },
+        "G8": { "$ref": "#/$defs/gate_ref" }, "G10": { "$ref": "#/$defs/gate_ref" }, "G11": { "$ref": "#/$defs/gate_ref" },
+        "G12": { "$ref": "#/$defs/gate_ref" }
+      }
+    },
+    "legal_re_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "triggers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["new_purpose", "external_or_special_group", "cross_border_transfer", "new_model_vendor_telemetry", "retention_change", "high_residual_risk", "consequential_use_possibility"] }
+        },
+        "legal_review_evidence_id": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        { "if": { "properties": { "required": { "const": true } }, "required": ["required"] },
+          "then": { "required": ["triggers", "legal_review_evidence_id"] } }
+      ]
+    },
+    "approvers": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "approver_id", "approved_at"],
+        "properties": {
+          "role": { "enum": ["legal_or_controller_rep", "security_ops"] },
+          "approver_id": { "type": "string", "minLength": 1 },
+          "approved_at": { "$ref": "#/$defs/iso_dt" }
+        }
+      },
+      "allOf": [
+        { "contains": { "type": "object", "properties": { "role": { "const": "legal_or_controller_rep" } }, "required": ["role"] }, "minContains": 1 },
+        { "contains": { "type": "object", "properties": { "role": { "const": "security_ops" } }, "required": ["role"] }, "minContains": 1 }
+      ],
+      "description": "Dual-approval (G13): ≥1 legal_or_controller_rep AND ≥1 security_ops. SCHEMA-LIMIT: distinct principals (different approver_id) is a RUNTIME invariant (test T3b)."
+    },
+    "break_glass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["used"],
+      "properties": {
+        "used": { "type": "boolean" },
+        "incident_id": { "type": "string", "minLength": 1 },
+        "kill_switch_review_scheduled": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "properties": { "used": { "const": true } }, "required": ["used"] },
+          "then": { "required": ["incident_id", "kill_switch_review_scheduled"], "properties": { "kill_switch_review_scheduled": { "const": true } } } }
+      ]
+    },
+
+    "supersedes_record_id": { "type": "string", "minLength": 1, "description": "revalidate: the prior decision record this supersedes." },
+    "changed_fields": { "type": "array", "items": { "type": "string" }, "uniqueItems": true, "description": "revalidate: which context attributes changed (G14)." },
+    "revalidation_result": { "enum": ["confirmed", "needs_review", "disabled"], "description": "revalidate outcome." },
+    "needs_review_evidence_id": { "type": "string", "minLength": 1, "description": "revalidate→needs_review: evidence of the trigger that put this context into needs-review (not 'resolved')." },
+
+    "reason": { "type": "string", "minLength": 1, "description": "disable: why (kill-switch/withdrawal/expiry/incident)." },
+    "erasure_or_pseudonymization_task_id": { "type": "string", "minLength": 1, "description": "disable: erasure/pseudonymization job id (vector purge + historical-label pseudonymize, G7/D11)." },
+    "actor_id": { "type": "string", "minLength": 1, "description": "disable: who triggered (single authorized actor allowed for emergency disable)." },
+    "rbac_policy_version": { "type": "string", "minLength": 1, "description": "disable: RBAC policy version under which the actor was authorized." }
+  },
+
+  "allOf": [
+    {
+      "if": { "properties": { "action": { "const": "enable" } }, "required": ["action"] },
+      "then": {
+        "required": [
+          "consequential_use_permitted", "purpose", "scope", "necessity_assessment_evidence_id",
+          "consent_text_version", "retention_policy_id", "security_evidence_id", "verbis_confirmation",
+          "gate_evidence", "legal_re_review", "approvers", "break_glass", "expiry_review_date"
+        ],
+        "properties": { "resulting_state": { "const": "enabled" } }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "const": "revalidate" } }, "required": ["action"] },
+      "then": {
+        "required": [
+          "consequential_use_permitted", "purpose", "scope", "necessity_assessment_evidence_id",
+          "consent_text_version", "retention_policy_id", "security_evidence_id", "verbis_confirmation",
+          "gate_evidence", "legal_re_review", "approvers", "break_glass", "expiry_review_date",
+          "supersedes_record_id", "changed_fields", "revalidation_result"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": { "action": { "const": "revalidate" }, "revalidation_result": { "const": "confirmed" } },
+        "required": ["action", "revalidation_result"]
+      },
+      "then": { "properties": { "resulting_state": { "const": "enabled" } } }
+    },
+    {
+      "if": {
+        "properties": { "action": { "const": "revalidate" }, "revalidation_result": { "const": "needs_review" } },
+        "required": ["action", "revalidation_result"]
+      },
+      "then": { "required": ["needs_review_evidence_id"], "properties": { "resulting_state": { "const": "needs_review" } } }
+    },
+    {
+      "if": {
+        "properties": { "action": { "const": "revalidate" }, "revalidation_result": { "const": "disabled" } },
+        "required": ["action", "revalidation_result"]
+      },
+      "then": { "properties": { "resulting_state": { "const": "disabled" } } }
+    },
+    {
+      "if": { "properties": { "action": { "const": "disable" } }, "required": ["action"] },
+      "then": {
+        "required": ["reason", "erasure_or_pseudonymization_task_id", "actor_id", "rbac_policy_version", "supersedes_record_id"],
+        "properties": { "resulting_state": { "const": "disabled" } }
+      }
+    },
+    {
+      "if": { "properties": { "context_sequence": { "const": 0 } }, "required": ["context_sequence"] },
+      "then": { "properties": { "previous_record_id": { "type": "null" }, "previous_record_hash": { "type": "null" } } },
+      "else": { "properties": { "previous_record_id": { "type": "string" }, "previous_record_hash": { "type": "string" } } }
+    }
+  ]
+}
