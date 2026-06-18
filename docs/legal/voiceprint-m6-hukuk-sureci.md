@@ -169,6 +169,10 @@ Rıza yoksa → **enrollment yok, matching yok, vektör üretimi yok, cache/log/
 + kill-switch + **negatif test kanıtı** (rızasız kullanıcıda hiçbir biyometrik artefakt oluşmadığı kanıtlanır).
 Bu, ADR-0033 amend'in "kod serbest, canlı YASAK" sınırının teknik teminatıdır.
 
+> **Sözleşme (machine-checkable):** Fail-closed negatif test seti + enforcement invariant'ları:
+> [`docs/contracts/voiceprint-consent-enforcement-test-spec.md`](../contracts/voiceprint-consent-enforcement-test-spec.md)
+> (kod yazılınca CI-gate; şu an §3 şema-invariant testi koşuyor).
+
 > **Hukuk-gate vs mühendislik-gate ayrımı (Codex):** Hukuk = "hangi kontrol gerekir, hangi eşik sağlanmalı,
 > m.9/DPA tetikleniyor mu?" (gereksinim seti). **Mühendislik/Ops** = "rızasız kullanıcıda vektör oluşmuyor"
 > negatif testi, kill-switch, log/cache/backup kontrolü, mimari aktarım kanıtı, vendor/telemetry envanteri
@@ -225,7 +229,9 @@ teknik+organizasyonel ayağı.
   **server-side enforced** (sadece UI toggle değil — RBAC + bypass-edilemez). Enablement kararına: context ID,
   amaç, kapsam, kişi grubu, rıza-metni versiyonu, etki-değerlendirmesi (G4) ID, VERBİS teyidi, retention-policy ID,
   security-evidence (G8) ID, approver'lar, timestamp, expiry/review tarihi → **immutable audit log**. Break-glass
-  açma **yasak** (veya ayrı incident kaydı + otomatik kill-switch review).
+  açma **yasak** (veya ayrı incident kaydı + otomatik kill-switch review). Machine-enforced kayıt şeması:
+  [`docs/contracts/voiceprint-enablement-audit.schema.json`](../contracts/voiceprint-enablement-audit.schema.json)
+  (şemaya valide kayıt olmadan enable reddedilir; dual-approval + invariant'lar const-pinned, 10 invalid-red testi geçti).
 - [ ] **G14 — Per-context revalidation**: bağlam/amaç/katılımcı tipi/alt-işleyen/model-telemetry/saklama süresi/
   veri-sorumlusu rolü değişirse enablement **otomatik "needs-review"**; G4/G6/G8/G10/G12 yeniden geçilmeden açık kalamaz.
 
