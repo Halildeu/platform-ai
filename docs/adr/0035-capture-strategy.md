@@ -1,6 +1,6 @@
 # ADR-0035: Capture Stratejisi (Meeting Intelligence — Adoption Kapısı)
 
-- Status: PROPOSED — KARAR BEKLİYOR (Halil + hukuk)
+- Status: **ACCEPTED** (Karar 1 + Karar 2 — Halil, 2026-06-18)
 - Tarih: 2026-06-18
 - Issue: #160 [Faz24 T-A] Capture — adoption kapısı [P0]
 - Kapsam: Toplantı sesini hangi yolla yakalayacağız + konuşmacı kimliği nasıl kurulacak
@@ -23,55 +23,53 @@ canlı ve hazır; ama onu besleyecek capture client SIFIR. Issue net emir veriyo
 | Kurulum | 🔴 tenant admin onayı | 🔴 workspace onayı | ✅ tek seferlik |
 | 3.parti bağımlılık | 🔴 MS Graph | 🔴 2 API | ✅ yok |
 
-## Karar 1 — Capture yolu (AÇIK KARAR — Halil)
+## Karar 1 — Capture yolu: **RECORDER (Electron) primary** ✅
 
-Üç yol yukarıdaki tabloda değerlendirildi. Analiz özeti (karar değil, girdi):
-- Recorder tek client ile tüm platformlar + yüz yüze + hibrit + sıfır maliyet +
-  ölçek + KVKK-temiz sağlıyor; bot'ların tek üstünlüğü otomatik katılım.
-- Bot'lar yüz yüze/hibrit yapamıyor, lisans/merkez-GPU maliyeti getiriyor, tek
-  platforma kilitli.
+Halil kararı (2026-06-18): ana kanal = **Masaüstü/Mobil Recorder.** Tek güçlü yol
+(tüm platform + yüz yüze + hibrit + 0₺ + cihazda ölçek + KVKK-temiz). Bot'lar
+**şimdilik defer** — ileride "tam otomatik katılım" talebi olursa gündeme alınır.
 
-Nihai capture yolu seçimi Halil'e aittir — biz yalnızca analizi sunuyoruz.
+→ Client geliştirme açılabilir: desktop (#75-84) / mobile (#85-94).
 
-Halil'in karara bağlaması:
-- Ana kanal hangisi olacak? (recorder / Teams bot / Zoom-Meet bot)
-- Bot'lar ikincil/opsiyonel olarak gündeme alınsın mı, hiç mi?
+## Karar 2 — Konuşmacı Kimliği: **(a) Voiceprint** ✅ (go-live HUKUK-GATE'li)
 
-## Karar 2 — Konuşmacı Kimliği (AÇIK KARAR — Halil + hukuk)
+Halil kararı (2026-06-18): otomatik tanıma için **voiceprint** (kişiden ~20sn ses
+imzası → otomatik tanı). Voiceprint **biyometrik / özel-nitelikli veridir**
+(KVKK m.6); bu yüzden **kod yazılabilir ama canlı işleme aşağıdaki gate'ler
+tamamlanmadan AÇILAMAZ.**
 
-Ürün şartı: her konuşmacının sesi ayrılmalı VE tanımlanmalı (isimli).
+| Yol | Karar |
+|---|---|
+| (a) Voiceprint | ✅ **SEÇİLDİ** — go-live hukuk-gate'li |
+| (b) Manuel etiketleme | rıza-vermeyene **fallback** olarak kalır |
+| (c) Herkes kendi cihazından | desteklenir (S2); voiceprint tek-ortak-cihazı da destekler |
 
-| Yol | Nasıl | Otomatik? | KVKK |
-|---|---|---|---|
-| (a) Voiceprint (kişiden 20sn ses imzası → otomatik tanı) | bir kez kur, hep otomatik | ✅ | 🔴 BİYOMETRİK / özel-nitelikli (m.6) — açık rıza + hukuk + ADR-0033 değişikliği |
-| (b) Manuel etiketleme | sistem ayırır, insan "1=Ahmet" der | ❌ HER toplantıda elle | ✅ temiz |
-| (c) Herkes kendi cihazından | kimlik login'den gelir | ✅ | ✅ temiz |
+### Voiceprint GO-LIVE gate'leri (KVKK m.6)
+1. **ADR-0033 amend** — voiceprint yasağı kaldırılır (ayrı PR).
+2. **Hukuk süreci** (canlı kullanımdan ÖNCE tamamlanmalı):
+   - açık rıza framework (çalışan–işveren rıza geçerliliği — hukuk teyidi şart)
+   - VERBİS güncelleme + aydınlatma metni
+   - saklama / imha politikası
+   - rıza-vermeyene alternatif yol (manuel-etiketleme fallback, Karar 2-b)
 
-Analiz girdisi (karar değil): otomatik ayırma şartı (a) voiceprint veya (c) ile
-karşılanır; (b) manuel her toplantıda elle uğraştırır.
+> Voiceprint **kodu** yazılabilir; **canlı işleme** hukuk süreci + rıza altyapısı
+> tamamlanana kadar açılamaz (KVKK m.6 gate).
 
-Halil + hukuğun karara bağlaması:
-1. Biyometrik voiceprint yolu açılıyor mu? (ADR-0033'ün voiceprint yasağı kalkar)
-2. Açık rıza süreci geçerli mi? (çalışan–işveren rızası KVKK'da tartışmalı)
-3. Ek yükümlülükler kimde? (VERBİS, aydınlatma, saklama/imha, rıza-vermeyene alternatif)
-4. Hukuk netleşene kadar geçici olarak (b) insan-etiketleme dursun mu?
+## Açık Sorular — yanıtlandı
 
-## Açık Sorular
+S1. **Tek ekran:** ✅ Evet — tüm toplantılar (recorder/online/yüz yüze, kaynak
+    fark etmez) tek dashboard'da birleşir (audio-gateway her kaynağı tek formata
+    çevirir, meetingId ile birleştirir).
 
-S1. Tek ekran: Tüm toplantılar (recorder/online/yüz yüze — kaynak fark etmez)
-    kullanıcıya TEK dashboard'da mı sunulacak? (Mimari buna uygun: audio-gateway
-    her kaynağı tek formata çevirir, meetingId ile birleşir.)
-
-S2. Cihaz modeli: Konuşmacı kimliğini kesinleştirmek için herkes KENDİ
-    cihazından mı (telefon yeterli) bağlanacak, yoksa odada TEK ortak cihaz mı
-    kullanılacak?
-    - Herkes kendi cihazı → her ses ayrı kanal + isim kesin (KVKK-temiz, (c))
-    - Tek ortak cihaz → tek mikrofon → ayrım için (a) voiceprint veya (b) gerekir
-    Bu seçim Karar 2'yi doğrudan belirliyor.
+S2. **Cihaz modeli:** Voiceprint **tek-ortak-cihaz** senaryosunu da destekler;
+    UX/cihaz tasarımı buna göre kilitlenebilir. (Herkes-kendi-cihazı varyantı da
+    açık kalır — her ses ayrı kanal + KVKK-temiz.)
 
 ## Sonuçlar
 
-- Karar 1 onaylanınca → seçilen client geliştirme (desktop #75-84 / mobile #85-94) başlar
-- Karar 2 (a) çıkarsa → ADR-0033 güncellenecek + hukuk süreci tetiklenecek
-- S2'nin yanıtı cihaz/UX tasarımını ve konuşmacı kimliği yöntemini kilitler
-- G-CAP gate: kayıt tamamlanma + (seçilen yolda) konuşmacı doğruluk oranı
+- **Karar 1** → seçilen client geliştirme (desktop #75-84 / mobile #85-94) başlar.
+- **Karar 2** → tetiklenen işler:
+  - ADR-0033 voiceprint-ban **amend PR** (ayrı)
+  - **Hukuk süreci kickoff issue** (yukarıdaki 4 madde; Halil + hukuk koordinasyonu)
+  - voiceprint go-live KVKK m.6 gate'i (hukuk + rıza altyapısı tamamlanmadan canlı yok)
+- **G-CAP gate:** kayıt tamamlanma oranı + konuşmacı doğruluk oranı ≥ hedef.
