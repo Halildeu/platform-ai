@@ -90,8 +90,19 @@ def load_rttm(path: Path) -> list[Turn]:
     return turns
 
 
-def compute_der(reference: list[Turn], hypothesis: list[Turn]) -> float:
-    """DER via pyannote.metrics (optimal speaker mapping). Lower is better."""
+def compute_der(
+    reference: list[Turn],
+    hypothesis: list[Turn],
+    collar: float = 0.25,
+    skip_overlap: bool = False,
+) -> float:
+    """DER via pyannote.metrics (optimal speaker mapping). Lower is better.
+
+    `collar` (seconds) forgives boundary jitter around each reference segment —
+    the dscore/pyannote-TR standard is 0.25 s. With collar=0 every boundary wobble
+    counts as error, inflating DER and making numbers incomparable to published
+    results (review #164). `skip_overlap` excludes overlapped speech regions.
+    """
     from pyannote.core import Annotation, Segment
     from pyannote.metrics.diarization import DiarizationErrorRate
 
@@ -101,7 +112,8 @@ def compute_der(reference: list[Turn], hypothesis: list[Turn]) -> float:
     hyp = Annotation()
     for t in hypothesis:
         hyp[Segment(t.start, t.end)] = t.speaker
-    return float(DiarizationErrorRate()(ref, hyp))
+    metric = DiarizationErrorRate(collar=collar, skip_overlap=skip_overlap)
+    return float(metric(ref, hyp))
 
 
 def _vram_mb() -> int:
@@ -138,14 +150,23 @@ def _trusted_torch_load() -> Iterator[None]:
 # --------------------------------------------------------------------------- #
 # pyannote backend (end-to-end pipeline)
 # --------------------------------------------------------------------------- #
-def run_pyannote(model: str, device: str, token: str) -> tuple[object, float]:
-    """Load pyannote pipeline; return (pipeline, load_sec). Heavy import deferred."""
+def run_pyannote(
+    model: str, device: str, token: str, revision: str = ""
+) -> tuple[object, float]:
+    """Load pyannote pipeline; return (pipeline, load_sec). Heavy import deferred.
+
+    `revision` pins the HF model to a commit/tag so results are reproducible
+    (review #164: a bare model id can silently change weights between runs).
+    """
     import torch  # type: ignore[import-not-found]
     from pyannote.audio import Pipeline
 
+    kwargs: dict[str, object] = {"use_auth_token": token}
+    if revision:
+        kwargs["revision"] = revision
     with _trusted_torch_load():
         t0 = time.perf_counter()
-        pipeline = Pipeline.from_pretrained(model, use_auth_token=token)
+        pipeline = Pipeline.from_pretrained(model, **kwargs)
     if device == "cuda":
         pipeline.to(torch.device("cuda"))
     return pipeline, time.perf_counter() - t0
@@ -347,6 +368,9 @@ def main() -> None:
     ap.add_argument("--tag", default="", help="label for the JSON result row")
     ap.add_argument("--num-speakers", type=int, default=0, help="0 = auto (speechbrain clustering)")
     ap.add_argument("--cluster-threshold", type=float, default=0.7, help="speechbrain cosine cut")
+    ap.add_argument("--collar", type=float, default=0.25, help="DER collar (s); dscore std = 0.25")
+    ap.add_argument("--skip-overlap", action="store_true", help="exclude overlap from DER")
+    ap.add_argument("--revision", default="", help="HF model revision/commit to pin (reproducible)")
     ap.add_argument("--evidence", default="", help="if set, append the JSON row to this file")
     args = ap.parse_args()
 
@@ -385,7 +409,7 @@ def main() -> None:
         if not token:
             print("DIA_HF_TOKEN not set — gated pyannote model needs it", file=sys.stderr)
             sys.exit(4)
-        pipeline, load_sec = run_pyannote(model_used, args.device, token)
+        pipeline, load_sec = run_pyannote(model_used, args.device, token, args.revision)
 
         def diarize_fn(wav: Path) -> list[Turn]:
             return _pyannote_turns(pipeline, wav)
@@ -405,32 +429,37 @@ def main() -> None:
         hyp = diarize_fn(wav)
         latencies.append((time.perf_counter() - t0) * 1000)
         audio_sec_total += _wav_duration(wav)
-        ders.append(compute_der(ref, hyp))
+        ders.append(compute_der(ref, hyp, args.collar, args.skip_overlap))
         print(f"  [{len(ders)}/{len(wavs)}] {wav.name} DER={ders[-1]:.3f}", file=sys.stderr)
 
     stop.set()
     proc_sec = sum(latencies) / 1000.0
-    lat_sorted = sorted(latencies)
-    p95 = lat_sorted[min(len(lat_sorted) - 1, int(0.95 * len(lat_sorted)))]
+    # At small n (n=6) a "p95" index lands on the last element, i.e. the max.
+    # Report it honestly as *_max rather than implying a real percentile (#164).
     row = {
         "tag": args.tag or f"{args.backend}",
         "backend": args.backend,
         "model": model_used,
+        "revision": args.revision or None,  # reproducibility: pinned HF commit/tag
         "device": args.device,
         "n_samples": len(ders),
         "der": round(statistics.mean(ders), 4),
-        "der_p95": round(sorted(ders)[min(len(ders) - 1, int(0.95 * len(ders)))], 4),
+        "der_max": round(max(ders), 4) if ders else 0.0,
+        "collar": args.collar,
+        "skip_overlap": args.skip_overlap,
         "p50_ms": round(statistics.median(latencies)),
-        "p95_ms": round(p95),
+        "lat_max_ms": round(max(latencies)) if latencies else 0,
         "audio_sec": round(audio_sec_total, 1),
         "rtf": round(proc_sec / audio_sec_total, 3) if audio_sec_total else None,
         "model_load_sec": round(load_sec, 1),
         "peak_vram_mb": peak["mb"],
+        "fixture_kind": "synthetic-smoke",  # NOT a baseline DER — see ADR-0033
     }
     line = json.dumps(row, ensure_ascii=False)
     print(line)
     print(
-        f"== {row['tag']}: DER {row['der']:.2%} on {row['n_samples']} samples, "
+        f"== {row['tag']}: DER {row['der']:.2%} (collar={row['collar']}s, "
+        f"synthetic-smoke) on {row['n_samples']} samples, "
         f"p50 {row['p50_ms']}ms, RTF {row['rtf']}, peak VRAM {row['peak_vram_mb']}MB",
         file=sys.stderr,
     )

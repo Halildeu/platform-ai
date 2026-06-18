@@ -54,16 +54,23 @@ if ($srcWavCount -lt 2) {
 }
 $maxSpk = [Math]::Min(3, $srcWavCount)
 Write-Host "== diar_sweep: backend=$Backend, source voices=$srcWavCount (maxSpeakers=$maxSpk)" -ForegroundColor Cyan
+Write-Host "== NOTE: produces a SYNTHETIC-SMOKE DER (pipeline/determinism harness), NOT a baseline." -ForegroundColor Yellow
+if ($Backend -eq "pyannote") {
+    Write-Host "== SETUP: install pyannote in an ISOLATED venv (.venv-diar); requirements-pyannote.txt can clobber a CUDA torch — reinstall torch==<cuxx> after if your GPU torch downgrades to +cpu." -ForegroundColor Yellow
+}
 
-# (seed, num-speakers, turns, gap) — seed is the unique filename key. n is capped
-# at the available voices so nothing is skipped for lack of speakers.
+# (seed, num-speakers, turns, gap, offset) — seed is the unique filename key.
+# `offset` rotates WHICH source voices a conversation uses (review #164/Codex):
+# without it every fixture reused the same first 2-3 voices, weakening the "n
+# independent samples" claim. n is capped at available voices.
+$maxOff = [Math]::Max(0, $srcWavCount - $maxSpk)
 $combos = @(
-    @{ seed = 11; n = 2; turns = 8; gap = 0.40 },
-    @{ seed = 12; n = 2; turns = 10; gap = 0.30 },
-    @{ seed = 13; n = 2; turns = 6; gap = 0.60 },
-    @{ seed = 14; n = $maxSpk; turns = 9; gap = 0.40 },
-    @{ seed = 15; n = $maxSpk; turns = 12; gap = 0.50 },
-    @{ seed = 16; n = 2; turns = 9; gap = 0.35 }
+    @{ seed = 11; n = 2; turns = 8; gap = 0.40; off = 0 },
+    @{ seed = 12; n = 2; turns = 10; gap = 0.30; off = [Math]::Min(1, $maxOff) },
+    @{ seed = 13; n = 2; turns = 6; gap = 0.60; off = $maxOff },
+    @{ seed = 14; n = $maxSpk; turns = 9; gap = 0.40; off = 0 },
+    @{ seed = 15; n = $maxSpk; turns = 12; gap = 0.50; off = [Math]::Min(1, $maxOff) },
+    @{ seed = 16; n = 2; turns = 9; gap = 0.35; off = $maxOff }
 )
 
 Write-Host "== building $($combos.Count) fixtures into $Dst" -ForegroundColor Cyan
@@ -75,7 +82,7 @@ New-Item -ItemType Directory -Force -Path $Dst | Out-Null
 $built = 0
 foreach ($c in $combos) {
     $genLog = "$env:TEMP\diar_gen_$($c.seed).log"
-    cmd /c "python scripts\make_synthetic_diar.py --src `"$Src`" --dst `"$Dst`" --num-speakers $($c.n) --turns $($c.turns) --gap-sec $($c.gap) --seed $($c.seed) 2> `"$genLog`""
+    cmd /c "python scripts\make_synthetic_diar.py --src `"$Src`" --dst `"$Dst`" --num-speakers $($c.n) --turns $($c.turns) --gap-sec $($c.gap) --seed $($c.seed) --speaker-offset $($c.off) 2> `"$genLog`""
     if ($LASTEXITCODE -eq 0) {
         $built++
     } else {

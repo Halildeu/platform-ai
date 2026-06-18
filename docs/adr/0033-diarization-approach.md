@@ -38,16 +38,24 @@ a model's reputation. Two hard constraints frame the decision:
 
 | Candidate | License | Gated model? | TR DER | Peak VRAM | RTF | Notes |
 |---|---|---|---|---|---|---|
-| **pyannote 3.1** (primary) | MIT (model: gated, free) | yes (HF token) | **50.14%** (n=6, synthetic) | 2155 MB | 0.024 | most accurate; end-to-end pipeline |
-| **speechbrain ECAPA** (alternative) | Apache-2.0 | **no** (free) | **56.64%** (n=6, synthetic) | **307 MB** | **0.006** | ~6.5pt worse DER but 7× less VRAM, 9× faster |
+| **pyannote 3.1** | MIT (model: gated, free) | yes (HF token) | 50.14%¹ | 2155 MB | 0.024 | end-to-end pipeline |
+| **speechbrain ECAPA** | Apache-2.0 | **no** (free) | 56.64%¹ | **307 MB** | **0.006** | 7× less VRAM, 9× faster |
 | NeMo | Apache-2.0 | no | PENDING (adapter not wired) | PENDING | PENDING | heavier install; candidate only if pyannote fails target |
 | Cloud (Azure/Google) | commercial | n/a | not measured | n/a | n/a | **m.9 cross-border → ADR-0030 boundary**; rejected unless on-prem fails |
 | VAD-only fallback | — | no | n/a (no speaker sep.) | minimal | minimal | degraded fallback if no GPU model fits |
 
-Both running backends share one harness so the comparison is apples-to-apples
-(same 6 fixtures, same DER scorer, both on GPU). The alternative requirement of
-#161 ("pyannote vs alternatif") is **met**: pyannote and speechbrain are both
-measured. NeMo/cloud are compared here on license/VRAM/KVKK criteria only.
+> ¹ **synthetic-smoke, NOT a baseline DER (review #164).** These numbers were
+> produced with `collar=0` on a synthetic fixture whose per-speaker clips repeat
+> byte-identically and never overlap. That means they measure mainly
+> over-segmentation, **not speaker confusion or overlap** — the hardest, most
+> product-relevant part of DER. With the dscore-standard `collar=0.25` (now the
+> `diar_matrix.py` default) and a realistic fixture/pilot, absolute DER and the
+> pyannote↔speechbrain gap will both move. **No ranking claim is drawn from these
+> cells**; they prove the harness runs and is deterministic, nothing more.
+
+Both running backends share one harness (same fixtures, same scorer, both on
+GPU). The #161 "pyannote vs alternatif" requirement is **met** in that both are
+wired and measurable. NeMo/cloud are compared on license/VRAM/KVKK only.
 Evidence: `docs/pr-diar-01-line-161-matrix-report.md`,
 `docs/evidence/diar-results-2026-06-17.jsonl`.
 
@@ -61,18 +69,29 @@ Evidence: `docs/pr-diar-01-line-161-matrix-report.md`,
 - `suggest_mapping` — best-effort ordering heuristic vs a known attendee roster,
   explicitly a suggestion to be human-reviewed, never automatic identification.
 
-## Decision (PROVISIONAL — pending evidence)
+> The "human-confirmed" requirement is a *code helper* today (suggest vs apply are
+> separate), but the actual UI/process enforcement that a human approves a mapping
+> before any name is persisted is a **separate contract**, not guaranteed by this
+> module alone (review #164, Codex). To be tracked as its own issue before any
+> name-linking ships.
 
-1. **Placement:** diarization runs as **post-processing batch**, not a live model
-   (8 GB constraint). This part is firm regardless of backend choice.
-2. **Backend:** **pyannote 3.1 is the provisional primary** (most accurate:
-   50.14% vs 56.64% DER on the n=6 synthetic set), with **speechbrain ECAPA as a
-   viable lightweight fallback** (7× less VRAM at 307 MB, 9× faster) — attractive
-   under the 8 GB budget if its accuracy proves acceptable on real meetings.
-   Final lock deferred to the pilot DER (absolute numbers; synthetic only settles
-   relative ranking).
-3. **Identity:** anonymous labels canonical; names only via human-confirmed
-   overlay (KVKK).
+## Decision
+
+Only the placement and identity decisions are firm now; **backend selection is
+deliberately NOT decided in this ADR** (review #164 — the synthetic smoke set
+cannot rank backends).
+
+1. **Placement (FIRM):** diarization runs as **post-processing batch**, not a
+   live model (8 GB constraint). Backend-independent, settled.
+2. **Backend (UNDECIDED):** pyannote 3.1 and speechbrain ECAPA are both **wired
+   and measurable candidates**. No primary is chosen here. Their trade-off space
+   is recorded — speechbrain costs 7× less VRAM (307 MB) and is 9× faster, which
+   matters under the 8 GB budget; pyannote is a single end-to-end pipeline — but
+   which one wins on Turkish DER is **open until a collar=0.25 measurement on a
+   realistic fixture + pilot**. The synthetic cells do not settle even the
+   relative ranking (see ¹).
+3. **Identity (FIRM):** anonymous labels canonical; names only via
+   human-confirmed overlay (KVKK).
 
 ## Explicit Non-Decision
 
@@ -84,8 +103,9 @@ Evidence: `docs/pr-diar-01-line-161-matrix-report.md`,
 ## Reopen / Promote-to-ACCEPTED Triggers
 
 Promote only when ALL hold:
-- pyannote sweep (n≥5) recorded — ✅ done (n=6);
-- speechbrain alternative measured on the same fixtures — ✅ done (n=6);
+- pyannote + speechbrain harness runs (n≥5) — ✅ done (n=6, synthetic-smoke only);
+- a **collar=0.25 measurement on a realistic fixture** (overlap + distinct,
+  non-identical speaker audio) — ⬜ pending (current cells are collar=0 smoke);
 - a real-meeting (pilot) DER calibrates absolute numbers (gated on go-live #59 /
   consent, like ADR-0031's pilot leg) — ⬜ pending;
 - chosen backend meets the agreed diarization DER target (G-WER) — ⬜ pending.
