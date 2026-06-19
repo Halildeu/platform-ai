@@ -1,6 +1,7 @@
 # ADR-0033: Diarization Approach (pyannote vs alternative)
 
 - Status: **DRAFT — EVIDENCE PENDING (do NOT promote to ACCEPTED yet)**
+- Amended by: **ADR-0035 (2026-06-18)** — voiceprint constraint updated (KVKK m.6, legal-gated)
 - Date: 2026-06-17
 - Issue: `#161 [Faz24 T-B] STT kalite kanıtı — Türkçe WER + diarization [P0]`
 - Decision scope: which diarization approach the product commits to, and where it
@@ -32,8 +33,9 @@ a model's reputation. Two hard constraints frame the decision:
    enrolment is now **approved** for automatic speaker identification — but it is
    biometric / special-category data (KVKK m.6), so **live processing is GATED on
    the legal track** (explicit-consent framework + VERBİS/aydınlatma +
-   retention/erasure policy + opt-out fallback to manual labelling). Code may be
-   written; real-voiceprint processing must NOT go live until that gate clears.
+   retention/erasure policy + opt-out fallback to manual labelling) — tracked in
+   **#168**. Code may be written; real-voiceprint processing must NOT go live
+   until that gate clears.
    Until then, speaker→person linking stays anonymous + human-confirmed (see
    "Speaker → person" below).
 
