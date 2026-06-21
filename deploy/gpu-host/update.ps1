@@ -118,12 +118,19 @@ Write-Host "[update] $before -> $after (tracked tree pinned to origin/$Branch)" 
 #    the $LASTEXITCODE check — re-introducing the same "git pin landed, restart
 #    aborted" failure. So route every call through a helper that drops stderr
 #    WITHOUT the PS 2>&1 pipe and forces EAP=Continue around the native call.
-function Invoke-SchtasksQuiet {
-  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$SchtasksArgs)
+# Explicit -Action/-TaskName (NOT ValueFromRemainingArguments, which is unreliable
+# on Windows PowerShell 5.1 — it can collapse the remaining positionals into one
+# argument, mangling `/Query /TN <task>` so a present task reads as "not installed"
+# and the restart is silently skipped). Codex review #194.
+function Invoke-SchtasksTask {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("/Query", "/End", "/Run")][string]$Action,
+    [Parameter(Mandatory = $true)][string]$TaskName
+  )
   $oldEap = $ErrorActionPreference
   try {
     $ErrorActionPreference = "Continue"
-    & schtasks.exe @SchtasksArgs 1> $null 2> $null
+    & schtasks.exe $Action /TN $TaskName 1> $null 2> $null
     return $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $oldEap
@@ -135,15 +142,15 @@ if ($NoRestart) {
 } else {
   $restartFailed = $false
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
-    if ((Invoke-SchtasksQuiet "/Query" "/TN" $task) -ne 0) {
+    if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
       Write-Host "[update] task '$task' not installed (skipping)" -ForegroundColor Yellow
       continue
     }
     # /End returns non-zero when the task is not running (benign). When it WAS
     # running, give the process ~2s to release its listening port before /Run
     # starts a fresh instance (live-stt/meeting-ai bind 8200/8300).
-    if ((Invoke-SchtasksQuiet "/End" "/TN" $task) -eq 0) { Start-Sleep -Seconds 2 }
-    $runExit = Invoke-SchtasksQuiet "/Run" "/TN" $task
+    if ((Invoke-SchtasksTask -Action "/End" -TaskName $task) -eq 0) { Start-Sleep -Seconds 2 }
+    $runExit = Invoke-SchtasksTask -Action "/Run" -TaskName $task
     if ($runExit -ne 0) {
       Write-Host "[update] ERROR: schtasks /Run '$task' exit=$runExit" -ForegroundColor Red
       $restartFailed = $true
