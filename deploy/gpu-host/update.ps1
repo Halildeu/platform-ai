@@ -105,17 +105,60 @@ if ($LASTEXITCODE -ne 0) { Fail "git reset --hard origin/$Branch failed." }
 $after = (git rev-parse HEAD).Trim()
 Write-Host "[update] $before -> $after (tracked tree pinned to origin/$Branch)" -ForegroundColor Green
 
-# 4. Restart the deploy scheduled tasks so they pick up the new code.
+# 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
+#    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
+#    ScheduledTasks module is ABSENT on some hosts (this GPU host's Windows
+#    PowerShell 5.1 has no Restart-ScheduledTask — Get-ScheduledTask would throw
+#    CommandNotFound and, under $ErrorActionPreference=Stop, abort the whole
+#    update after the git pin already landed). #193 follow-up; Codex review #194.
+#
+#    CRITICAL: schtasks writes benign stderr on /Query-missing and /End-not-
+#    running. PowerShell's `2>&1` pipe can wrap native stderr into a
+#    NativeCommandError that, under $ErrorActionPreference=Stop, terminates BEFORE
+#    the $LASTEXITCODE check — re-introducing the same "git pin landed, restart
+#    aborted" failure. So route every call through a helper that drops stderr
+#    WITHOUT the PS 2>&1 pipe and forces EAP=Continue around the native call.
+# Explicit -Action/-TaskName (NOT ValueFromRemainingArguments, which is unreliable
+# on Windows PowerShell 5.1 — it can collapse the remaining positionals into one
+# argument, mangling `/Query /TN <task>` so a present task reads as "not installed"
+# and the restart is silently skipped). Codex review #194.
+function Invoke-SchtasksTask {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("/Query", "/End", "/Run")][string]$Action,
+    [Parameter(Mandatory = $true)][string]$TaskName
+  )
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & schtasks.exe $Action /TN $TaskName 1> $null 2> $null
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
 } else {
+  $restartFailed = $false
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
-    $t = Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
-    if (-not $t) { Write-Host "[update] task '$task' not installed (skipping)" -ForegroundColor Yellow; continue }
-    try { Restart-ScheduledTask -TaskName $task -ErrorAction Stop }
-    catch { Stop-ScheduledTask -TaskName $task -EA SilentlyContinue; Start-ScheduledTask -TaskName $task }
-    Write-Host "[update] restarted $task" -ForegroundColor Green
+    if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
+      Write-Host "[update] task '$task' not installed (skipping)" -ForegroundColor Yellow
+      continue
+    }
+    # /End returns non-zero when the task is not running (benign). When it WAS
+    # running, give the process ~2s to release its listening port before /Run
+    # starts a fresh instance (live-stt/meeting-ai bind 8200/8300).
+    if ((Invoke-SchtasksTask -Action "/End" -TaskName $task) -eq 0) { Start-Sleep -Seconds 2 }
+    $runExit = Invoke-SchtasksTask -Action "/Run" -TaskName $task
+    if ($runExit -ne 0) {
+      Write-Host "[update] ERROR: schtasks /Run '$task' exit=$runExit" -ForegroundColor Red
+      $restartFailed = $true
+    } else {
+      Write-Host "[update] restarted $task" -ForegroundColor Green
+    }
   }
+  if ($restartFailed) { Fail "One or more scheduled tasks failed to restart (git pin landed; services may be stale code)." }
 }
 
 Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8300/health" -ForegroundColor Cyan
