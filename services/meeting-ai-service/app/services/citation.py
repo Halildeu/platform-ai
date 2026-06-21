@@ -220,7 +220,14 @@ def _tokens(text: str) -> set[str]:
 
 
 def _similarity(claim_tokens: set[str], sent_tokens: set[str]) -> float:
-    """Overlap coefficient: |A∩B| / |A| — how much of the claim is covered."""
+    """Overlap coefficient: |A∩B| / |A| — how much of the claim is covered.
+
+    Deliberately EXACT-token (no prefix/stem matching): a naive prefix merge can't
+    tell aspect/tense apart ("onaylandı" done vs "onaylanması" pending → both stem
+    "onaylan"), which would FALSE-PASS a pending item as decided. For a regulated
+    product precision > recall — withholding a true-but-morphologically-variant claim
+    is safe; shipping a false one is not. Suffix-aware recall (a proper, tense-
+    preserving Turkish lemmatizer) is the v2 roadmap, not a heuristic."""
     if not claim_tokens:
         return 0.0
     return len(claim_tokens & sent_tokens) / len(claim_tokens)
