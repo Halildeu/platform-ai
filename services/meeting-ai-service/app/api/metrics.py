@@ -19,6 +19,7 @@ class AnalyzeResult(str, Enum):
     TIMEOUT = "timeout"  # 504
     NOT_IMPLEMENTED = "not_implemented"  # 501 (LLM stub)
     BACKEND_ERROR = "backend_error"  # 502 (LLM backend unreachable/unusable)
+    REDACTION_BLOCKED = "redaction_blocked"  # 422 (ADR-0043 D3 fail-closed residual PII)
 
 
 router = APIRouter()

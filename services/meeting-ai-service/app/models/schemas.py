@@ -33,29 +33,55 @@ class ActionItem(BaseModel):
 
 
 class Citation(BaseModel):
-    """#162: a decision/action grounded to its source transcript sentence."""
+    """#162/ADR-0043 D4: a decision/action grounded + entailment-checked to its source."""
 
     claim: str = Field(description="The decision/action text")
     source_index: int = Field(description="Source sentence index, -1 if ungrounded")
     source_text: str = Field(default="", description="The transcript sentence it came from")
-    similarity: float = Field(description="Token-overlap score with the source", ge=0.0, le=1.0)
-    grounded: bool = Field(description="False = ungrounded (possible hallucination)")
+    similarity: float = Field(description="Content-word coverage of the source", ge=0.0, le=1.0)
+    grounded: bool = Field(description="True iff status==PASSED (shippable; ADR-0043 D8.1)")
+    status: str = Field(default="FAILED", description="PASSED / FAILED / LOW_CONFIDENCE")
+    reason: str = Field(default="", description="Why this verdict (audit)")
     start_sec: float | None = Field(
         default=None, description="Source sentence start (sec) when STT timing is available"
     )
+    # ADR-0043 D4 hash/offset key — pin the citation to the exact transcript span.
+    source_char_start: int = Field(default=-1, description="Source span start char (-1 ungrounded)")
+    source_char_end: int = Field(default=-1, description="Source span end char (-1 ungrounded)")
+    source_hash: str = Field(default="", description="sha256 of source sentence (tamper pin)")
+    quote_hash: str = Field(default="", description="sha256 of quoted span (tamper pin)")
+
+
+class RejectedClaim(BaseModel):
+    """ADR-0043 D8.1: a claim the analyzer produced but the guard REJECTED (not shipped
+    as a user-visible decision/action). Kept for transparency/audit, not as fact."""
+
+    claim: str = Field(description="The rejected claim text")
+    kind: str = Field(description="decision / action")
+    status: str = Field(description="FAILED / LOW_CONFIDENCE")
+    reason: str = Field(description="Why rejected (e.g. ungrounded / polarity contradiction)")
+    similarity: float = Field(description="Best content-word coverage found", ge=0.0, le=1.0)
 
 
 class AnalyzeResponse(BaseModel):
-    """Summary + decisions + action items + #162 citations."""
+    """Summary + **grounded-only** decisions/action items + #162 citations (ADR-0043 D8.1)."""
 
     summary: str = Field(description="Short meeting summary")
-    decisions: list[str] = Field(default_factory=list)
-    action_items: list[ActionItem] = Field(default_factory=list)
+    decisions: list[str] = Field(
+        default_factory=list, description="GROUNDED-only (ADR-0043 D8.1 fail-closed)"
+    )
+    action_items: list[ActionItem] = Field(
+        default_factory=list, description="GROUNDED-only (ADR-0043 D8.1 fail-closed)"
+    )
     citations: list[Citation] = Field(
-        default_factory=list, description="#162: each decision/action grounded to transcript"
+        default_factory=list, description="PASSED citation per shipped decision/action"
+    )
+    rejected_claims: list[RejectedClaim] = Field(
+        default_factory=list,
+        description="ADR-0043 D8.1: ungrounded/contradicted claims withheld from the output",
     )
     ungrounded_count: int = Field(
-        default=0, description="#162: claims not grounded in transcript (hallucination guard)", ge=0
+        default=0, description="#162: claims rejected by the hallucination guard", ge=0
     )
     redacted: bool = Field(description="Whether PII redaction ran before analysis")
     redaction_count: int = Field(description="PII spans redacted", ge=0)

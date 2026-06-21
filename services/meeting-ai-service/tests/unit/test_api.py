@@ -109,3 +109,13 @@ def test_metrics_endpoint() -> None:
         resp = client.get("/metrics")
     assert resp.status_code == 200
     assert "mai_analyze_total" in resp.text
+
+
+def test_analyze_nonmock_residual_pii_blocked_422(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # ADR-0043 D3 fail-closed: a non-mock backend + PII that survives precise redaction
+    # (a 0-leading 11-digit, missed by the TC/phone patterns) → 422; the LLM is NEVER
+    # called (the residual gate runs before the analyzer). No network dependency.
+    monkeypatch.setenv("MAI_BACKEND", "ollama")
+    with TestClient(app) as client:
+        resp = client.post("/analyze", json={"transcript": "Kayıt 01234567890 girildi."})
+    assert resp.status_code == 422
