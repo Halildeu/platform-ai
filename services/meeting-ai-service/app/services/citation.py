@@ -36,26 +36,74 @@ _NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
 _STOP = frozenset(
     {"ve", "ile", "bir", "bu", "şu", "o", "da", "de", "ki", "için", "olarak", "the", "a", "an"}
 )
-# Rejection / negation cues (substring match on casefolded text). "onaylanma" matches
-# the NEGATED "onaylanmadı" but NOT the AFFIRMED "onaylandı" (onaylan-DI ≠ onaylan-MA).
-_NEGATION_CUES = (
-    "redded",
-    "iptal",
-    "vazgeç",
-    "onaylanma",
-    "edilmedi",
-    "yapılmayacak",
-    "olmayacak",
-    "değil",
-    "hayır",
+# Signed-outcome polarity (Codex 019ee9a6): a claim and its evidence must agree on
+# whether the asserted thing HAPPENED (+1) or did NOT (-1). Modelling "did it happen"
+# directly — via word FORMS that bake the Turkish negation suffix into the token —
+# avoids the double-negation false-pass that a flat "has-any-negation-cue" check has
+# ("iptal edildi" cancelled vs "iptal edilmedi" NOT cancelled both look "negated").
+# Check the negated forms FIRST (they contain the affirmed substring as a prefix).
+_NEG_POSITIVE = (  # negated positive outcome → effectively NEGATIVE (-1)
+    "onaylanmadı",
+    "onaylanmamış",
+    "onaylanmayacak",
     "kabul edilmedi",
-    " yok",
+    "kabul etmedi",
+    "kararlaştırılmadı",
+    "tamamlanmadı",
+    "imzalanmadı",
+    "yapılmadı",
+    "yapılmayacak",
+)
+_NEG_NEGATIVE = (  # negated negative outcome → effectively POSITIVE (+1)
+    "reddedilmedi",
+    "iptal edilmedi",
+    "vazgeçilmedi",
+    "ertelenmedi",
+)
+_POS_OUTCOME = (  # affirmed positive outcome (+1)
+    "onaylandı",
+    "onaylanmış",
+    "kabul edildi",
+    "mutabık",
+    "kararlaştırıldı",
+    "karara bağlandı",
+    "tamamlandı",
+    "gerçekleşti",
+    "imzalandı",
+    "kesinleşti",
+    "yapılacak",
+    "yapıldı",
+)
+_NEG_OUTCOME = (  # affirmed negative outcome (-1)
+    "reddedildi",
+    "reddedilmiş",
+    "reddetti",
+    "iptal edildi",
+    "iptal oldu",
+    "iptal",
+    "vazgeçildi",
+    "ertelendi",
     "reject",
     "declin",
     "cancel",
 )
+_GRAMMATICAL_NEGATION = (  # negation without an outcome word (-1)
+    "değil",
+    "gelmedi",
+    "başlamadı",
+    "katılmadı",
+    "katılmıyor",
+    "ödenmedi",
+    "ödenmeyecek",
+    "almadı",
+    "verilmedi",
+    "bitmedi",
+    "olmadı",
+    "olmayacak",
+    "hayır",
+)
 
-_CITATION_VERIFIER_VERSION = "v2-adr0043-polarity"
+_CITATION_VERIFIER_VERSION = "v3-adr0043-signed-polarity"
 _DEFAULT_THRESHOLD = 0.4
 _MIN_EVIDENCE_CONTENT_TOKENS = 2
 
@@ -178,10 +226,25 @@ def _similarity(claim_tokens: set[str], sent_tokens: set[str]) -> float:
     return len(claim_tokens & sent_tokens) / len(claim_tokens)
 
 
-def _is_negated(text: str) -> bool:
-    """Whether the text expresses rejection/negation (cheap polarity proxy)."""
+def _polarity(text: str) -> int:
+    """Signed outcome polarity: +1 (asserts it happened), -1 (asserts it did NOT), 0.
+
+    Negated forms are checked BEFORE affirmed ones so "iptal edilmedi" resolves to +1
+    (not cancelled) rather than matching "iptal" (-1). An outcome word, when present,
+    decides polarity; bare grammatical negation only applies when no outcome word is.
+    """
     folded = unicodedata.normalize("NFKC", text).casefold()
-    return any(cue in folded for cue in _NEGATION_CUES)
+    if any(cue in folded for cue in _NEG_POSITIVE):
+        return -1
+    if any(cue in folded for cue in _NEG_NEGATIVE):
+        return 1
+    if any(cue in folded for cue in _NEG_OUTCOME):
+        return -1
+    if any(cue in folded for cue in _POS_OUTCOME):
+        return 1
+    if any(cue in folded for cue in _GRAMMATICAL_NEGATION):
+        return -1
+    return 0
 
 
 def _numbers(text: str) -> set[str]:
@@ -224,10 +287,11 @@ def ground_claim(
     if best is None or best_sim < threshold:
         return _ungrounded(claim, best_sim, "no transcript sentence covers the claim")
 
-    # Coverage met → entailment gates (hard, high-precision; ADR-0043 D4 + research
-    # 019ee7c9: overlap/cosine miss exactly these, so they run BEFORE accepting).
-    # GATE — polarity/negation: high overlap but opposite polarity = contradiction.
-    if _is_negated(claim) != _is_negated(best.text):
+    # Coverage met → hard acceptance gates (high-precision; ADR-0043 D4 + Codex 019ee9a6:
+    # lexical overlap / embedding cosine BOTH miss these, so they gate AFTER retrieval).
+    # GATE — signed-outcome polarity: opposite non-zero signs = contradiction, NOT support
+    # (catches "iptal edildi" vs "iptal edilmedi", "onaylandı" vs "reddedildi/onaylanmadı").
+    if _polarity(claim) * _polarity(best.text) < 0:
         return _ungrounded(claim, best_sim, "polarity/negation contradiction with source")
 
     # GATE — number/quantity equality: every number/percent/date-digit in the claim

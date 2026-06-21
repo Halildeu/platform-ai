@@ -64,9 +64,24 @@ class RejectedClaim(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    """Summary + **grounded-only** decisions/action items + #162 citations (ADR-0043 D8.1)."""
+    """Summary + **grounded-only** decisions/action items + #162 citations (ADR-0043 D8.1).
 
-    summary: str = Field(description="Short meeting summary")
+    Contract (Codex 019ee9a6): `grounding_policy=verified_only` means decisions/
+    action_items are filtered to PASSED-citation claims — an empty list means "none
+    survived the guard", NOT "none produced" (see `rejected_claims`, `ungrounded_count`).
+    The `summary` is NOT span-verified in v1 (`summary_grounding_status=unverified`) — it
+    is narrative; only decisions/action_items carry the verified-grounding guarantee.
+    """
+
+    schema_version: str = Field(default="2-adr0043", description="Response contract version")
+    grounding_policy: str = Field(
+        default="verified_only", description="verified_only = decisions/actions are PASSED-only"
+    )
+    summary: str = Field(description="Short meeting summary (narrative, see grounding status)")
+    summary_grounding_status: str = Field(
+        default="unverified",
+        description="v1: summary is unverified narrative; decisions/actions are verified",
+    )
     decisions: list[str] = Field(
         default_factory=list, description="GROUNDED-only (ADR-0043 D8.1 fail-closed)"
     )

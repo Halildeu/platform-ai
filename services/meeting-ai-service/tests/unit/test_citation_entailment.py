@@ -71,6 +71,37 @@ def test_grounded_citation_carries_hash_offset_key() -> None:
     assert TRANSCRIPT[c.source_char_start : c.source_char_end] == c.source_text
 
 
+def test_double_negation_false_pass_is_caught() -> None:
+    # Codex 019ee9a6 BLOCKER: "iptal edildi" (cancelled) vs "iptal edilmedi" (NOT
+    # cancelled) both carry "iptal" — a flat negation-cue check passes this (the bug).
+    # Signed polarity must flag it.
+    sents = split_sentences("Proje iptal edilmedi.")
+    c = ground_claim("Proje iptal edildi", sents)
+    assert c.grounded is False
+    assert "polarity" in c.reason
+
+
+def test_negation_attached_to_outcome_not_whole_sentence() -> None:
+    # claim asserts NOT approved; span has an unrelated "yok" + an affirmed approval.
+    sents = split_sentences("Bütçe yok, ödeme onaylandı.")
+    c = ground_claim("Ödeme onaylanmadı", sents)
+    assert c.grounded is False
+    assert "polarity" in c.reason
+
+
+def test_future_negation_outcome_is_caught() -> None:
+    sents = split_sentences("Toplantı yapılmayacak.")
+    c = ground_claim("Toplantı yapılacak", sents)
+    assert c.grounded is False
+
+
+def test_pending_approval_not_grounded_as_done() -> None:
+    # "onaylandı" (done) cited to "onaylanması için bekleniyor" (pending) must NOT pass.
+    sents = split_sentences("Sözleşmenin onaylanması için hukuk bekleniyor.")
+    c = ground_claim("Sözleşme onaylandı", sents)
+    assert c.grounded is False
+
+
 def test_d8_1_ungrounded_decision_is_withheld() -> None:
     """ADR-0043 D8.1: a hallucinated decision is NOT shipped — moved to rejected_claims."""
     from app.core.config import Settings

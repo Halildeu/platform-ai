@@ -241,10 +241,12 @@ class MeetingAnalysisService:
         else:
             redacted, count = transcript, 0
 
-        # ADR-0043 D3 fail-closed: a real-LLM backend must NOT receive residual PII.
-        # (Mock is in-process; the config validator already forbids redact_pii=False
-        # for non-mock backends.) Raises RedactionError → 422 at the API layer.
-        if self._settings.backend != "mock":
+        # ADR-0043 D3 fail-closed (Codex 019ee9a6): run the residual gate whenever
+        # redaction ran — BACKEND-INDEPENDENT, so an accidentally-enabled mock in a
+        # deployed env can't bypass it (the config validator also hard-fails mock in
+        # stage/prod). `redact_pii=False` is the only opt-out (local mock fixtures).
+        # Raises RedactionError → 422 at the API layer.
+        if self._settings.redact_pii:
             assert_no_residual_pii(redacted)
 
         # The analyzer only ever sees redacted text.

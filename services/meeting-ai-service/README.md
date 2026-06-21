@@ -14,8 +14,15 @@ FastAPI service: **transcript → summary + decisions + action items**.
 
 The product wedge for regulated buyers — and the gap **no competitor fills** (Otter /
 Fireflies / Fathom / Copilot / Granola / Gong all do timestamp-linking + human review,
-none machine-check entailment): every shipped decision/action is **verified against the
-transcript**, not merely overlapping.
+none machine-check claim↔span consistency): every shipped decision/action is checked
+against the transcript with **deterministic contradiction gates**, not merely overlap.
+
+> **Honest scope (v1):** this is **verified span-grounding with deterministic
+> contradiction gates**, NOT full NLI entailment. It is model-free / CPU-only; it
+> high-precision-FAILs the cases overlap and embedding-cosine miss (negation/number),
+> but it does not prove positive entailment. The **`summary` is unverified narrative**
+> (`summary_grounding_status=unverified`); only `decisions`/`action_items` carry the
+> verified-grounding guarantee. Entity-NER + embedding + summary-grounding are roadmap.
 
 A claim is `PASSED` (shipped) only if its best-matching sentence survives a layered,
 CPU-only, zero-model verifier (`app/services/citation.py`):

@@ -38,6 +38,7 @@ class Settings(BaseSettings):
         protected_namespaces=("settings_",),
     )
 
+    app_env: str = Field(default="dev", pattern="^(dev|test|stage|prod)$")
     backend: str = Field(default="mock", pattern="^(mock|anthropic|openai|ollama)$")
     model_name: str = Field(default="placeholder-skeleton")
     max_transcript_chars: int = Field(default=100_000, ge=1, le=2_000_000)
@@ -73,6 +74,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "MAI_REDACT_PII=False is not allowed with a non-mock backend: "
                 "the KVKK boundary requires redaction before any LLM call"
+            )
+        # ADR-0043 D3 (Codex 019ee9a6): the mock backend keeps redaction best-effort
+        # (in-process, no LLM). It must NEVER serve a deployed env, where that would be
+        # a PII-guard bypass. Hard-fail at startup in stage/prod.
+        if self.app_env in {"stage", "prod"} and self.backend == "mock":
+            raise ValueError(
+                f"backend=mock is forbidden in app_env={self.app_env}: "
+                "the deterministic mock must not serve deployed traffic (PII-guard bypass)"
             )
         return self
 
