@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections import Counter
 
 import httpx
 import pytest
@@ -89,7 +90,11 @@ def test_real_ollama_every_shipped_claim_is_verified(monkeypatch) -> None:  # ty
     redacted = TRANSCRIPT_CLEAN  # no PII here → redaction is identity
     n_shipped = len(body["decisions"]) + len(body["action_items"])
     assert n_shipped >= 1, "expected the LLM to extract at least one grounded claim"
-    assert len(body["citations"]) == n_shipped, "every shipped claim needs a citation"
+    # Codex 019ee9d1: count is not enough — the citation set must be EXACTLY the shipped
+    # claim set (each shipped decision/action is the citation's claim), so no shipped
+    # claim can be uncited and no citation can be orphaned.
+    shipped_claims = body["decisions"] + [a["text"] for a in body["action_items"]]
+    assert Counter(c["claim"] for c in body["citations"]) == Counter(shipped_claims)
 
     for c in body["citations"]:
         assert c["status"] == "PASSED"
