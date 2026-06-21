@@ -44,10 +44,10 @@ a model's reputation. Two hard constraints frame the decision:
 `PENDING` = not yet measured under the reproducible fixture + RTX 4070 protocol
 (`scripts/diar_matrix.py`). Measured cells cite `docs/pr-diar-01-line-161-matrix-report.md`.
 
-| Candidate | License | Gated model? | TR DER | Peak VRAM | RTF | Notes |
+| Candidate | License | Gated model? | TR DER¹ | GPU0 total peak² | RTF | Notes |
 |---|---|---|---|---|---|---|
-| **pyannote 3.1** | MIT (model: gated, free) | yes (HF token) | 47.8%¹ | 2155 MB | 0.024 | end-to-end pipeline |
-| **speechbrain ECAPA** | Apache-2.0 | **no** (free) | 54.6%¹ | **307 MB** | **0.003** | 7× less VRAM, faster |
+| **pyannote 3.1** | MIT (model: gated, free) | yes (HF token) | 47.8%¹ | 2155 MB² | 0.024 | end-to-end pipeline |
+| **speechbrain ECAPA** | Apache-2.0 | **no** (free) | 54.6%¹ | **307 MB**² | **0.003** | 7× less GPU0-total², faster |
 | NeMo | Apache-2.0 | no | PENDING (adapter not wired) | PENDING | PENDING | heavier install; candidate only if pyannote fails target |
 | Cloud (Azure/Google) | commercial | n/a | not measured | n/a | n/a | **m.9 cross-border → ADR-0030 boundary**; rejected unless on-prem fails |
 | VAD-only fallback | — | no | n/a (no speaker sep.) | minimal | minimal | degraded fallback if no GPU model fits |
@@ -61,6 +61,13 @@ a model's reputation. Two hard constraints frame the decision:
 > non-identical audio + overlap) and a real-meeting pilot will move absolute DER
 > and the pyannote↔speechbrain gap. **No ranking claim is drawn from these cells**;
 > they prove the harness runs and is deterministic, nothing more.
+
+> ² **VRAM = total GPU0 `memory.used` peak, NOT backend-isolated (review #189).**
+> Measured in an isolated `.venv-diar` (single process), so the "7× less" relative
+> read holds there, but the absolute MB includes anything else on GPU0. The current
+> `diar_matrix.py` also emits `peak_vram_delta_mb` (peak − pre-load baseline) and a
+> duration-weighted `der_corpus` (the real decision metric); both land in the
+> evidence on the next sweep. The 2026-06-17 cells predate those fields.
 
 Both running backends share one harness (same fixtures, same scorer, both on
 GPU). The #161 "pyannote vs alternatif" requirement is **met** in that both are
@@ -94,7 +101,7 @@ cannot rank backends).
    live model (8 GB constraint). Backend-independent, settled.
 2. **Backend (UNDECIDED):** pyannote 3.1 and speechbrain ECAPA are both **wired
    and measurable candidates**. No primary is chosen here. Their trade-off space
-   is recorded — speechbrain costs 7× less VRAM (307 MB) and is 9× faster, which
+   is recorded — speechbrain costs 7× less GPU0-total VRAM (307 MB²) and is 9× faster, which
    matters under the 8 GB budget; pyannote is a single end-to-end pipeline — but
    which one wins on Turkish DER is **open until a collar=0.25 measurement on a
    realistic fixture + pilot**. The synthetic cells do not settle even the

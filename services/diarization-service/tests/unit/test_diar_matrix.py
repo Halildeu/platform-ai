@@ -60,6 +60,22 @@ def test_compute_der_total_miss_is_one() -> None:
     assert diar_matrix.compute_der(ref, hyp) == pytest.approx(1.0, abs=1e-6)
 
 
+def test_compute_der_preserves_exact_overlap_speakers() -> None:
+    pytest.importorskip("pyannote.metrics")
+    # Two speakers talk over the SAME [0,2) window (exact overlap). Building the
+    # reference Annotation WITHOUT a unique track per turn would let the 2nd speaker
+    # overwrite the 1st (only one survives) → a hyp detecting just one would score
+    # DER ~0, hiding the miss. With per-turn tracks both ref speakers survive, so a
+    # hyp missing one is ~half the reference speech missed (review #189).
+    ref = [
+        diar_matrix.Turn(0.0, 2.0, "SPEAKER_00"),
+        diar_matrix.Turn(0.0, 2.0, "SPEAKER_01"),  # exact overlap, distinct speaker
+    ]
+    hyp = [diar_matrix.Turn(0.0, 2.0, "SPEAKER_00")]  # detects only one of the two
+    der = diar_matrix.compute_der(ref, hyp, collar=0.0, skip_overlap=False)
+    assert der == pytest.approx(0.5, abs=0.1)  # ~half the reference speech missed
+
+
 # --- speechbrain alternative: pure VAD + clustering logic (CPU, no model) --- #
 
 

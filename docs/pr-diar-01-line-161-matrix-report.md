@@ -13,7 +13,7 @@
 
 ## Matris (RTX 4070, aynı 6 sentetik fixture, collar=0.25 — apples-to-apples)
 
-| Tag | Backend | n | DER | DER (max) | p50 ms | RTF | model_load s | Peak VRAM |
+| Tag | Backend | n | DER | DER (max) | p50 ms | RTF | model_load s | GPU0 toplam tepe² |
 |---|---|---|---|---|---|---|---|---|
 | **pyannote-collar025** | pyannote | 6 | **47.8%** | 53.2% | 1293 | 0.024 | 7.3 | 2155 MB |
 | **speechbrain-collar025** | speechbrain | 6 | 54.6% | 55.6% | **140** | **0.003** | 3.3 | **307 MB** |
@@ -26,6 +26,12 @@ Per-fixture DER (n=6, 2-konuşmacı TR sentetik, collar=0.25):
 > dürüstçe etiketlendi (gerçek bir yüzdelik değil). collar=0 ile ölçüm
 > pyannote 50.14 / speechbrain 56.64 vermişti; collar=0.25 her ikisini ~2pt
 > düşürdü ama **sıralamayı değiştirmedi** — yine de bu bir sıralama *kanıtı* değil.
+
+> ² **VRAM = toplam GPU0 `memory.used` tepe, backend-izole DEĞİL (#189).** İzole
+> `.venv-diar`'da (tek süreç) ölçüldü; "7× az" göreli okuma orada geçerli ama mutlak
+> MB GPU0'daki her şeyi içerir. Güncel `diar_matrix.py` ayrıca `peak_vram_delta_mb`
+> (tepe − pre-load baseline) ve duration-weighted `der_corpus` (asıl karar metriği)
+> üretir; ikisi de sonraki sweep'te evidence'a düşer.
 
 ## pyannote vs alternatif (kıyas — sıralama iddiası YOK)
 
@@ -58,9 +64,11 @@ pilotla belirlenecek — sentetik-smoke yalnızca harness'in çalıştığını 
 - **Model pin:** `diar_matrix.py --revision <commit>` HF model sürümünü pinler.
   Bu koşuda revision pinlenmedi (`revision: null`); **promote-grade koşuda commit
   pinlenmeli** ki sonuçlar yeniden üretilebilsin.
-- **CI:** DER formülü testleri `pyannote.metrics` gerektirir → **CI'da skip
-  (host-only)**; yeşil CI DER'i kanıtlamaz. VAD/clustering/RTTM testleri CI'da
-  koşar. DER testleri **promote öncesi GPU host'ta** koşulmalı.
+- **CI:** `pyannote.metrics` artık `requirements-dev.txt`'te (#189) → **DER scorer
+  unit testleri (`compute_der`, identical/miss/exact-overlap) CI'da KOŞAR**,
+  VAD/clustering/RTTM ile birlikte. Yeşil CI artık DER-scorer mantığını kanıtlar.
+  Ama gerçek **model/GPU backend ölçümü** (pyannote/speechbrain üzerinde DER) hâlâ
+  host/pilot işidir — promote-grade DER GPU host'ta üretilir.
 
 ## Karar girdisi
 
