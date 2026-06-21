@@ -347,7 +347,7 @@ def run_speechbrain(model: str, device: str) -> tuple[object, float]:
 
 
 def _speechbrain_turns(
-    encoder: object, wav: Path, num_speakers: int, distance_threshold: float
+    encoder: Any, wav: Path, num_speakers: int, distance_threshold: float
 ) -> list[Turn]:
     import numpy as np
     import torch  # type: ignore[import-not-found]
@@ -363,7 +363,7 @@ def _speechbrain_turns(
             chunk = np.pad(chunk, (0, rate // 10 - chunk.size))
         tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
-            emb = encoder.encode_batch(tensor)  # type: ignore[operator]
+            emb = encoder.encode_batch(tensor)
         embs.append(emb.squeeze().detach().cpu().numpy())
     labels = agglomerative_labels(np.asarray(embs), num_speakers, distance_threshold)
     return [
