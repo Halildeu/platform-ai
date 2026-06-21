@@ -55,23 +55,62 @@ if ($CudaBin) {
 
 # Auto-warmup (#live-stt-recovery 2026-06-22): the /transcribe model is lazy-loaded
 # on the first request, so a freshly (re)started or rebooted service reports
-# {"status":"loading"} until something sends one — which is why a bare restart looks
+# {"status":"loading"} until something POSTs one — which is why a bare restart looks
 # "stuck" forever. Kick a one-shot background warmup: wait for uvicorn to bind, then
-# POST a tiny synthetic CV-TR fixture so the model loads and /health flips to "ok"
-# with no manual step (KVKK: fixture is synthetic Common Voice, never real meeting
-# audio). Best-effort — it never blocks or fails startup; if the fixture is absent
-# the job is a no-op and /health stays "loading" until the first real transcribe.
-$warmupWav = Join-Path $svc "tests\fixtures\sample-tr-cv17-001.wav"
-Start-Job -Name "live-stt-warmup" -ScriptBlock {
-    param($port, $wav)
-    for ($i = 0; $i -lt 60; $i++) {
-        Start-Sleep 5
-        try { $null = Invoke-RestMethod "http://127.0.0.1:$port/health" -TimeoutSec 5; break } catch { }
+# POST a tiny test fixture so the model loads and /health reaches "ok" with no manual
+# step. Best-effort ONLY — warmup failure must never block/fail uvicorn startup, so
+# the spawn is try/wrapped and the job swallows + logs everything. Disable with
+# STT_STARTUP_WARMUP=0. KVKK: uses a CC0 Common Voice TR test fixture, never real
+# meeting audio (review #193, Codex).
+if ($env:STT_STARTUP_WARMUP -ne "0") {
+    $warmupWav = Join-Path $svc "tests\fixtures\sample-tr-cv17-001.wav"
+    try {
+        Start-Job -Name "live-stt-warmup" -ScriptBlock {
+            param($port, $wav, $log)
+
+            function Write-WarmupLog([string]$msg) {
+                try {
+                    Add-Content -Path $log -Value ("[{0}] [warmup] {1}" -f (Get-Date -Format "s"), $msg) -ErrorAction SilentlyContinue
+                } catch { }
+            }
+
+            try {
+                for ($i = 0; $i -lt 60; $i++) {
+                    Start-Sleep 5
+                    try {
+                        $null = Invoke-RestMethod "http://127.0.0.1:$port/health" -TimeoutSec 5
+                        break
+                    } catch { }
+                }
+
+                if (-not (Test-Path $wav)) {
+                    Write-WarmupLog "fixture missing; skipping: $wav"
+                    return
+                }
+
+                $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+                if (-not $curl) {
+                    Write-WarmupLog "curl.exe not found; skipping"
+                    return
+                }
+
+                & curl.exe -sS --max-time 120 -F "audio=@$wav;type=audio/wav" "http://127.0.0.1:$port/transcribe?language=tr&session_id=startup-warmup&meeting_id=startup-warmup&device_id=startup-warmup" | Out-Null
+
+                if ($LASTEXITCODE -eq 0) {
+                    Write-WarmupLog "transcribe warmup completed"
+                } else {
+                    Write-WarmupLog "transcribe warmup curl exit=$LASTEXITCODE"
+                }
+            } catch {
+                Write-WarmupLog ("warmup failed: " + $_.Exception.Message)
+            }
+        } -ArgumentList $Port, $warmupWav, $log | Out-Null
+    } catch {
+        try {
+            Add-Content -Path $log -Value ("[{0}] [warmup] failed to start job: {1}" -f (Get-Date -Format "s"), $_.Exception.Message) -ErrorAction SilentlyContinue
+        } catch { }
     }
-    if (Test-Path $wav) {
-        & curl.exe -s --max-time 120 -F "audio=@$wav;type=audio/wav" "http://127.0.0.1:$port/transcribe?language=tr&session_id=startup-warmup&meeting_id=startup-warmup&device_id=startup-warmup" | Out-Null
-    }
-} -ArgumentList $Port, $warmupWav | Out-Null
+}
 
 Set-Location $svc
 # Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native
