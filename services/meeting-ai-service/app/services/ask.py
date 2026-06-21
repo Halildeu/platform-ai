@@ -44,7 +44,16 @@ def _ollama_answer(question: str, transcript: str, settings: Settings) -> str:
     prompt = _ASK_PROMPT.format(transcript=transcript, question=question)
     resp = httpx.post(
         f"{settings.ollama_host}/api/generate",
-        json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
+        json={
+            "model": settings.ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            # Same decoding contract as analyze: deterministic + full transcript in
+            # context (no 2048-default truncation). No format=json here — ask returns
+            # prose, not a JSON object.
+            "options": settings.ollama_options(),
+            "keep_alive": settings.ollama_keep_alive,
+        },
         timeout=settings.request_timeout,
     )
     resp.raise_for_status()

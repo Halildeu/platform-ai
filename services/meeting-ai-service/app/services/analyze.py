@@ -15,7 +15,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -39,6 +39,27 @@ class BackendUnavailableError(RuntimeError):
     """Raised when a real LLM backend is unreachable or returns unusable output.
 
     Message must stay transcript-free (KVKK): only error class/HTTP detail.
+    """
+
+
+class OllamaSchemaInvalidError(BackendUnavailableError):
+    """The LLM returned parseable JSON that violates the analysis schema.
+
+    A subclass of BackendUnavailableError so the API still fails closed (502), but
+    distinct so the bakeoff separates 'the model broke the contract' (a model
+    quality signal → schema_invalid) from 'the backend/host failed' (infra →
+    backend_error). Conflating them would report a host outage as 100% schema
+    failure (Codex review).
+    """
+
+
+class OllamaUnparseableOutputError(BackendUnavailableError):
+    """The LLM returned output that is not even valid JSON.
+
+    Still a MODEL output-contract failure (under format=json the model produced
+    garbage), NOT infra — so the bakeoff counts it as format_invalid, distinct
+    from backend_error (host/HTTP/timeout). Classifying unparseable model output
+    as 'infra' would understate a model's true contract-failure rate (Codex review).
     """
 
 
@@ -67,6 +88,39 @@ def _sentences(text: str) -> list[str]:
 def _matches(sentence: str, cues: tuple[str, ...]) -> bool:
     low = sentence.lower()
     return any(cue in low for cue in cues)
+
+
+def _require_ollama_schema(data: object) -> dict[str, Any]:
+    """Element-level strict shape check on the LLM's JSON (Codex review #162).
+
+    A schema break (missing key, wrong type — ``decisions`` as a string that would
+    become a per-character list, a decision that is an object, an action ``text``
+    that is a list, an ``owner`` that is an int) MUST be distinguishable from a
+    legitimate "no decisions": otherwise a model that breaks the contract is
+    mis-scored as merely low-recall. We fail closed with ``OllamaSchemaInvalidError``
+    and the eval counts these as ``schema_invalid`` (a model-quality signal),
+    separate from infra/backend failures.
+    """
+    if not isinstance(data, dict):
+        raise OllamaSchemaInvalidError("Ollama JSON is not an object")
+    summary = data.get("summary")
+    decisions = data.get("decisions")
+    actions = data.get("action_items")
+    if not isinstance(summary, str):
+        raise OllamaSchemaInvalidError("field 'summary' must be a string")
+    if not isinstance(decisions, list) or not all(isinstance(d, str) for d in decisions):
+        raise OllamaSchemaInvalidError("field 'decisions' must be a list of strings")
+    if not isinstance(actions, list):
+        raise OllamaSchemaInvalidError("field 'action_items' must be a list")
+    for item in actions:
+        if not isinstance(item, dict):
+            raise OllamaSchemaInvalidError("action_items entry must be an object")
+        if not isinstance(item.get("text"), str):
+            raise OllamaSchemaInvalidError("action_items[].text must be a string")
+        owner = item.get("owner")
+        if owner is not None and not isinstance(owner, str):
+            raise OllamaSchemaInvalidError("action_items[].owner must be a string or null")
+    return data
 
 
 class Analyzer(Protocol):
@@ -102,6 +156,15 @@ _OLLAMA_PROMPT = """\
 Sen Türkçe toplantı tutanakları analiz eden bir asistansın. Aşağıdaki toplantı \
 metnini incele ve JSON formatında yanıt ver.
 
+ÖNEMLİ KURALLAR:
+- Yanıt dili Türkçe olsun; ama metinde geçen özel adları, ürün/proje adlarını, \
+teknik terimleri ve İngilizce code-switch ifadelerini (ör. "deadline", "sprint") \
+aynen koru.
+- Karar ve aksiyonları metinde GEÇEN ifadelere sadık kal; metinde olmayan bilgi \
+ekleme, uydurma.
+- Metinde karar yoksa "decisions" boş liste; aksiyon yoksa "action_items" boş \
+liste döndür.
+
 Metin:
 {transcript}
 
@@ -130,6 +193,11 @@ class OllamaAnalyzer:
             "prompt": prompt,
             "stream": False,
             "format": "json",  # force structured JSON (llama3.1 else returns prose)
+            # Deterministic extraction + no transcript truncation (see config: the
+            # 2048-default num_ctx silently cut long meetings; 0.8-default temperature
+            # made the eval non-reproducible). One source of truth in Settings.
+            "options": self._settings.ollama_options(),
+            "keep_alive": self._settings.ollama_keep_alive,
         }
         try:
             resp = httpx.post(
@@ -141,13 +209,13 @@ class OllamaAnalyzer:
             raw_text = resp.json().get("response", "")
             # Strip markdown code fences if Ollama wraps JSON
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip())
-            data = json.loads(cleaned)
+            data = _require_ollama_schema(json.loads(cleaned))
             draft = AnalysisDraft(
-                summary=str(data.get("summary", "")),
-                decisions=[str(d) for d in data.get("decisions", [])],
+                summary=str(data["summary"]),
+                decisions=[str(d) for d in data["decisions"]],
                 action_items=[
-                    ActionItem(text=str(a.get("text", "")), owner=a.get("owner"))
-                    for a in data.get("action_items", [])
+                    ActionItem(text=str(a["text"]), owner=a.get("owner"))
+                    for a in data["action_items"]
                 ],
             )
         except httpx.HTTPError as exc:
@@ -156,7 +224,7 @@ class OllamaAnalyzer:
                 f"Ollama unreachable or returned HTTP error ({type(exc).__name__})"
             ) from exc
         except (json.JSONDecodeError, TypeError, KeyError, AttributeError) as exc:
-            raise BackendUnavailableError(
+            raise OllamaUnparseableOutputError(
                 f"Ollama returned unparseable output ({type(exc).__name__})"
             ) from exc
 

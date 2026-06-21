@@ -55,3 +55,31 @@ def test_endpoint_ollama_down_502(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         resp = client.post("/ask", json={"transcript": TRANSCRIPT, "question": "Ne karar verildi?"})
     assert resp.status_code == 502
+
+
+def test_ask_ollama_sends_decoding_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The ask path must carry the same num_ctx/temperature contract as analyze (no
+    # 2048-truncation, deterministic) — but ask returns PROSE, so it must NOT force
+    # format=json. (Codex review: ask path needs its own request-options test.)
+    captured: dict[str, object] = {}
+
+    def _capture(*a: object, **k: object) -> httpx.Response:
+        captured.update(k.get("json", {}))  # type: ignore[arg-type]
+        return httpx.Response(
+            200,
+            json={"response": "Toplantı pazartesi yapılacak."},
+            request=httpx.Request("POST", "http://localhost:11434/api/generate"),
+        )
+
+    monkeypatch.setattr(httpx, "post", _capture)
+    # ollama backend requires redaction on (KVKK boundary validator); the request
+    # options are what we assert, so redaction of the transcript is fine here.
+    settings = Settings(backend="ollama", ollama_num_ctx=16384, ollama_temperature=0.0)
+    answer_question(TRANSCRIPT, "Toplantı ne zaman?", settings)
+
+    assert "format" not in captured  # ask returns prose, not a JSON object
+    assert captured["keep_alive"] == settings.ollama_keep_alive
+    opts = captured["options"]
+    assert isinstance(opts, dict)
+    assert opts["num_ctx"] == 16384
+    assert opts["temperature"] == 0.0

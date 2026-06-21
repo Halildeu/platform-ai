@@ -29,6 +29,13 @@ class Settings(BaseSettings):
       MAI_LOG_LEVEL         INFO (default)
       MAI_REQUEST_TIMEOUT   60 (default — sec, hard cap)
       MAI_SUMMARY_MAX_CHARS 280 (mock summary cap)
+      MAI_OLLAMA_HOST       http://localhost:11434 (Option B)
+      MAI_OLLAMA_MODEL      llama3.1:8b (selectable: e.g. qwen2.5:7b-instruct)
+      MAI_OLLAMA_TEMPERATURE 0.0 (deterministic extraction; NOT chat 0.8)
+      MAI_OLLAMA_NUM_CTX    8192 (avoid 2048-default transcript truncation)
+      MAI_OLLAMA_TOP_P      0.9
+      MAI_OLLAMA_SEED       (unset = random; set int for reproducible eval)
+      MAI_OLLAMA_KEEP_ALIVE 5m (unload idle model → free shared GPU VRAM)
     """
 
     model_config = SettingsConfigDict(
@@ -49,6 +56,36 @@ class Settings(BaseSettings):
     # Option B (Ollama) settings — #54
     ollama_host: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="llama3.1:8b")
+    # Ollama decoding controls (#162 — fair/reproducible G-INT eval, see ADR-0034).
+    # Defaults target DETERMINISTIC STRUCTURED EXTRACTION, not chat:
+    #   - temperature 0      → greedy, repeatable (Ollama default 0.8 made the eval
+    #                          swing run-to-run: 95.8%→81.2%, ADR-0034 variance note).
+    #   - num_ctx 8192       → meeting transcripts are NOT silently truncated to
+    #                          Ollama's 2048-token default (the real recall killer).
+    #   - seed (optional)    → set for reproducible eval; multi-seed measures variance.
+    #   - keep_alive         → unload after idle so the 8 GB GPU is freed for the
+    #                          STT/diarization/emotion models that share it.
+    ollama_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    ollama_num_ctx: int = Field(default=8192, ge=512, le=131072)
+    ollama_top_p: float = Field(default=0.9, ge=0.0, le=1.0)
+    ollama_seed: int | None = Field(default=None)
+    ollama_keep_alive: str = Field(default="5m")
+
+    def ollama_options(self) -> dict[str, object]:
+        """Decoding options for Ollama `/api/generate` (deterministic extraction).
+
+        One source of truth for both the analyze and ask paths so a single
+        ``MAI_OLLAMA_*`` change applies everywhere. ``seed`` is omitted unless set,
+        matching Ollama's "random seed" default behaviour.
+        """
+        opts: dict[str, object] = {
+            "temperature": self.ollama_temperature,
+            "num_ctx": self.ollama_num_ctx,
+            "top_p": self.ollama_top_p,
+        }
+        if self.ollama_seed is not None:
+            opts["seed"] = self.ollama_seed
+        return opts
 
     @property
     def effective_model(self) -> str:
