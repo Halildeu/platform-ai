@@ -53,64 +53,15 @@ if ($CudaBin) {
     $env:Path = $CudaBin + ";" + $env:Path
 }
 
-# Auto-warmup (#live-stt-recovery 2026-06-22): the /transcribe model is lazy-loaded
-# on the first request, so a freshly (re)started or rebooted service reports
-# {"status":"loading"} until something POSTs one — which is why a bare restart looks
-# "stuck" forever. Kick a one-shot background warmup: wait for uvicorn to bind, then
-# POST a tiny test fixture so the model loads and /health reaches "ok" with no manual
-# step. Best-effort ONLY — warmup failure must never block/fail uvicorn startup, so
-# the spawn is try/wrapped and the job swallows + logs everything. Disable with
-# STT_STARTUP_WARMUP=0. KVKK: uses a CC0 Common Voice TR test fixture, never real
-# meeting audio (review #193, Codex).
-if ($env:STT_STARTUP_WARMUP -ne "0") {
-    $warmupWav = Join-Path $svc "tests\fixtures\sample-tr-cv17-001.wav"
-    try {
-        Start-Job -Name "live-stt-warmup" -ScriptBlock {
-            param($port, $wav, $log)
-
-            function Write-WarmupLog([string]$msg) {
-                try {
-                    Add-Content -Path $log -Value ("[{0}] [warmup] {1}" -f (Get-Date -Format "s"), $msg) -ErrorAction SilentlyContinue
-                } catch { }
-            }
-
-            try {
-                for ($i = 0; $i -lt 60; $i++) {
-                    Start-Sleep 5
-                    try {
-                        $null = Invoke-RestMethod "http://127.0.0.1:$port/health" -TimeoutSec 5
-                        break
-                    } catch { }
-                }
-
-                if (-not (Test-Path $wav)) {
-                    Write-WarmupLog "fixture missing; skipping: $wav"
-                    return
-                }
-
-                $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-                if (-not $curl) {
-                    Write-WarmupLog "curl.exe not found; skipping"
-                    return
-                }
-
-                & curl.exe -sS --max-time 120 -F "audio=@$wav;type=audio/wav" "http://127.0.0.1:$port/transcribe?language=tr&session_id=startup-warmup&meeting_id=startup-warmup&device_id=startup-warmup" | Out-Null
-
-                if ($LASTEXITCODE -eq 0) {
-                    Write-WarmupLog "transcribe warmup completed"
-                } else {
-                    Write-WarmupLog "transcribe warmup curl exit=$LASTEXITCODE"
-                }
-            } catch {
-                Write-WarmupLog ("warmup failed: " + $_.Exception.Message)
-            }
-        } -ArgumentList $Port, $warmupWav, $log | Out-Null
-    } catch {
-        try {
-            Add-Content -Path $log -Value ("[{0}] [warmup] failed to start job: {1}" -f (Get-Date -Format "s"), $_.Exception.Message) -ErrorAction SilentlyContinue
-        } catch { }
-    }
-}
+# NOTE (lazy model load): the /transcribe model is loaded on the FIRST request,
+# so a freshly (re)started service reports {"status":"loading"} until a transcribe
+# is POSTed. The deploy warmup is done by update.ps1 AFTER it restarts the task — a
+# plain foreground curl, OUTSIDE this service's process tree. An in-process
+# Start-Job here is NOT viable: it broke the SYSTEM-scheduled-task uvicorn launch
+# under Windows PowerShell 5.1 (#193 live-acceptance failed — the MKL/torch python
+# forrtl-aborts on the console event the background job triggers, so uvicorn never
+# came up). A bare reboot therefore leaves the service lazy until its first real
+# transcribe — the original, working behavior.
 
 Set-Location $svc
 # Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native
