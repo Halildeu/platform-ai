@@ -75,7 +75,7 @@ if (($unpushed.Count -gt 0 -or $dirty.Count -gt 0) -and -not $Force) {
   Write-Host ""
   Write-Host "  ABORT — un-backed-up local work would be DESTROYED by reset --hard:" -ForegroundColor Red
   if ($head -ne $Branch)     { Write-Host "    - HEAD is on '$head', not '$Branch'" -ForegroundColor Yellow }
-  if ($unpushed.Count -gt 0) { Write-Host "    - $($unpushed.Count) local commit(s) not in origin/$Branch:" -ForegroundColor Yellow; $unpushed | ForEach-Object { Write-Host "        $_" } }
+  if ($unpushed.Count -gt 0) { Write-Host "    - $($unpushed.Count) local commit(s) not in origin/${Branch}:" -ForegroundColor Yellow; $unpushed | ForEach-Object { Write-Host "        $_" } }
   if ($dirty.Count -gt 0)    { Write-Host "    - $($dirty.Count) modified tracked file(s)" -ForegroundColor Yellow }
   Write-Host ""
   Write-Host "  This clone is a deploy MIRROR — it must not hold local work." -ForegroundColor Red
