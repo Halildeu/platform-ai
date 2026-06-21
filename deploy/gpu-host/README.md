@@ -28,11 +28,25 @@ Get-ScheduledTask platform-ai-*                   # ikisi de Running olmalı
 ```
 Loglar: `deploy\gpu-host\logs\` (günlük dosya; **transcript-free** — KVKK #30).
 
-## Güncelleme (yeni kod deploy etme)
+## Güncelleme (yeni kod deploy etme) — drift-proof
+
+> ⚠️ **Bu clone bir deploy AYNASI'dır — burada GELİŞTİRME YAPMAYIN.**
+> Geliştirme ayrı bir dev clone'da yapılır → push → PR. Bu clone yalnız
+> `origin/main`'i takip eder. (2026-06-21: 13 push'lanmamış commit burada
+> lokal-only kaldı = single point of failure; bkz. `update.ps1`.)
+
 ```powershell
-cd C:\platform-ai; git pull
-Restart-ScheduledTask platform-ai-live-stt; Restart-ScheduledTask platform-ai-meeting-ai
-# Restart-ScheduledTask yoksa: Stop-ScheduledTask + Start-ScheduledTask
+cd C:\Users\denetimpc\platform-ai
+.\deploy\gpu-host\update.ps1
+```
+`update.ps1` = `git fetch` + `reset --hard origin/main` + scheduled-task restart
+(`platform-ai-live-stt` + `platform-ai-meeting-ai`). **Fail-closed**: push'lanmamış
+lokal commit veya dirty tracked-tree varsa reset YAPMAZ, durur — işi önce push+PR
+ile koru, sonra `-Force`. Eski `git pull` yöntemi drift ürettiği için kullanılmaz.
+
+### Drift kontrolü (günlük, opsiyonel — read-only)
+```powershell
+.\deploy\gpu-host\drift-guard.ps1   # HEAD!=main / unpushed / dirty / behind → uyarı + log
 ```
 
 ## Kaldırma / geri alma
