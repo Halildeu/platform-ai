@@ -64,9 +64,11 @@ pilotla belirlenecek — sentetik-smoke yalnızca harness'in çalıştığını 
 - **Model pin:** `diar_matrix.py --revision <commit>` HF model sürümünü pinler.
   Bu koşuda revision pinlenmedi (`revision: null`); **promote-grade koşuda commit
   pinlenmeli** ki sonuçlar yeniden üretilebilsin.
-- **CI:** DER formülü testleri `pyannote.metrics` gerektirir → **CI'da skip
-  (host-only)**; yeşil CI DER'i kanıtlamaz. VAD/clustering/RTTM testleri CI'da
-  koşar. DER testleri **promote öncesi GPU host'ta** koşulmalı.
+- **CI:** `pyannote.metrics` artık `requirements-dev.txt`'te (#189) → **DER scorer
+  unit testleri (`compute_der`, identical/miss/exact-overlap) CI'da KOŞAR**,
+  VAD/clustering/RTTM ile birlikte. Yeşil CI artık DER-scorer mantığını kanıtlar.
+  Ama gerçek **model/GPU backend ölçümü** (pyannote/speechbrain üzerinde DER) hâlâ
+  host/pilot işidir — promote-grade DER GPU host'ta üretilir.
 
 ## Karar girdisi
 
