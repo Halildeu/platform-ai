@@ -183,14 +183,27 @@ if (-not $NoRestart -and -not $restartFailed) {
       $up = $false
       for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 5
-        try { $null = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5; $up = $true; break } catch { }
+        try { $null = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5 -ErrorAction Stop; $up = $true; break } catch { }
       }
       if (-not $up) {
         Write-Host "[update] live-stt /health did not answer in time; skipping warmup (lazy load on first transcribe)" -ForegroundColor Yellow
       } else {
-        & curl.exe -sS --max-time 120 -F "audio=@$warmupWav;type=audio/wav" "http://127.0.0.1:8200/transcribe?language=tr&session_id=deploy-warmup&meeting_id=deploy-warmup&device_id=deploy-warmup" 1> $null 2> $null
-        if ($LASTEXITCODE -eq 0) { Write-Host "[update] live-stt warmup posted (model loaded -> /health ok)" -ForegroundColor Green }
-        else { Write-Host "[update] live-stt warmup curl exit=$LASTEXITCODE (service is up; first real transcribe will load it)" -ForegroundColor Yellow }
+        # -f so an HTTP 4xx/5xx (e.g. a 503 while the model loads) is a non-zero
+        # exit rather than a false success; then verify /health actually reached
+        # "ok" before logging green (curl exit 0 alone is not warmup acceptance).
+        & curl.exe -fsS --max-time 120 -F "audio=@$warmupWav;type=audio/wav" "http://127.0.0.1:8200/transcribe?language=tr&session_id=deploy-warmup&meeting_id=deploy-warmup&device_id=deploy-warmup" 1> $null 2> $null
+        $curlExit = $LASTEXITCODE
+        if ($curlExit -ne 0) {
+          Write-Host "[update] live-stt warmup curl exit=$curlExit (service is up; first real transcribe will load it)" -ForegroundColor Yellow
+        } else {
+          try {
+            $health = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5 -ErrorAction Stop
+            if ($health.status -eq "ok") { Write-Host "[update] live-stt warmup posted (model loaded -> /health ok)" -ForegroundColor Green }
+            else { Write-Host "[update] live-stt warmup posted but /health status=$($health.status) (first real transcribe may still load it)" -ForegroundColor Yellow }
+          } catch {
+            Write-Host "[update] live-stt warmup posted but /health verify failed (first real transcribe may still load it)" -ForegroundColor Yellow
+          }
+        }
       }
     } finally { $ErrorActionPreference = $oldEap }
   }
