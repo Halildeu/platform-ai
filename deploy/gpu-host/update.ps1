@@ -92,7 +92,13 @@ if (($unpushed.Count -gt 0 -or $dirty.Count -gt 0) -and -not $Force) {
 #    reset --hard (belt-and-suspenders). Each step is exit-checked — a failed
 #    checkout must NOT fall through to reset on the wrong ref.
 $before = (git rev-parse HEAD).Trim()
-git checkout -B $Branch "origin/$Branch" 2>&1 | Out-Host
+# -Force genuinely discards confirmed-preserved local work (clobbers a dirty
+# tracked tree); the non-Force path stays safe and aborts on any obstruction.
+if ($Force) {
+  git checkout -f -B $Branch "origin/$Branch" 2>&1 | Out-Host
+} else {
+  git checkout -B $Branch "origin/$Branch" 2>&1 | Out-Host
+}
 if ($LASTEXITCODE -ne 0) { Fail "git checkout -B $Branch origin/$Branch failed — deploy state unchanged." }
 git reset --hard "origin/$Branch" 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) { Fail "git reset --hard origin/$Branch failed." }

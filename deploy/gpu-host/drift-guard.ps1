@@ -45,10 +45,14 @@ if ($LASTEXITCODE -ne 0) { Note "DRIFT: git fetch failed — remote truth stale 
 git rev-parse --verify --quiet "refs/remotes/origin/$Branch" *> $null
 if ($LASTEXITCODE -ne 0) { Note "DRIFT: origin/$Branch not found — cannot compare against deploy baseline."; exit 2 }
 
-$head     = "$(git rev-parse --abbrev-ref HEAD)".Trim()
-$unpushed = @(git log --oneline "origin/$Branch..HEAD" 2>$null)
-$behind   = @(git log --oneline "HEAD..origin/$Branch" 2>$null)
-$dirty    = @(git status --porcelain --untracked-files=no)
+$head = "$(git rev-parse --abbrev-ref HEAD)".Trim()
+if ($LASTEXITCODE -ne 0) { Note "DRIFT: git rev-parse HEAD failed."; exit 2 }
+$unpushed = @(git log --oneline "origin/$Branch..HEAD")
+if ($LASTEXITCODE -ne 0) { Note "DRIFT: git log origin/$Branch..HEAD failed."; exit 2 }
+$behind = @(git log --oneline "HEAD..origin/$Branch")
+if ($LASTEXITCODE -ne 0) { Note "DRIFT: git log HEAD..origin/$Branch failed."; exit 2 }
+$dirty = @(git status --porcelain --untracked-files=no)
+if ($LASTEXITCODE -ne 0) { Note "DRIFT: git status failed."; exit 2 }
 
 $alerts = @()
 if ($head -ne $Branch)     { $alerts += "HEAD '$head' != '$Branch' (deploy clone must track $Branch)" }
