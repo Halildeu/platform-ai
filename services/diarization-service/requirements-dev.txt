@@ -9,3 +9,8 @@ black==24.10.0
 # scripts/ tools (diar_matrix, make_synthetic_diar) use numpy. Not in prod
 # requirements (only pyannote pulled it transitively); needed for tests.
 numpy==2.2.6
+# DER scorer (compute_der). pyannote.metrics is CPU-only (no torch); without it
+# the DER unit tests importorskip and SILENTLY don't run (review #189) — CI would
+# be green while the scorer is untested. Pin so CI actually exercises it.
+# Verified to co-resolve with numpy 2.2.6 (pip --dry-run).
+pyannote.metrics==3.2.1
