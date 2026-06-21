@@ -90,30 +90,45 @@ def load_rttm(path: Path) -> list[Turn]:
     return turns
 
 
+def _to_annotation(turns: list[Turn], prefix: str) -> object:
+    """Build a pyannote Annotation with a UNIQUE track per turn.
+
+    Without a per-turn track, two turns sharing the same (start, end) — i.e.
+    overlapped speech in an RTTM — collide on the default track and the second
+    speaker silently overwrites the first, dropping a speaker. A unique track id
+    keeps every turn so overlap is scored honestly (review #189).
+    """
+    from pyannote.core import Annotation, Segment
+
+    ann = Annotation()
+    for i, t in enumerate(turns):
+        ann[Segment(t.start, t.end), f"{prefix}{i}"] = t.speaker
+    return ann
+
+
+def _make_scorer(collar: float, skip_overlap: bool) -> object:
+    """A DiarizationErrorRate that accumulates across calls (corpus DER via abs())."""
+    from pyannote.metrics.diarization import DiarizationErrorRate
+
+    return DiarizationErrorRate(collar=collar, skip_overlap=skip_overlap)
+
+
 def compute_der(
     reference: list[Turn],
     hypothesis: list[Turn],
     collar: float = 0.25,
     skip_overlap: bool = False,
 ) -> float:
-    """DER via pyannote.metrics (optimal speaker mapping). Lower is better.
+    """Per-file DER via pyannote.metrics (optimal speaker mapping). Lower is better.
 
     `collar` (seconds) forgives boundary jitter around each reference segment —
     the dscore/pyannote-TR standard is 0.25 s. With collar=0 every boundary wobble
     counts as error, inflating DER and making numbers incomparable to published
     results (review #164). `skip_overlap` excludes overlapped speech regions.
+    Overlap-safe: each turn gets a unique track (review #189).
     """
-    from pyannote.core import Annotation, Segment
-    from pyannote.metrics.diarization import DiarizationErrorRate
-
-    ref = Annotation()
-    for t in reference:
-        ref[Segment(t.start, t.end)] = t.speaker
-    hyp = Annotation()
-    for t in hypothesis:
-        hyp[Segment(t.start, t.end)] = t.speaker
-    metric = DiarizationErrorRate(collar=collar, skip_overlap=skip_overlap)
-    return float(metric(ref, hyp))
+    metric = _make_scorer(collar, skip_overlap)
+    return float(metric(_to_annotation(reference, "r"), _to_annotation(hypothesis, "h")))
 
 
 def _vram_mb() -> int:
@@ -390,7 +405,11 @@ def main() -> None:
         print(f"NO wav+rttm pairs in {audio_dir}", file=sys.stderr)
         sys.exit(2)
 
-    peak = {"mb": 0}
+    try:
+        baseline_vram = _vram_mb()  # GPU mem already in use BEFORE this backend loads
+    except Exception:  # noqa: BLE001
+        baseline_vram = 0
+    peak = {"mb": baseline_vram}
     stop = threading.Event()
 
     def sampler() -> None:
@@ -420,6 +439,7 @@ def main() -> None:
         def diarize_fn(wav: Path) -> list[Turn]:
             return _speechbrain_turns(encoder, wav, args.num_speakers, args.cluster_threshold)
 
+    scorer = _make_scorer(args.collar, args.skip_overlap)  # accumulates → corpus DER
     ders: list[float] = []
     latencies: list[float] = []
     audio_sec_total = 0.0
@@ -429,8 +449,12 @@ def main() -> None:
         hyp = diarize_fn(wav)
         latencies.append((time.perf_counter() - t0) * 1000)
         audio_sec_total += _wav_duration(wav)
-        ders.append(compute_der(ref, hyp, args.collar, args.skip_overlap))
+        # one scorer call returns THIS file's DER and accumulates the corpus total
+        ders.append(float(scorer(_to_annotation(ref, "r"), _to_annotation(hyp, "h"))))
         print(f"  [{len(ders)}/{len(wavs)}] {wav.name} DER={ders[-1]:.3f}", file=sys.stderr)
+    # corpus DER weights every file by its reference duration (the standard metric);
+    # `der` (mean) weights every file equally — keep both, corpus is the headline (#189).
+    der_corpus = round(float(abs(scorer)), 4) if ders else 0.0
 
     stop.set()
     proc_sec = sum(latencies) / 1000.0
@@ -443,7 +467,8 @@ def main() -> None:
         "revision": args.revision or None,  # reproducibility: pinned HF commit/tag
         "device": args.device,
         "n_samples": len(ders),
-        "der": round(statistics.mean(ders), 4),
+        "der_corpus": der_corpus,  # duration-weighted corpus DER — the decision metric (#189)
+        "der": round(statistics.mean(ders), 4),  # unweighted per-file mean
         "der_max": round(max(ders), 4) if ders else 0.0,
         "collar": args.collar,
         "skip_overlap": args.skip_overlap,
@@ -452,15 +477,17 @@ def main() -> None:
         "audio_sec": round(audio_sec_total, 1),
         "rtf": round(proc_sec / audio_sec_total, 3) if audio_sec_total else None,
         "model_load_sec": round(load_sec, 1),
-        "peak_vram_mb": peak["mb"],
+        "gpu_memory_used_total_peak_mb": peak["mb"],  # TOTAL GPU0 used, NOT backend-isolated
+        "peak_vram_delta_mb": max(0, peak["mb"] - baseline_vram),  # peak minus pre-load baseline
         "fixture_kind": "synthetic-smoke",  # NOT a baseline DER — see ADR-0033
     }
     line = json.dumps(row, ensure_ascii=False)
     print(line)
     print(
-        f"== {row['tag']}: DER {row['der']:.2%} (collar={row['collar']}s, "
-        f"synthetic-smoke) on {row['n_samples']} samples, "
-        f"p50 {row['p50_ms']}ms, RTF {row['rtf']}, peak VRAM {row['peak_vram_mb']}MB",
+        f"== {row['tag']}: DER corpus {row['der_corpus']:.2%} / mean {row['der']:.2%} "
+        f"(collar={row['collar']}s, synthetic-smoke) on {row['n_samples']} samples, "
+        f"p50 {row['p50_ms']}ms, RTF {row['rtf']}, "
+        f"VRAM Δ{row['peak_vram_delta_mb']}MB (total {row['gpu_memory_used_total_peak_mb']}MB)",
         file=sys.stderr,
     )
     if args.evidence:

@@ -10,7 +10,7 @@
 
 ## Matris (RTX 4070, aynı 6 sentetik fixture — apples-to-apples)
 
-| Tag | Backend | n | DER | DER p95 | p50 ms | RTF | model_load s | Peak VRAM |
+| Tag | Backend | n | DER (ort.) | DER max | p50 ms | RTF | model_load s | GPU mem (toplam tepe) |
 |---|---|---|---|---|---|---|---|---|
 | pyannote-3.1 (smoke) | pyannote | 1 | 45.04% | 45.04% | 866 | 0.036 | 6.7 | 2129 MB |
 | **pyannote-3.1** | pyannote | 6 | **50.14%** | 55.27% | 1290 | 0.024 | 2.9 | 2155 MB |
@@ -19,6 +19,16 @@
 Per-fixture DER (n=6, 2-konuşmacı TR sentetik, değişken tur/boşluk):
 - pyannote: 46.3 / 54.9 / 46.1 / 45.1 / 55.3 / 53.2 → ort. 50.14%
 - speechbrain: 57.4 / 57.6 / 57.1 / 55.2 / 57.1 / 55.2 → ort. 56.64%
+
+> **Schema notu (#189 review).** Bu evidence/rapor pre-#189 koşusudur, current
+> `diar_matrix.py` schema'sına şu farklarla bakın: (1) Buradaki DER **per-file
+> ortalama** (`der`); araç artık ek olarak **duration-weighted `der_corpus`**
+> üretir (asıl karar metriği) — bir sonraki sweep'te dolar. (2) "DER max" sütunu
+> n=6'da p95 indexinin denk geldiği maksimumdur, gerçek persentil değil. (3)
+> **GPU mem = toplam GPU0 kullanımı**, backend-izole delta DEĞİL (izole
+> `.venv-diar`'da ölçüldü → tek süreç); araç artık `peak_vram_delta_mb`
+> (peak − pre-load baseline) de raporlar. "7× az" izole-venv toplamına dayanır;
+> backend-delta sonraki sweep'te netleşir.
 
 ## pyannote vs alternatif (kıyas)
 
