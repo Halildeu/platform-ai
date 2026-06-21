@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Drift-proof GPU-host deploy update. Forces the deploy clone to EXACTLY match
-  origin/main, then restarts the live-stt + meeting-ai scheduled tasks.
+  Drift-proof GPU-host deploy update. Pins the deploy clone's tracked working
+  tree to origin/main, then restarts the live-stt + meeting-ai scheduled tasks.
 
 .DESCRIPTION
   Replaces the fragile `cd C:\platform-ai; git pull` in README §Güncelleme.
@@ -11,10 +11,11 @@
   the 2026-06-21 incident where 13 unpushed diarization commits (#161/#164) sat
   local-only on this clone (single point of failure, no GitHub backup).
 
-  FAIL-CLOSED SAFETY: this script REFUSES to run `git reset --hard` if it would
-  destroy un-backed-up local work (unpushed commits or a dirty tracked tree).
-  In that case it aborts and tells the operator to push + PR first. -Force
-  overrides ONLY after the operator has confirmed the work is preserved.
+  FAIL-CLOSED SAFETY: this script REFUSES to `git reset --hard` if it would
+  destroy un-backed-up local work (commits not in origin/$Branch, or a dirty
+  tracked tree) OR if it cannot positively verify the state (missing origin ref,
+  a failed git query). On any doubt it aborts and tells the operator to push +
+  PR first. -Force overrides ONLY after the work is confirmed on GitHub.
 
 .PARAMETER RepoRoot
   Deploy clone path. Defaults to the repo this script lives in (deploy/gpu-host/..).
@@ -51,20 +52,30 @@ if (-not (Test-Path (Join-Path $RepoRoot ".git"))) {
 Set-Location $RepoRoot
 Write-Host "[update] repo=$RepoRoot branch=$Branch" -ForegroundColor Cyan
 
-# 1. Refresh remote refs (read-only; needed to compare against origin/$Branch).
+# 1. Refresh remote refs (needed to compare against origin/$Branch). Fail-closed.
 git fetch --prune origin 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) { Fail "git fetch failed (network / auth). Aborting — no mutation." }
 
-# 2. FAIL-CLOSED guard — never destroy un-backed-up local work.
-$head     = (git rev-parse --abbrev-ref HEAD).Trim()
-$dirty    = @(git status --porcelain --untracked-files=no)
-$unpushed = @(git log --oneline "origin/$Branch..HEAD" 2>$null)
+# 2. FAIL-CLOSED guard. EVERY safety query must succeed; if we cannot positively
+#    verify the state we ABORT, rather than risk a reset --hard that loses work.
+git rev-parse --verify --quiet "refs/remotes/origin/$Branch" *> $null
+if ($LASTEXITCODE -ne 0) { Fail "origin/$Branch not found after fetch — cannot verify safety. Aborting." }
+
+$head = git rev-parse --abbrev-ref HEAD
+if ($LASTEXITCODE -ne 0) { Fail "git rev-parse HEAD failed — cannot verify safety. Aborting." }
+$head = "$head".Trim()
+
+$dirty = @(git status --porcelain --untracked-files=no)
+if ($LASTEXITCODE -ne 0) { Fail "git status failed — cannot verify safety. Aborting." }
+
+$unpushed = @(git log --oneline "origin/$Branch..HEAD")
+if ($LASTEXITCODE -ne 0) { Fail "git log origin/$Branch..HEAD failed — cannot verify local work. Aborting." }
 
 if (($unpushed.Count -gt 0 -or $dirty.Count -gt 0) -and -not $Force) {
   Write-Host ""
   Write-Host "  ABORT — un-backed-up local work would be DESTROYED by reset --hard:" -ForegroundColor Red
   if ($head -ne $Branch)     { Write-Host "    - HEAD is on '$head', not '$Branch'" -ForegroundColor Yellow }
-  if ($unpushed.Count -gt 0) { Write-Host "    - $($unpushed.Count) unpushed local commit(s):" -ForegroundColor Yellow; $unpushed | ForEach-Object { Write-Host "        $_" } }
+  if ($unpushed.Count -gt 0) { Write-Host "    - $($unpushed.Count) local commit(s) not in origin/$Branch:" -ForegroundColor Yellow; $unpushed | ForEach-Object { Write-Host "        $_" } }
   if ($dirty.Count -gt 0)    { Write-Host "    - $($dirty.Count) modified tracked file(s)" -ForegroundColor Yellow }
   Write-Host ""
   Write-Host "  This clone is a deploy MIRROR — it must not hold local work." -ForegroundColor Red
@@ -77,13 +88,16 @@ if (($unpushed.Count -gt 0 -or $dirty.Count -gt 0) -and -not $Force) {
   Fail "Refusing to discard un-backed-up work without -Force."
 }
 
-# 3. Pin the deploy clone to origin/$Branch — drift becomes impossible.
+# 3. Pin to origin/$Branch atomically (checkout -B sets the branch + tree), then
+#    reset --hard (belt-and-suspenders). Each step is exit-checked — a failed
+#    checkout must NOT fall through to reset on the wrong ref.
 $before = (git rev-parse HEAD).Trim()
-git checkout $Branch 2>&1 | Out-Host
+git checkout -B $Branch "origin/$Branch" 2>&1 | Out-Host
+if ($LASTEXITCODE -ne 0) { Fail "git checkout -B $Branch origin/$Branch failed — deploy state unchanged." }
 git reset --hard "origin/$Branch" 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) { Fail "git reset --hard origin/$Branch failed." }
 $after = (git rev-parse HEAD).Trim()
-Write-Host "[update] $before -> $after (now == origin/$Branch)" -ForegroundColor Green
+Write-Host "[update] $before -> $after (tracked tree pinned to origin/$Branch)" -ForegroundColor Green
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code.
 if ($NoRestart) {
