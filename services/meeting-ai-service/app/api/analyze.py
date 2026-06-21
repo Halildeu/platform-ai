@@ -22,6 +22,7 @@ from app.api.metrics import (
 from app.core.config import Settings, get_settings
 from app.models.schemas import AnalyzeRequest, AnalyzeResponse
 from app.services.analyze import BackendUnavailableError, MeetingAnalysisService, get_service
+from app.services.redact import RedactionError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -60,9 +61,7 @@ async def analyze_endpoint(
         "backend": settings.backend,
     }
 
-    segments = (
-        [s.model_dump() for s in body.segments] if body.segments else None
-    )
+    segments = [s.model_dump() for s in body.segments] if body.segments else None
     try:
         result = await asyncio.wait_for(
             run_in_threadpool(service.analyze, transcript, segments),
@@ -74,6 +73,20 @@ async def analyze_endpoint(
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=f"Analyze exceeded {settings.request_timeout}s timeout",
+        ) from exc
+    except RedactionError as exc:
+        # ADR-0043 D3 fail-closed: residual PII survived redaction → never reach the LLM.
+        # Message is transcript-free (only detector labels).
+        logger.warning(
+            "Analyze blocked: residual PII after redaction (KVKK fail-closed)",
+            extra={**log_extra, "err_class": type(exc).__name__},
+        )
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.REDACTION_BLOCKED.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Redaction could not guarantee PII removal; blocked ({exc})",
         ) from exc
     except NotImplementedError as exc:
         logger.warning("Analyze backend not implemented", extra=log_extra)

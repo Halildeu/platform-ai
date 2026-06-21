@@ -6,7 +6,38 @@ FastAPI service: **transcript → summary + decisions + action items**.
 
 > **KVKK boundary:** the transcript is **redacted before any analyzer/LLM call**
 > (`MAI_REDACT_PII=True` by default). Even a real LLM backend only ever receives
-> redacted text. Raw transcript is never logged.
+> redacted text. Raw transcript is never logged. Redaction is **fail-closed**
+> (ADR-0043 D3): for a real LLM backend, if a broad residual detector still finds a
+> PII shape after redaction, the request is **blocked with 422** rather than sent.
+
+## Citation grounding & hallucination guard (ADR-0043 D4/D8.1)
+
+The product wedge for regulated buyers — and the gap **no competitor fills** (Otter /
+Fireflies / Fathom / Copilot / Granola / Gong all do timestamp-linking + human review,
+none machine-check claim↔span consistency): every shipped decision/action is checked
+against the transcript with **deterministic contradiction gates**, not merely overlap.
+
+> **Honest scope (v1):** this is **verified span-grounding with deterministic
+> contradiction gates**, NOT full NLI entailment. It is model-free / CPU-only; it
+> high-precision-FAILs the cases overlap and embedding-cosine miss (negation/number),
+> but it does not prove positive entailment. The **`summary` is unverified narrative**
+> (`summary_grounding_status=unverified`); only `decisions`/`action_items` carry the
+> verified-grounding guarantee. Entity-NER + embedding + summary-grounding are roadmap.
+
+A claim is `PASSED` (shipped) only if its best-matching sentence survives a layered,
+CPU-only, zero-model verifier (`app/services/citation.py`):
+
+1. **content-word coverage** (necessary, not sufficient);
+2. **polarity/negation gate** — "reddedildi" cited to "onaylandı" has high overlap but
+   opposite meaning → rejected (the failure mode lexical/embedding scores miss);
+3. **number/quantity gate** — "%20" cited to "%12" → rejected;
+4. **span-informativeness** — a generic filler span ("Tamam.") can't ground a decision.
+
+Verdicts are 3-way (`PASSED` / `FAILED` / `LOW_CONFIDENCE`); only `PASSED` reaches the
+user-visible `decisions`/`action_items`. **Ungrounded/contradicted claims are withheld**
+into `rejected_claims` (auditable, never presented as fact — ADR-0043 D8.1 fail-closed).
+Each citation carries a hash/offset key (`source_char_start/end`, `source_hash`,
+`quote_hash`) pinning it to the exact transcript span.
 
 ## Backends
 

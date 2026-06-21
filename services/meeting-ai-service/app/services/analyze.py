@@ -20,9 +20,10 @@ from typing import Protocol
 import httpx
 
 from app.core.config import Settings
-from app.models.schemas import ActionItem, AnalyzeResponse, Citation
-from app.services.citation import ground_claims
-from app.services.redact import redact_pii
+from app.models.schemas import ActionItem, AnalyzeResponse, Citation, RejectedClaim
+from app.services.citation import Citation as GroundedCitation
+from app.services.citation import ground_claim, split_sentences
+from app.services.redact import assert_no_residual_pii, redact_pii
 
 
 @dataclass
@@ -195,6 +196,35 @@ def build_analyzer(settings: Settings) -> Analyzer:
     return LlmStubAnalyzer(settings)
 
 
+def _to_schema_citation(c: GroundedCitation) -> Citation:
+    """Map a verified service citation → API schema citation (ADR-0043 D4 fields)."""
+    return Citation(
+        claim=c.claim,
+        source_index=c.source_index,
+        source_text=c.source_text,
+        similarity=c.similarity,
+        grounded=c.grounded,
+        status=c.status.value,
+        reason=c.reason,
+        start_sec=c.start_sec,
+        source_char_start=c.source_char_start,
+        source_char_end=c.source_char_end,
+        source_hash=c.source_hash,
+        quote_hash=c.quote_hash,
+    )
+
+
+def _to_rejected(claim: str, kind: str, c: GroundedCitation) -> RejectedClaim:
+    """ADR-0043 D8.1: an ungrounded/contradicted claim withheld from the output."""
+    return RejectedClaim(
+        claim=claim,
+        kind=kind,
+        status=c.status.value,
+        reason=c.reason,
+        similarity=c.similarity,
+    )
+
+
 class MeetingAnalysisService:
     """Redact-then-analyze meeting AI service."""
 
@@ -211,34 +241,56 @@ class MeetingAnalysisService:
         else:
             redacted, count = transcript, 0
 
+        # ADR-0043 D3 fail-closed (Codex 019ee9a6): run the residual gate whenever
+        # redaction ran — BACKEND-INDEPENDENT, so an accidentally-enabled mock in a
+        # deployed env can't bypass it (the config validator also hard-fails mock in
+        # stage/prod). `redact_pii=False` is the only opt-out (local mock fixtures).
+        # Raises RedactionError → 422 at the API layer.
+        if self._settings.redact_pii:
+            assert_no_residual_pii(redacted)
+
         # The analyzer only ever sees redacted text.
         draft = self._analyzer.analyze(redacted)
 
-        # #162: ground every decision/action to a transcript sentence (citation)
-        # and flag the ungrounded ones (hallucination guard). Grounded against the
-        # SAME redacted text the analyzer saw, so claims and sources line up.
-        # Optional STT `segments` attach a wall-clock start_sec to each citation.
-        claims = list(draft.decisions) + [a.text for a in draft.action_items]
-        grounded, ungrounded = ground_claims(claims, redacted, segments=segments)
-        citations = [
-            Citation(
-                claim=c.claim,
-                source_index=c.source_index,
-                source_text=c.source_text,
-                similarity=c.similarity,
-                grounded=c.grounded,
-                start_sec=c.start_sec,
-            )
-            for c in grounded
-        ]
+        # ADR-0043 D4 + D8.1: ground + entailment-check every decision/action against
+        # the SAME redacted text the analyzer saw. Ship ONLY the grounded (PASSED)
+        # claims; withhold ungrounded/contradicted ones into `rejected_claims` so they
+        # are auditable but never presented as fact (fail-closed hallucination guard).
+        sentences = split_sentences(redacted, segments)
+        kept_decisions: list[str] = []
+        kept_actions: list[ActionItem] = []
+        citations: list[Citation] = []
+        rejected: list[RejectedClaim] = []
+
+        for decision in draft.decisions:
+            if not decision.strip():
+                continue
+            verdict = ground_claim(decision, sentences)
+            if verdict.grounded:
+                kept_decisions.append(decision)
+                citations.append(_to_schema_citation(verdict))
+            else:
+                rejected.append(_to_rejected(decision, "decision", verdict))
+
+        for action in draft.action_items:
+            if not action.text.strip():
+                continue
+            verdict = ground_claim(action.text, sentences)
+            if verdict.grounded:
+                kept_actions.append(action)
+                citations.append(_to_schema_citation(verdict))
+            else:
+                rejected.append(_to_rejected(action.text, "action", verdict))
+
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
         return AnalyzeResponse(
             summary=draft.summary,
-            decisions=draft.decisions,
-            action_items=draft.action_items,
+            decisions=kept_decisions,
+            action_items=kept_actions,
             citations=citations,
-            ungrounded_count=ungrounded,
+            rejected_claims=rejected,
+            ungrounded_count=len(rejected),
             redacted=self._settings.redact_pii,
             redaction_count=count,
             backend=self._settings.backend,
