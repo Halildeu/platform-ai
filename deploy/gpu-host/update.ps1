@@ -105,16 +105,24 @@ if ($LASTEXITCODE -ne 0) { Fail "git reset --hard origin/$Branch failed." }
 $after = (git rev-parse HEAD).Trim()
 Write-Host "[update] $before -> $after (tracked tree pinned to origin/$Branch)" -ForegroundColor Green
 
-# 4. Restart the deploy scheduled tasks so they pick up the new code.
+# 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
+#    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
+#    ScheduledTasks module is ABSENT on some hosts (this GPU host's Windows
+#    PowerShell 5.1 has no Restart-ScheduledTask — Get-ScheduledTask would throw
+#    CommandNotFound and, under $ErrorActionPreference=Stop, abort the whole
+#    update after the git pin already landed). schtasks.exe ships with every
+#    Windows and is codepage-safe here (#193 follow-up). Native stderr is merged
+#    (2>&1) so a stderr line is not wrapped into a Stop-fatal error record.
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
 } else {
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
-    $t = Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
-    if (-not $t) { Write-Host "[update] task '$task' not installed (skipping)" -ForegroundColor Yellow; continue }
-    try { Restart-ScheduledTask -TaskName $task -ErrorAction Stop }
-    catch { Stop-ScheduledTask -TaskName $task -EA SilentlyContinue; Start-ScheduledTask -TaskName $task }
-    Write-Host "[update] restarted $task" -ForegroundColor Green
+    & schtasks.exe /Query /TN $task 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Host "[update] task '$task' not installed (skipping)" -ForegroundColor Yellow; continue }
+    & schtasks.exe /End /TN $task 2>&1 | Out-Null   # harmless if the task is not currently running
+    & schtasks.exe /Run /TN $task 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Host "[update] WARN: schtasks /Run '$task' exit=$LASTEXITCODE" -ForegroundColor Yellow }
+    else { Write-Host "[update] restarted $task" -ForegroundColor Green }
   }
 }
 
