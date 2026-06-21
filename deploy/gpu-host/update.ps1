@@ -110,20 +110,48 @@ Write-Host "[update] $before -> $after (tracked tree pinned to origin/$Branch)" 
 #    ScheduledTasks module is ABSENT on some hosts (this GPU host's Windows
 #    PowerShell 5.1 has no Restart-ScheduledTask — Get-ScheduledTask would throw
 #    CommandNotFound and, under $ErrorActionPreference=Stop, abort the whole
-#    update after the git pin already landed). schtasks.exe ships with every
-#    Windows and is codepage-safe here (#193 follow-up). Native stderr is merged
-#    (2>&1) so a stderr line is not wrapped into a Stop-fatal error record.
+#    update after the git pin already landed). #193 follow-up; Codex review #194.
+#
+#    CRITICAL: schtasks writes benign stderr on /Query-missing and /End-not-
+#    running. PowerShell's `2>&1` pipe can wrap native stderr into a
+#    NativeCommandError that, under $ErrorActionPreference=Stop, terminates BEFORE
+#    the $LASTEXITCODE check — re-introducing the same "git pin landed, restart
+#    aborted" failure. So route every call through a helper that drops stderr
+#    WITHOUT the PS 2>&1 pipe and forces EAP=Continue around the native call.
+function Invoke-SchtasksQuiet {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$SchtasksArgs)
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & schtasks.exe @SchtasksArgs 1> $null 2> $null
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
 } else {
+  $restartFailed = $false
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
-    & schtasks.exe /Query /TN $task 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Host "[update] task '$task' not installed (skipping)" -ForegroundColor Yellow; continue }
-    & schtasks.exe /End /TN $task 2>&1 | Out-Null   # harmless if the task is not currently running
-    & schtasks.exe /Run /TN $task 2>&1 | Out-Host
-    if ($LASTEXITCODE -ne 0) { Write-Host "[update] WARN: schtasks /Run '$task' exit=$LASTEXITCODE" -ForegroundColor Yellow }
-    else { Write-Host "[update] restarted $task" -ForegroundColor Green }
+    if ((Invoke-SchtasksQuiet "/Query" "/TN" $task) -ne 0) {
+      Write-Host "[update] task '$task' not installed (skipping)" -ForegroundColor Yellow
+      continue
+    }
+    # /End returns non-zero when the task is not running (benign). When it WAS
+    # running, give the process ~2s to release its listening port before /Run
+    # starts a fresh instance (live-stt/meeting-ai bind 8200/8300).
+    if ((Invoke-SchtasksQuiet "/End" "/TN" $task) -eq 0) { Start-Sleep -Seconds 2 }
+    $runExit = Invoke-SchtasksQuiet "/Run" "/TN" $task
+    if ($runExit -ne 0) {
+      Write-Host "[update] ERROR: schtasks /Run '$task' exit=$runExit" -ForegroundColor Red
+      $restartFailed = $true
+    } else {
+      Write-Host "[update] restarted $task" -ForegroundColor Green
+    }
   }
+  if ($restartFailed) { Fail "One or more scheduled tasks failed to restart (git pin landed; services may be stale code)." }
 }
 
 Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8300/health" -ForegroundColor Cyan
