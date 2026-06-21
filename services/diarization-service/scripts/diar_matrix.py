@@ -52,7 +52,7 @@ import wave as wave_mod
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import numpy as np
@@ -90,7 +90,7 @@ def load_rttm(path: Path) -> list[Turn]:
     return turns
 
 
-def _to_annotation(turns: list[Turn], prefix: str) -> object:
+def _to_annotation(turns: list[Turn], prefix: str) -> Any:
     """Build a pyannote Annotation with a UNIQUE track per turn.
 
     Without a per-turn track, two turns sharing the same (start, end) — i.e.
@@ -106,7 +106,7 @@ def _to_annotation(turns: list[Turn], prefix: str) -> object:
     return ann
 
 
-def _make_scorer(collar: float, skip_overlap: bool) -> object:
+def _make_scorer(collar: float, skip_overlap: bool) -> Any:
     """A DiarizationErrorRate that accumulates across calls (corpus DER via abs())."""
     from pyannote.metrics.diarization import DiarizationErrorRate
 
