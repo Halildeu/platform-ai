@@ -25,6 +25,15 @@ $log = Join-Path $logDir ("live-stt-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
 # KVKK: logs are transcript-free by design (stream.py); do not enable STT_STREAM_DEBUG in prod.
 $env:STT_LOG_LEVEL = "INFO"
 
+# Intel-Fortran/MKL (pulled in by numpy/torch/faster-whisper) installs a console
+# control handler that aborts the process with `forrtl: error (200): program
+# aborting due to window-CLOSE event` when it receives a CTRL_CLOSE — which is what
+# `schtasks /End`, a session logoff, or a parent-console close sends. That killed
+# live-stt on restart and made fresh starts launched from an interactive session
+# die immediately (root cause of the 2026-06-22 "uvicorn never came up" saga).
+# Disabling the handler lets the runtime shut down normally instead of forrtl-abort.
+$env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"
+
 # Streaming (live_*/final_*) already defaults to cuda per ADR-0031; the legacy
 # batch /transcribe service defaults to cpu/int8, which makes /health misleading
 # on a GPU host. Align it so health reflects the real device.
