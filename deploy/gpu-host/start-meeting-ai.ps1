@@ -36,6 +36,11 @@ $env:MAI_OLLAMA_HOST = $OllamaHost
 $env:MAI_OLLAMA_MODEL = $OllamaModel
 $env:MAI_LOG_LEVEL = "INFO"
 
+# Same Intel-Fortran/MKL console-handler guard as start-live-stt.ps1: prevents a
+# `forrtl: error (200) window-CLOSE` abort on schtasks /End / session close if any
+# numpy/MKL-backed dependency is loaded. Harmless if the runtime is absent.
+$env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"
+
 Set-Location $svc
 # Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native
 # stderr lines in error records, which $ErrorActionPreference=Stop turns into
