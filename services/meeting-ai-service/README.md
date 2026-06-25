@@ -39,13 +39,53 @@ into `rejected_claims` (auditable, never presented as fact — ADR-0043 D8.1 fai
 Each citation carries a hash/offset key (`source_char_start/end`, `source_hash`,
 `quote_hash`) pinning it to the exact transcript span.
 
+## G-INT evidence gate
+
+`scripts/intel_eval.py` produces one metadata row per model/seed run. The row now
+includes explicit `dataset_kind`; default is `synthetic-neutral`. Real #162 acceptance
+requires an approved pilot class (`pilot-meeting`, `workcube-pilot`, or
+`customer-pilot`) plus explicit thresholds checked by `scripts/gint_gate.py`.
+Pilot rows must also use a real backend and a non-fixture eval-set path; editing a
+synthetic row's `dataset_kind` field is not enough to pass the gate.
+
+Synthetic fixtures and mock runs are useful for CI and bakeoffs, but the gate refuses
+to let them satisfy G-INT acceptance. Evidence rows must stay metadata-only: raw
+transcripts, expected actions/decisions, prompts, responses, source quotes, citations
+and PII-shaped values are rejected by the verifier.
+
+Current synthetic evidence is expected to remain blocked:
+
+```bash
+python scripts/gint_gate.py \
+  --gint-evidence ../../docs/evidence/intel-eval-2026-06-17.jsonl \
+  --min-grounding-rate 0.95 \
+  --min-action-precision 0.80 \
+  --min-action-recall 0.80 \
+  --min-decision-precision 0.75 \
+  --min-decision-recall 0.75 \
+  --max-schema-invalid-rate 0 \
+  --max-format-invalid-rate 0 \
+  --max-backend-error-rate 0 \
+  --max-truncation-risk-rate 0 \
+  --min-samples 3
+```
+
+For an approved pilot run:
+
+```bash
+MAI_BACKEND=ollama python scripts/intel_eval.py \
+  --eval-set C:/faz24-pilot/intel-pilot-2026-06-25.json \
+  --dataset-kind pilot-meeting \
+  --tag ollama-pilot
+```
+
 ## Backends
 
 | `MAI_BACKEND` | Behaviour |
 |---|---|
 | `mock` (default) | Deterministic keyword-based extractive analysis — no LLM, no key, unit-tested |
 | `anthropic` / `openai` | Option A real LLM — **stub** (501); wiring needs ADR-0030 Option A/B + API key |
-| `ollama` | Option B local LLM — **stub** (501); wiring needs an Ollama host |
+| `ollama` | Option B local LLM through Ollama `/api/generate`; intended on-prem |
 
 ## API
 

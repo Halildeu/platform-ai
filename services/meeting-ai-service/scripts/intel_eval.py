@@ -256,6 +256,21 @@ def main() -> None:
         help="Ollama keep_alive per cell (default '0' = unload after each run so a "
         "model's VRAM residency cannot pollute the next model in a shared-GPU matrix).",
     )
+    ap.add_argument(
+        "--dataset-kind",
+        default="synthetic-neutral",
+        choices=(
+            "synthetic-neutral",
+            "unit-fixture",
+            "pilot-meeting",
+            "workcube-pilot",
+            "customer-pilot",
+        ),
+        help=(
+            "Evidence class for downstream G-INT gate. Defaults to synthetic-neutral; "
+            "real pilot acceptance requires an explicit pilot/workcube/customer value."
+        ),
+    )
     args = ap.parse_args()
 
     raw = Path(args.eval_set).read_text(encoding="utf-8")
@@ -280,7 +295,8 @@ def main() -> None:
     print(
         f"# intel_eval backend={base.backend} models={models} seeds={seeds} "
         f"num_ctx={args.num_ctx or base.ollama_num_ctx} keep_alive={args.keep_alive} "
-        f"eval_set_hash={eval_set_hash} prompt_hash={prompt_hash} n={len(samples)}",
+        f"dataset_kind={args.dataset_kind} eval_set_hash={eval_set_hash} "
+        f"prompt_hash={prompt_hash} n={len(samples)}",
         file=sys.stderr,
     )
 
@@ -297,6 +313,7 @@ def main() -> None:
                 "model": svc.effective_model,
                 "seed": seed,
                 "eval_set": args.eval_set,
+                "dataset_kind": args.dataset_kind,
                 "eval_set_hash": eval_set_hash,
                 "prompt_hash": prompt_hash,
                 "n_samples": len(samples),
@@ -328,6 +345,7 @@ def main() -> None:
                 "summary": "per-model mean±stdev across seeds",
                 "model": model,
                 "backend": base.backend,
+                "dataset_kind": args.dataset_kind,
                 "n_seeds": len(per_seed_runs),
                 "eval_set_hash": eval_set_hash,
                 "prompt_hash": prompt_hash,
