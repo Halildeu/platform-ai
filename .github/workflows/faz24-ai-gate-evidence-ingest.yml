@@ -1,0 +1,102 @@
+---
+name: Faz 24 AI gate evidence ingest
+
+"on":
+  workflow_dispatch:
+    inputs:
+      evidence_json_base64:
+        description: >-
+          Single-line base64 JSON envelope for G-WER/DER, G-LAT/COST, or G-INT.
+          Do not include raw audio, transcripts, prompts, responses, secrets, or
+          PII.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    name: Redacted AI gate ingest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Decode input envelope
+        id: decode
+        shell: bash
+        run: |
+          set -euo pipefail
+          input_dir="${RUNNER_TEMP}/faz24-ai-gate-input-${GITHUB_RUN_ID}"
+          artifact_dir="${RUNNER_TEMP}/faz24-ai-gate-artifact-${GITHUB_RUN_ID}"
+          mkdir -p "$input_dir" "$artifact_dir"
+          printf '%s' "${{ inputs.evidence_json_base64 }}" \
+            | base64 -d > "$input_dir/evidence.json"
+          echo "input_dir=$input_dir" >> "$GITHUB_OUTPUT"
+          echo "artifact_dir=$artifact_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Run AI gate ingest wrapper
+        id: gate
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/faz24_ai_gate_ingest.py \
+            --evidence-file "${{ steps.decode.outputs.input_dir }}/evidence.json" \
+            --output-file "${{ steps.decode.outputs.artifact_dir }}/result.json"
+          gate_status=$?
+          set -e
+          echo "exit_code=$gate_status" >> "$GITHUB_OUTPUT"
+
+      - name: Scan redacted artifact before upload
+        id: secret_scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${{ steps.decode.outputs.artifact_dir }}"
+          test -s "$artifact_dir/result.json"
+          if grep -R -I -E -n \
+            -e 'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]+' \
+            -e 'Authorization[[:space:]]*:' \
+            -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+            -e 'github_pat_[A-Za-z0-9_]+' \
+            -e 'ghp_[A-Za-z0-9_]+' \
+            -e 'sk-[A-Za-z0-9_-]{16,}' \
+            -e 'xox[baprs]-[A-Za-z0-9-]+' \
+            -e 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}' \
+            -e '[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}' \
+            -e '(^|[^0-9])(\+90|0)?5[0-9]{9}([^0-9]|$)' \
+            -e '(^|[^0-9])[0-9]{11}([^0-9]|$)' \
+            -e 'TR[0-9]{2}([ -]?[0-9]){22}' \
+            -e '\.(wav|rttm|mp3|flac|opus|m4a|webm|ogg)([^A-Za-z0-9]|$)' \
+            -- \
+            "$artifact_dir"; then
+            echo "Redacted result artifact contains secret/PII/raw-file shaped material"
+            exit 1
+          fi
+
+      - name: Upload redacted gate result
+        if: always() && steps.secret_scan.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: faz24-ai-gate-result
+          path: ${{ steps.decode.outputs.artifact_dir }}/result.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Fail when gate did not pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          gate_status="${{ steps.gate.outputs.exit_code }}"
+          if [ "$gate_status" != "0" ]; then
+            echo "Faz 24 AI gate evidence did not pass; inspect redacted artifact."
+            case "$gate_status" in
+              1) exit 1 ;;
+              2) exit 2 ;;
+              *) exit 1 ;;
+            esac
+          fi
