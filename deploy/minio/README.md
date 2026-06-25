@@ -2,6 +2,11 @@
 
 Meeting ses chunk'ları ve transcript artefaktları için S3-uyumlu depo.
 
+> **ADR-0036 boundary:** `meeting-audio` bucket'ı default live path değildir.
+> Faz 24 direct-STT / recorder smoke ham sesi kalıcılaştırmadan çalışmalıdır.
+> Raw-audio recording/archive ancak ayrı owner/legal/product kararı ve
+> `docs/adr/0036-recording-archive-plane.md` gate'leriyle opt-in açılır.
+
 ## Kurulum (host-compose)
 1. Host'ta env değerlerini ayarla (ESO'dan veya vault'tan; commit ETME):
    `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` (prod) / `MINIO_TEST_ROOT_USER`, `MINIO_TEST_ROOT_PASSWORD` (test)
