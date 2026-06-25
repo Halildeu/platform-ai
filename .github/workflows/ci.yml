@@ -10,6 +10,34 @@ on:
     branches: [main]
 
 jobs:
+  repo-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Retention gate unit tests
+        run: python3 -m unittest discover -s tests/unit -p "test_retention_gate.py"
+
+      - name: Current retention readiness snapshot
+        run: |
+          set +e
+          python3 scripts/retention_gate.py \
+            --evidence docs/evidence/retention-readiness-2026-06-25.json \
+            --repo-root .
+          gate_status=$?
+          if [ "$gate_status" -eq 0 ]; then
+            echo "Current #156 snapshot passed prematurely; DB retention + VERBIS evidence is still pending"
+            exit 1
+          fi
+          if [ "$gate_status" -ne 1 ]; then
+            echo "Current #156 snapshot must remain blocked until DB retention + VERBIS evidence exists"
+            exit 1
+          fi
+
   service-tests:
     runs-on: ubuntu-latest
     strategy:
