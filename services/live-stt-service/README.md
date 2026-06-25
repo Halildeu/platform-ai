@@ -175,6 +175,36 @@ evidence. `pass` is reserved for metadata-only pilot evidence under explicit
 thresholds. The verifier rejects raw audio paths, transcript/reference text, and
 hypothesis text in evidence rows.
 
+## Faz 24 G-LAT/COST quality gate
+
+`scripts/perf_client.py`, `scripts/saturation_stats.py`, and `scripts/cost.py`
+produce the raw measurement inputs for latency, queue lag, throughput,
+utilization, and per-audio-minute cost. The acceptance gate is deliberately
+separate from those helpers: lab or synthetic performance rows can support
+capacity planning, but they cannot prove the product gate without approved pilot
+evidence and explicit thresholds.
+
+```bash
+cd services/live-stt-service
+python scripts/glat_cost_gate.py \
+  --evidence ../../docs/evidence/latcost-results-2026-06-25.jsonl \
+  --max-latency-p95-ms 2500 \
+  --max-queue-lag-p95-ms 500 \
+  --max-cost-per-audio-minute 0.01 \
+  --max-realtime-factor 0.35 \
+  --max-error-rate 0.01 \
+  --min-audio-minutes 30 \
+  --min-audio-minutes-per-wall-hour 600
+```
+
+Current repository evidence is expected to return `blocked` because it is a
+legacy performance-lab row, not approved pilot-meeting evidence. `pass` is
+reserved for metadata-only pilot evidence that includes latency p50/p95, queue
+lag p95, real-time factor, throughput, utilization, cost per audio minute, error
+rate, and a redacted evidence hash under explicit thresholds. The verifier
+rejects raw audio paths, transcript text, fixture paths, prompts/responses, and
+PII-shaped strings in evidence rows.
+
 ## Known limits and open blockers
 
 This section documents Project item #18:
