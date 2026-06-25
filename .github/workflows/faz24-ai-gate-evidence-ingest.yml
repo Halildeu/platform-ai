@@ -28,13 +28,15 @@ jobs:
 
       - name: Decode input envelope
         id: decode
+        env:
+          EVIDENCE_JSON_BASE64: ${{ inputs.evidence_json_base64 }}
         shell: bash
         run: |
           set -euo pipefail
           input_dir="${RUNNER_TEMP}/faz24-ai-gate-input-${GITHUB_RUN_ID}"
           artifact_dir="${RUNNER_TEMP}/faz24-ai-gate-artifact-${GITHUB_RUN_ID}"
           mkdir -p "$input_dir" "$artifact_dir"
-          printf '%s' "${{ inputs.evidence_json_base64 }}" \
+          printf '%s' "$EVIDENCE_JSON_BASE64" \
             | base64 -d > "$input_dir/evidence.json"
           echo "input_dir=$input_dir" >> "$GITHUB_OUTPUT"
           echo "artifact_dir=$artifact_dir" >> "$GITHUB_OUTPUT"
