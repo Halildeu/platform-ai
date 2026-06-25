@@ -152,6 +152,29 @@ Full report:
 - `docs/poc-stt-baseline.md`
 - `docs/pr-stt-02-line-17-execution-report.md`
 
+## Faz 24 T-B G-WER quality gate
+
+`scripts/wer_matrix.py` and `services/diarization-service/scripts/diar_matrix.py`
+produce model/diarization measurement rows. Those rows are evidence inputs, but
+Common Voice and synthetic-smoke rows do not satisfy the product-quality gate by
+themselves. The gate verifier requires explicit pilot-meeting WER + DER rows and
+operator-provided thresholds:
+
+```bash
+cd services/live-stt-service
+python scripts/gwer_gate.py \
+  --wer-evidence ../../docs/evidence/wer-results-2026-06-10.jsonl \
+  --der-evidence ../../docs/evidence/diar-results-2026-06-17.jsonl \
+  --max-wer 0.25 \
+  --max-der 0.30
+```
+
+Current repository evidence is expected to return `blocked` because it contains
+Common Voice and synthetic-smoke measurements, not approved pilot-meeting WER/DER
+evidence. `pass` is reserved for metadata-only pilot evidence under explicit
+thresholds. The verifier rejects raw audio paths, transcript/reference text, and
+hypothesis text in evidence rows.
+
 ## Known limits and open blockers
 
 This section documents Project item #18:
