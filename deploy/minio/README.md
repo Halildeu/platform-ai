@@ -49,3 +49,6 @@ s3://meetings/{tenant_id}/{meeting_id}/...
 - **VERBIS uyumu**: Süreler sekmesi beyanı ↔ bu lifecycle DAVRANIŞI eşleşmeli
   (beyan ↔ gerçek uyumsuzluğu KVKK ihlali). VERBIS 13-İşitsel "Diğer:" metni:
   kamera 1 ay + ses 7 gün + transkript 1 yıl + özet/karar 2 yıl (#53).
+- Tam #156 go-live kabulü için MinIO lifecycle tek başına yeterli değildir.
+  DB cleanup ve VERBIS kanıtını birlikte doğrulamak için:
+  `python3 scripts/retention_gate.py --evidence docs/evidence/retention-readiness-2026-06-25.json --repo-root .`.

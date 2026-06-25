@@ -56,6 +56,12 @@ DEĞİLDİR** (o ayrı bir rejim). TTK/VUK uygulanabilirliği hukuk paketine
 | Audit olay kayıtları (audit-archive) | **7 yıl** | MinIO lifecycle 2557g (#158) |
 | KVKK m.12 erişim/işleme logu | **2 yıl** | meeting-ai DB (ikinci faz, #156) |
 
+Machine-readable go-live kontrolü:
+`scripts/retention_gate.py --evidence docs/evidence/retention-readiness-2026-06-25.json --repo-root .`
+mevcut durumda bilinçli olarak `blocked` döner; MinIO lifecycle tamamdır, fakat
+DB cleanup job'ları + VERBIS recorded/exempt-confirmed kanıtı olmadan #156
+go-live kabulü yapılamaz.
+
 ## Paralel hukuk paketi (a yolu — async)
 `docs/legal/adr-0030-hukuk-review-paketi.md` — pilot launch'tan en geç 2 hafta
 önce deliverable, **pilot go-live gate'i**. Eklenen explicit soru:

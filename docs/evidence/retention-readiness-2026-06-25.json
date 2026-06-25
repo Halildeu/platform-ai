@@ -1,0 +1,60 @@
+{
+  "schema": "faz24.retention-readiness.v1",
+  "evidence_id": "retention-readiness-2026-06-25-current",
+  "generated_at": "2026-06-25T00:00:00+03:00",
+  "source_refs": [
+    "platform-ai#156",
+    "platform-ai#158",
+    "deploy/minio/setup-lifecycle.sh",
+    "docs/adr/0030-kvkk-uyum-cercevesi.md",
+    "docs/adr/0032-tenant-isolation-transcript-db.md"
+  ],
+  "verbis": {
+    "status": "pending",
+    "reference": "platform-ai#53 operator portal action remains pending"
+  },
+  "layers": [
+    {
+      "id": "minio.meeting-audio",
+      "status": "active",
+      "mechanism": "s3-lifecycle",
+      "retention_days": 7,
+      "evidence_ref": "platform-ai#156 owner comment plus deploy/minio/setup-lifecycle.sh"
+    },
+    {
+      "id": "minio.transcripts",
+      "status": "active",
+      "mechanism": "s3-lifecycle",
+      "retention_days": 365,
+      "evidence_ref": "platform-ai#156 owner comment plus deploy/minio/setup-lifecycle.sh"
+    },
+    {
+      "id": "minio.audit-archive",
+      "status": "active",
+      "mechanism": "s3-lifecycle",
+      "retention_days": 2557,
+      "evidence_ref": "platform-ai#156 owner comment plus deploy/minio/setup-lifecycle.sh"
+    },
+    {
+      "id": "db.transcript-records",
+      "status": "pending",
+      "mechanism": "db-cleanup-job",
+      "retention_days": 365,
+      "evidence_ref": "blocked until transcript DB persistence exists"
+    },
+    {
+      "id": "db.meeting-intelligence",
+      "status": "pending",
+      "mechanism": "db-cleanup-job",
+      "retention_days": 730,
+      "evidence_ref": "blocked until meeting-ai DB persistence exists"
+    },
+    {
+      "id": "db.kvkk-access-log",
+      "status": "pending",
+      "mechanism": "db-cleanup-job",
+      "retention_days": 730,
+      "evidence_ref": "blocked until KVKK access-processing DB log persistence exists"
+    }
+  ]
+}
