@@ -195,8 +195,12 @@ Known limits:
 - Timeout worker leak remains open: if a Whisper inference exceeds
   `STT_REQUEST_TIMEOUT`, the API returns 504, but the underlying worker thread
   can continue until the blocking inference exits.
-- No Redis queue consumer yet: Gateway-to-STT queue integration is planned in
-  later PR-queue items.
+- Redis Streams consumer exists only as an opt-in **control-plane** reader:
+  it validates hash+metadata envelopes on `audio:chunks:p00..p31`, dedups by
+  `messageId`, XACKs poison/duplicate/success messages, trims bounded streams,
+  and recovers stale pending entries with XAUTOCLAIM. It does **not** fetch
+  audio bytes or transcribe from Redis; the hash-to-audio fetch + transcription
+  handler is a later #182/#188 runtime slice.
 - No production WER claim: Common Voice fixtures are smoke/baseline inputs, not
   an accuracy benchmark for Turkish enterprise meetings.
 - No iPhone-like live dictation claim: this CPU sync endpoint is for baseline
@@ -248,6 +252,6 @@ Approved GPU live PoC note:
 1. PoC integration test (gerçek Türkçe wav fixture + medium model)
 2. Local docker compose ile e2e smoke (audio file → curl → transcript)
 3. WebSocket streaming slice (`/ws/stream` — chunk-by-chunk + state machine)
-4. Redis queue producer (audio-gateway-service tarafından consume)
+4. Hash-only Redis control-plane runtime activation after #188/#182 gates
 5. Prometheus `/metrics` endpoint + Grafana dashboard
 6. GitOps deploy (platform-k8s-gitops kustomize base + overlay)

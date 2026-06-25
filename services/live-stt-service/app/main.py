@@ -82,14 +82,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         from app.services.chunk_consumer import (
             AudioChunkConsumer,
-            LoggingChunkHandler,
+            CoordinationChunkHandler,
             build_redis_client,
         )
 
-        consumer = AudioChunkConsumer(settings, build_redis_client(settings), LoggingChunkHandler())
-        consumer_thread = threading.Thread(
-            target=consumer.run, name="chunk-consumer", daemon=True
+        consumer = AudioChunkConsumer(
+            settings,
+            build_redis_client(settings),
+            CoordinationChunkHandler(),
         )
+        consumer_thread = threading.Thread(target=consumer.run, name="chunk-consumer", daemon=True)
         consumer_thread.start()
         logger.info(
             "chunk consumer started",

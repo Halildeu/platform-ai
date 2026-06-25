@@ -12,7 +12,7 @@ from app.core.config import Settings
 from app.services.chunk_consumer import (
     AudioChunkConsumer,
     ChunkEnvelope,
-    LoggingChunkHandler,
+    CoordinationChunkHandler,
 )
 
 
@@ -92,7 +92,7 @@ class ExplodingHandler:
 
 def make_consumer(
     redis: FakeRedis | None = None,
-    handler: RecordingHandler | ExplodingHandler | LoggingChunkHandler | None = None,
+    handler: RecordingHandler | ExplodingHandler | CoordinationChunkHandler | None = None,
     **overrides: object,
 ) -> tuple[AudioChunkConsumer, FakeRedis, RecordingHandler]:
     redis = redis or FakeRedis()
@@ -235,3 +235,27 @@ def test_contract_defaults_match_adr_0031_d3() -> None:
     assert settings.chunk_stream_prefix == "audio:chunks:p"
     assert settings.chunk_partition_count == 32
     assert settings.chunk_consumer_group == "live-stt-v1"
+
+
+def test_default_handler_is_control_plane_only(caplog) -> None:
+    handler = CoordinationChunkHandler()
+    envelope = ChunkEnvelope.model_validate(
+        {
+            "messageId": "sess-1:3",
+            "sessionId": "sess-1",
+            "chunkSeq": 3,
+            "tenantId": "42",
+            "sha256": "abc123hash",
+            "correlationId": "corr-1",
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        handler.handle(envelope)
+
+    assert "chunk_control_plane_envelope_received" in caplog.text
+    record = next(
+        item for item in caplog.records if item.message == "chunk_control_plane_envelope_received"
+    )
+    assert record.sha256_prefix == "abc123ha"
+    assert record.sha256_prefix != envelope.sha256

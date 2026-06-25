@@ -87,12 +87,12 @@ class ChunkHandler(Protocol):
     def handle(self, envelope: ChunkEnvelope) -> None: ...
 
 
-class LoggingChunkHandler:
-    """Default handler: PII-safe structured log (ids + hash prefix only)."""
+class CoordinationChunkHandler:
+    """Default handler: control-plane coordination log, never transcription."""
 
     def handle(self, envelope: ChunkEnvelope) -> None:
         logger.info(
-            "chunk_envelope_received",
+            "chunk_control_plane_envelope_received",
             extra={
                 "correlation_id": envelope.correlation_id or "-",
                 "session_id": envelope.session_id,
@@ -205,9 +205,7 @@ class AudioChunkConsumer:
     def _ack(self, stream_key: str, entry_id: str) -> None:
         self._redis.xack(stream_key, self._settings.chunk_consumer_group, entry_id)
 
-    def process_message(
-        self, stream_key: str, entry_id: str, fields: dict[object, object]
-    ) -> None:
+    def process_message(self, stream_key: str, entry_id: str, fields: dict[object, object]) -> None:
         try:
             envelope = ChunkEnvelope.model_validate(_decode_fields(fields))
         except (ValidationError, ValueError) as exc:
