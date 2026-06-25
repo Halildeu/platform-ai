@@ -112,5 +112,15 @@ Synthetic G-INT numbers are in (2026-06-17, `llama3.1:8b`). Promote to **ACCEPTE
 when `intel_eval.py` has been run on a **real-meeting** transcript (consent +
 neutral content, recording imha'd after measurement) and grounding rate +
 decision/action precision/recall meet the G-INT target — ideally with a semantic
-faithfulness check (entailment), not lexical-only. Evidence file:
-`docs/evidence/intel-eval-<date>.jsonl`.
+faithfulness check (entailment), not lexical-only.
+
+Acceptance evidence now has two files:
+
+1. `docs/evidence/intel-eval-<date>.jsonl` — metadata-only `intel_eval.py` rows
+   with explicit `dataset_kind=pilot-meeting|workcube-pilot|customer-pilot`,
+   real backend, and non-fixture eval-set path.
+2. `docs/evidence/gint-gate-<date>.json` — `scripts/gint_gate.py` verifier output
+   with `status=pass` against explicit G-INT thresholds.
+
+Synthetic/mock rows remain valid bakeoff evidence, but `gint_gate.py` blocks them
+from satisfying the real pilot acceptance gate.

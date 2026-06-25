@@ -68,7 +68,9 @@ Tek oturumda üç ölçüm de alınabilir: aynı kayıt → WER (A) + DER (B) + 
    Karar/aksiyon içermesi için 2-3 nötr karar cümlesi söylemiş ol (aşağıdaki
    örnek cümleler 2/4/6 karar-aksiyon taşır).
 2. **Beklenen çıktı (ground-truth):** Bu transcript'ten beklenen karar + aksiyonları
-   elle yaz → `tests/fixtures/intel-pilot.json`:
+   elle yaz → geçici lokal dosya `C:\faz24-pilot\intel-pilot-<tarih>.json`
+   (`tests/fixtures` altına koyma; fixture path G-INT verifier tarafından pilot
+   acceptance için reddedilir):
    ```json
    {"samples": [
      {"transcript": "<gerçek konuşma metni>",
@@ -81,11 +83,25 @@ Tek oturumda üç ölçüm de alınabilir: aynı kayıt → WER (A) + DER (B) + 
    cd services\meeting-ai-service
    $env:MAI_BACKEND = "ollama"; $env:MAI_REDACT_PII = "True"
    $env:MAI_OLLAMA_MODEL = "llama3.1:8b"   # ollama list'teki model
-   python scripts\intel_eval.py --eval-set tests\fixtures\intel-pilot.json --tag ollama-pilot
+   python scripts\intel_eval.py --eval-set C:\faz24-pilot\intel-pilot-<tarih>.json --dataset-kind pilot-meeting --tag ollama-pilot `
+     > ..\..\docs\evidence\intel-eval-pilot-<tarih>.jsonl
+   python scripts\gint_gate.py `
+     --gint-evidence ..\..\docs\evidence\intel-eval-pilot-<tarih>.jsonl `
+     --min-grounding-rate 0.95 `
+     --min-action-precision 0.80 `
+     --min-action-recall 0.80 `
+     --min-decision-precision 0.75 `
+     --min-decision-recall 0.75 `
+     --max-schema-invalid-rate 0 `
+     --max-format-invalid-rate 0 `
+     --max-backend-error-rate 0 `
+     --max-truncation-risk-rate 0 `
+     --min-samples 3 `
+     > ..\..\docs\evidence\gint-gate-pilot-<tarih>.json
    ```
-4. **Sonuç** → gerçek G-INT (grounding rate + decision/action P/R) → #162 + ADR-0034
-   kalibre (sentetik-smoke yerine gerçek sayı). Lexical metrik olduğu unutulmasın
-   (token-overlap, semantik değil).
+4. **Sonuç** → gerçek G-INT (grounding rate + decision/action P/R) + verifier
+   `status=pass` → #162 + ADR-0034 kalibre (sentetik-smoke yerine gerçek sayı).
+   Lexical metrik olduğu unutulmasın (token-overlap, semantik değil).
 
 ## Ön hazırlık (pilot öncesi, GPU host)
 - VRAM: pyannote için Ollama'yı geçici durdur (`Stop-ScheduledTask
@@ -103,7 +119,8 @@ Tek oturumda üç ölçüm de alınabilir: aynı kayıt → WER (A) + DER (B) + 
 
 ## Kabul / kayıt
 - WER/DER sonuçları → docs/evidence + #161 yorumu (rakam + n + koşul).
-- G-INT sonucu → docs/evidence + #162 yorumu (grounding + decision/action P/R).
+- G-INT sonucu → docs/evidence + #162 yorumu (grounding + decision/action P/R +
+  `gint_gate.py` PASS envelope).
 - Gerçek pilot DER, ADR-0033'ün ACCEPTED tetikleyicisini tamamlar; gerçek G-INT,
   ADR-0034'ün ACCEPTED tetikleyicisini tamamlar (mutlak değer kalibrasyonu —
   ADR-0031 WER pilot disiplininin aynısı).
