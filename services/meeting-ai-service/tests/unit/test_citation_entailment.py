@@ -175,6 +175,8 @@ def test_action_owner_must_be_in_same_source_sentence() -> None:
         "Kalite Ekibi", "Kalite Ekibi raporu cuma gününe kadar hazırlayacak."
     )
     assert not owner_supported_by_source("Ali", "Rapor cuma gününe kadar hazırlanacak.")
+    assert not owner_supported_by_source("Can", "Rapor canlı yayında hazırlanacak.")
+    assert not owner_supported_by_source("IT", "Bu kritik rapor cuma günü hazırlanacak.")
 
 
 def test_action_due_date_must_be_in_same_source_sentence() -> None:
@@ -190,6 +192,7 @@ def test_action_due_date_must_be_in_same_source_sentence() -> None:
         "2026-06-26", "Ali raporu cuma gününe kadar hazırlayacak."
     )
     assert not due_date_supported_by_source("salı", "Ali raporu cuma gününe kadar hazırlayacak.")
+    assert not due_date_supported_by_source("salı", "Salıverme planı cuma günü tamamlanacak.")
 
 
 def test_action_owner_absent_from_grounded_source_is_withheld() -> None:
