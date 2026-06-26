@@ -174,6 +174,32 @@ def test_ask_ollama_ungrounded_answer_is_withheld(monkeypatch: pytest.MonkeyPatc
     assert "fabrika" not in result.answer.lower()
 
 
+def test_ask_ollama_fused_answer_is_withheld(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fused(*a: object, **k: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "response": (
+                    "Bütçe artışı yönetim kurulunda onaylandı ve şirket yeni fabrika açtı."
+                )
+            },
+            request=httpx.Request("POST", "http://localhost:11434/api/generate"),
+        )
+
+    monkeypatch.setattr(httpx, "post", _fused)
+    settings = Settings(backend="ollama")
+    result = answer_question(
+        "Bütçe artışı yönetim kurulunda onaylandı ve ödeme takvimi netleşti.",
+        "Bütçe ve şirket yatırımı hakkında ne oldu?",
+        settings,
+    )
+
+    assert result.answer == "Metinde bu bilgi yok."
+    assert result.grounded is False
+    assert result.citation.source_index == -1
+    assert "fabrika" not in result.answer.lower()
+
+
 def test_ask_ollama_no_info_sentinel_keeps_fixed_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

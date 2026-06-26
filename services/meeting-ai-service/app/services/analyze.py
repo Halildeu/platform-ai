@@ -172,6 +172,8 @@ teknik terimleri ve İngilizce code-switch ifadelerini (ör. "deadline", "sprint
 aynen koru.
 - Karar ve aksiyonları metinde GEÇEN ifadelere sadık kal; metinde olmayan bilgi \
 ekleme, uydurma.
+- Tek karar/aksiyon/özet cümlesinde farklı transcript cümlelerinden ayrı olguları \
+birleştirme; her çıktı tek kaynak cümlede desteklenebilir olmalı.
 - Metinde karar yoksa "decisions" boş liste; aksiyon yoksa "action_items" boş \
 liste döndür.
 - Aksiyon sorumlusu veya termin/tarih/saat metinde açıkça yoksa ilgili alanı null \
@@ -362,9 +364,9 @@ def _ground_summary(
 
     Decisions/actions have been verified-only since ADR-0043 D8.1. A free-form
     summary is just as user-visible, so unsupported summary prose must not be
-    shown merely because the response labels it "unverified". Use a stricter
-    threshold than discrete claims: summary sentences are longer and can hide a
-    hallucinated clause behind a few overlapping words.
+    shown merely because the response labels it "unverified". Use a high-precision
+    threshold: summary sentences are longer and can hide a hallucinated clause
+    behind a few overlapping words.
     """
     claims = _sentences(summary)
     if not claims:

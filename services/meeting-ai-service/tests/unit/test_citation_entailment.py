@@ -54,6 +54,23 @@ def test_number_match_grounds() -> None:
     assert c.grounded is True
 
 
+def test_fused_claim_with_unsupported_clause_is_rejected() -> None:
+    # The first clause is well supported by one sentence, but the claim also adds
+    # a separate factory claim absent from that cited sentence. A single citation
+    # cannot ground fused multi-source prose.
+    sents = split_sentences(
+        "Bütçe artışı yönetim kurulunda oy birliğiyle onaylandı ve ödeme takvimi netleşti. "
+        "Ali raporu cuma gününe kadar hazırlayacak."
+    )
+    c = ground_claim(
+        "Bütçe artışı yönetim kurulunda oy birliğiyle onaylandı ve ödeme takvimi netleşti, "
+        "şirket yeni fabrika açtı",
+        sents,
+    )
+    assert c.grounded is False
+    assert "unsupported content" in c.reason
+
+
 def test_generic_span_is_low_confidence_not_shipped() -> None:
     sents = split_sentences("Tamam. Bütçe artışı onaylandı.")
     # A claim that best-matches the 1-word "Tamam." span must not ground a decision.
@@ -216,7 +233,7 @@ def test_action_due_date_absent_from_grounded_source_is_withheld() -> None:
     )
     result = svc.analyze("Rapor cuma gününe kadar hazırlanacak.")
 
-    assert result.schema_version == "4-adr0043"
+    assert result.schema_version == "5-adr0043"
     assert len(result.action_items) == 1
     assert result.action_items[0].text == "Rapor cuma gününe kadar hazırlanacak"
     assert result.action_items[0].due_date is None
@@ -284,6 +301,40 @@ def test_action_due_date_in_grounded_source_is_kept() -> None:
     assert result.action_items[0].owner == "Ali"
     assert result.action_items[0].due_date == "cuma"
     assert result.ungrounded_count == 0
+
+
+def test_fused_decision_is_withheld_from_analyze_response() -> None:
+    """A decision that fuses an unsupported clause into grounded prose is withheld."""
+    from app.core.config import Settings
+    from app.services.analyze import AnalysisDraft, MeetingAnalysisService
+
+    class _StubAnalyzer:
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            return AnalysisDraft(
+                summary="",
+                decisions=[
+                    "Bütçe artışı yönetim kurulunda oy birliğiyle onaylandı ve ödeme takvimi "
+                    "netleşti, şirket yeni fabrika açtı"
+                ],
+                action_items=[],
+            )
+
+        @property
+        def model_loaded(self) -> bool:
+            return True
+
+    svc = MeetingAnalysisService(
+        Settings(backend="mock", redact_pii=False), analyzer=_StubAnalyzer()
+    )
+    result = svc.analyze(
+        "Bütçe artışı yönetim kurulunda oy birliğiyle onaylandı ve ödeme takvimi netleşti."
+    )
+
+    assert result.schema_version == "5-adr0043"
+    assert result.decisions == []
+    assert result.ungrounded_count == 1
+    assert result.rejected_claims[0].kind == "decision"
+    assert "unsupported content" in result.rejected_claims[0].reason
 
 
 def test_unsupported_summary_sentence_is_withheld() -> None:

@@ -33,20 +33,25 @@ against the transcript with **deterministic contradiction gates**, not merely ov
 > `summary` is an empty string; clients should render any fallback copy from the
 > status field rather than treating a static API string as meeting data.
 > Relative-date normalization, Entity-NER + embedding-backed semantic summary
-> grounding are roadmap.
+> grounding are roadmap. Response contract `schema_version=5-adr0043` adds
+> fail-closed fact-fusion semantics: one cited sentence must cover the material
+> claim; separate facts merged from different transcript sentences are withheld.
 
 A claim is `PASSED` (shipped) only if its best-matching sentence survives a layered,
 CPU-only, zero-model verifier (`app/services/citation.py`):
 
 1. **content-word coverage** (necessary, not sufficient);
-2. **polarity/negation gate** — "reddedildi" cited to "onaylandı" has high overlap but
+2. **single-source materiality** — a decision/action/summary sentence that merges
+   supported prose with extra unsupported facts is rejected unless one cited source
+   sentence covers that material;
+3. **polarity/negation gate** — "reddedildi" cited to "onaylandı" has high overlap but
    opposite meaning → rejected (the failure mode lexical/embedding scores miss);
-3. **number/quantity gate** — "%20" cited to "%12" → rejected;
-4. **span-informativeness** — a generic filler span ("Tamam.") can't ground a decision.
-5. **owner attribution** — an action assignee is shown only when that owner appears in
+4. **number/quantity gate** — "%20" cited to "%12" → rejected;
+5. **span-informativeness** — a generic filler span ("Tamam.") can't ground a decision.
+6. **owner attribution** — an action assignee is shown only when that owner appears in
    the same cited sentence; otherwise the action is kept with `owner=null` and the
    unsupported assignment is recorded as `rejected_claims[].kind=action_owner`.
-6. **due-date attribution** — an action `due_date` is shown only when the same cited
+7. **due-date attribution** — an action `due_date` is shown only when the same cited
    sentence contains the copied relative phrase (`cuma`, `yarın`, etc.) or copied
    numeric date/time text. Unsupported, reformatted, or normalized dates are nulled
    and recorded as `rejected_claims[].kind=action_due_date`.

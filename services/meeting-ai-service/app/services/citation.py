@@ -7,10 +7,13 @@ be **entailed** by that sentence, not merely lexically overlapping.
 Verification ladder (ADR-0043 D4, Codex 019ee7c9 — substring/overlap != entailment):
 1. **Content-word coverage** (necessary): how much of the claim's meaning is in the
    sentence (overlap coefficient). Below `threshold` → FAILED (ungrounded).
-2. **Polarity/negation consistency** (the key entailment fix): a claim and its
+2. **Single-source materiality**: a claim may not ship when it carries too much
+   content that is absent from the single cited sentence. This blocks fact-fusion
+   where an LLM combines several transcript sentences into one unsupported claim.
+3. **Polarity/negation consistency** (the key entailment fix): a claim and its
    evidence must agree on affirmation vs rejection. "Bütçe reddedildi" cited to
    "Bütçe onaylandı" has high overlap but OPPOSITE meaning → FAILED.
-3. **Evidence informativeness**: a generic span ("Tamam.", "Evet.") can't ground a
+4. **Evidence informativeness**: a generic span ("Tamam.", "Evet.") can't ground a
    decision/action → LOW_CONFIDENCE.
 Only `PASSED` is `grounded=True` (shippable; ADR-0043 D8.1). Each citation carries a
 hash/offset key (`source_char_start/end`, `source_hash`, `quote_hash`) so a verifier
@@ -110,9 +113,13 @@ _GRAMMATICAL_NEGATION = (  # negation without an outcome word (-1)
     "hayır",
 )
 
-_CITATION_VERIFIER_VERSION = "v3-adr0043-signed-polarity"
-_DEFAULT_THRESHOLD = 0.4
+_CITATION_VERIFIER_VERSION = "v4-adr0043-single-source-materiality"
+# High-precision default: a single source sentence must cover most claim material.
+# The earlier 0.4 overlap floor caught obvious hallucinations but could pass a
+# fused claim with one grounded clause plus one unsupported clause.
+_DEFAULT_THRESHOLD = 0.65
 _MIN_EVIDENCE_CONTENT_TOKENS = 2
+_MAX_UNSUPPORTED_CONTENT_TOKENS = 2
 
 
 def _sha256_hex(text: str) -> str:
@@ -347,23 +354,38 @@ def ground_claim(
         if sim > best_sim:
             best, best_sim = s, sim
 
-    if best is None or best_sim < threshold:
+    if best is None:
         return _ungrounded(claim, best_sim, "no transcript sentence covers the claim")
 
-    # Coverage met → hard acceptance gates (high-precision; ADR-0043 D4 + Codex 019ee9a6:
-    # lexical overlap / embedding cosine BOTH miss these, so they gate AFTER retrieval).
-    # GATE — signed-outcome polarity: opposite non-zero signs = contradiction, NOT support
-    # (catches "iptal edildi" vs "iptal edilmedi", "onaylandı" vs "reddedildi/onaylanmadı").
+    best_tokens = _tokens(best.text)
+
+    # Preserve the highest-risk contradiction signal even when the stricter
+    # single-source coverage threshold would also reject the claim. This keeps
+    # audit reasons useful: "not enough coverage" and "opposite polarity" are not
+    # the same failure.
     if _polarity(claim) * _polarity(best.text) < 0:
         return _ungrounded(claim, best_sim, "polarity/negation contradiction with source")
 
+    if best_sim < threshold:
+        return _ungrounded(claim, best_sim, "no transcript sentence covers the claim")
+
+    unsupported_tokens = ctoks - best_tokens
+    if len(unsupported_tokens) > _MAX_UNSUPPORTED_CONTENT_TOKENS:
+        return _ungrounded(
+            claim,
+            best_sim,
+            "claim contains unsupported content outside the cited source sentence",
+        )
+
+    # Coverage met → hard acceptance gates (high-precision; ADR-0043 D4 + Codex 019ee9a6:
+    # lexical overlap / embedding cosine BOTH miss these, so they gate AFTER retrieval).
     # GATE — number/quantity equality: every number/percent/date-digit in the claim
     # must appear in the source span (catches "%2"→"%20" swaps that overlap misses).
     claim_nums = _numbers(claim)
     if claim_nums and not claim_nums.issubset(_numbers(best.text)):
         return _ungrounded(claim, best_sim, "number/quantity in claim not found in source")
 
-    evidence_informative = len(_tokens(best.text)) >= _MIN_EVIDENCE_CONTENT_TOKENS
+    evidence_informative = len(best_tokens) >= _MIN_EVIDENCE_CONTENT_TOKENS
     status = CitationStatus.PASSED if evidence_informative else CitationStatus.LOW_CONFIDENCE
     grounded = status == CitationStatus.PASSED
     reason = "entailed by source sentence" if grounded else "source span too generic to ground"
