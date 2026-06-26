@@ -58,8 +58,12 @@ if ($LASTEXITCODE -ne 0) { Fail "git fetch failed (network / auth). Aborting —
 
 # 2. FAIL-CLOSED guard. EVERY safety query must succeed; if we cannot positively
 #    verify the state we ABORT, rather than risk a reset --hard that loses work.
-git rev-parse --verify --quiet "refs/remotes/origin/$Branch" *> $null
-if ($LASTEXITCODE -ne 0) { Fail "origin/$Branch not found after fetch — cannot verify safety. Aborting." }
+$originRef = "origin/{0}" -f $Branch
+$originRemoteRef = "refs/remotes/{0}" -f $originRef
+$unpushedRange = "{0}..HEAD" -f $originRef
+
+git rev-parse --verify --quiet $originRemoteRef *> $null
+if ($LASTEXITCODE -ne 0) { Fail "$originRef not found after fetch — cannot verify safety. Aborting." }
 
 $head = git rev-parse --abbrev-ref HEAD
 if ($LASTEXITCODE -ne 0) { Fail "git rev-parse HEAD failed — cannot verify safety. Aborting." }
@@ -68,21 +72,21 @@ $head = "$head".Trim()
 $dirty = @(git status --porcelain --untracked-files=no)
 if ($LASTEXITCODE -ne 0) { Fail "git status failed — cannot verify safety. Aborting." }
 
-$unpushed = @(git log --oneline "origin/$Branch..HEAD")
-if ($LASTEXITCODE -ne 0) { Fail "git log origin/$Branch..HEAD failed — cannot verify local work. Aborting." }
+$unpushed = @(git log --oneline $unpushedRange)
+if ($LASTEXITCODE -ne 0) { Fail "git log $unpushedRange failed — cannot verify local work. Aborting." }
 
 if (($unpushed.Count -gt 0 -or $dirty.Count -gt 0) -and -not $Force) {
   Write-Host ""
   Write-Host "  ABORT — un-backed-up local work would be DESTROYED by reset --hard:" -ForegroundColor Red
   if ($head -ne $Branch)     { Write-Host "    - HEAD is on '$head', not '$Branch'" -ForegroundColor Yellow }
-  if ($unpushed.Count -gt 0) { Write-Host "    - $($unpushed.Count) local commit(s) not in origin/${Branch}:" -ForegroundColor Yellow; $unpushed | ForEach-Object { Write-Host "        $_" } }
+  if ($unpushed.Count -gt 0) { Write-Host "    - $($unpushed.Count) local commit(s) not in ${originRef}:" -ForegroundColor Yellow; $unpushed | ForEach-Object { Write-Host "        $_" } }
   if ($dirty.Count -gt 0)    { Write-Host "    - $($dirty.Count) modified tracked file(s)" -ForegroundColor Yellow }
   Write-Host ""
   Write-Host "  This clone is a deploy MIRROR — it must not hold local work." -ForegroundColor Red
   Write-Host "  Preserve it FIRST, then re-run:" -ForegroundColor Red
   Write-Host "    1. In your DEV clone (not here): push the branch + open a PR." -ForegroundColor Gray
   Write-Host "    2. If the work only exists here: extract via git bundle ->" -ForegroundColor Gray
-  Write-Host "       git bundle create C:\Temp\save.bundle $head --not origin/$Branch" -ForegroundColor Gray
+  Write-Host "       git bundle create C:\Temp\save.bundle $head --not $originRef" -ForegroundColor Gray
   Write-Host "       then copy it off-box and push from a credentialed clone." -ForegroundColor Gray
   Write-Host "    3. Only after it is on GitHub: re-run with -Force." -ForegroundColor Gray
   Fail "Refusing to discard un-backed-up work without -Force."
@@ -95,15 +99,15 @@ $before = (git rev-parse HEAD).Trim()
 # -Force genuinely discards confirmed-preserved local work (clobbers a dirty
 # tracked tree); the non-Force path stays safe and aborts on any obstruction.
 if ($Force) {
-  git checkout -f -B $Branch "origin/$Branch" 2>&1 | Out-Host
+  git checkout -f -B $Branch $originRef 2>&1 | Out-Host
 } else {
-  git checkout -B $Branch "origin/$Branch" 2>&1 | Out-Host
+  git checkout -B $Branch $originRef 2>&1 | Out-Host
 }
-if ($LASTEXITCODE -ne 0) { Fail "git checkout -B $Branch origin/$Branch failed — deploy state unchanged." }
-git reset --hard "origin/$Branch" 2>&1 | Out-Host
-if ($LASTEXITCODE -ne 0) { Fail "git reset --hard origin/$Branch failed." }
+if ($LASTEXITCODE -ne 0) { Fail "git checkout -B $Branch $originRef failed — deploy state unchanged." }
+git reset --hard $originRef 2>&1 | Out-Host
+if ($LASTEXITCODE -ne 0) { Fail "git reset --hard $originRef failed." }
 $after = (git rev-parse HEAD).Trim()
-Write-Host "[update] $before -> $after (tracked tree pinned to origin/$Branch)" -ForegroundColor Green
+Write-Host "[update] $before -> $after (tracked tree pinned to $originRef)" -ForegroundColor Green
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
 #    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
