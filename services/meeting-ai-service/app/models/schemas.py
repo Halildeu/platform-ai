@@ -53,11 +53,13 @@ class Citation(BaseModel):
 
 
 class RejectedClaim(BaseModel):
-    """ADR-0043 D8.1: a claim the analyzer produced but the guard REJECTED (not shipped
-    as a user-visible decision/action). Kept for transparency/audit, not as fact."""
+    """ADR-0043 D8.1: a claim the analyzer produced but the guard REJECTED.
+
+    Kept for transparency/audit, not as fact.
+    """
 
     claim: str = Field(description="The rejected claim text")
-    kind: str = Field(description="decision / action")
+    kind: str = Field(description="summary / decision / action / action_owner")
     status: str = Field(description="FAILED / LOW_CONFIDENCE")
     reason: str = Field(description="Why rejected (e.g. ungrounded / polarity contradiction)")
     similarity: float = Field(description="Best content-word coverage found", ge=0.0, le=1.0)
@@ -66,21 +68,26 @@ class RejectedClaim(BaseModel):
 class AnalyzeResponse(BaseModel):
     """Summary + **grounded-only** decisions/action items + #162 citations (ADR-0043 D8.1).
 
-    Contract (Codex 019ee9a6): `grounding_policy=verified_only` means decisions/
-    action_items are filtered to PASSED-citation claims — an empty list means "none
-    survived the guard", NOT "none produced" (see `rejected_claims`, `ungrounded_count`).
-    The `summary` is NOT span-verified in v1 (`summary_grounding_status=unverified`) — it
-    is narrative; only decisions/action_items carry the verified-grounding guarantee.
+    Contract v3 (Codex 019ee9a6 + #162 summary exposure guard):
+    `grounding_policy=verified_only` means user-visible summary/decisions/action_items
+    are filtered to PASSED-citation claims. Empty strings/lists mean "none survived
+    the guard", NOT "none produced" (see `rejected_claims`). `ungrounded_count`
+    preserves the v2 decision/action rejection count; summary rejections are exposed
+    through `summary_grounding_status` and `rejected_claims[].kind=summary`.
     """
 
-    schema_version: str = Field(default="2-adr0043", description="Response contract version")
+    schema_version: str = Field(default="3-adr0043", description="Response contract version")
     grounding_policy: str = Field(
         default="verified_only", description="verified_only = decisions/actions are PASSED-only"
     )
     summary: str = Field(description="Short meeting summary (narrative, see grounding status)")
     summary_grounding_status: str = Field(
-        default="unverified",
-        description="v1: summary is unverified narrative; decisions/actions are verified",
+        default="withheld",
+        description="verified / partial_verified / withheld / empty",
+    )
+    summary_citations: list[Citation] = Field(
+        default_factory=list,
+        description="PASSED citations for summary sentences retained in `summary`",
     )
     decisions: list[str] = Field(
         default_factory=list, description="GROUNDED-only (ADR-0043 D8.1 fail-closed)"
@@ -96,7 +103,9 @@ class AnalyzeResponse(BaseModel):
         description="ADR-0043 D8.1: ungrounded/contradicted claims withheld from the output",
     )
     ungrounded_count: int = Field(
-        default=0, description="#162: claims rejected by the hallucination guard", ge=0
+        default=0,
+        description="#162: decision/action claims rejected by the hallucination guard",
+        ge=0,
     )
     redacted: bool = Field(description="Whether PII redaction ran before analysis")
     redaction_count: int = Field(description="PII spans redacted", ge=0)
