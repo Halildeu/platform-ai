@@ -19,8 +19,9 @@ Meeting ses chunk'ları ve transcript artefaktları için S3-uyumlu depo.
    sh setup-lifecycle.sh loc
    ```
    → meeting-audio 7 gün / transcripts 365 gün (1 yıl) / audit-archive 2557 gün
-   (~7 yıl). Idempotent (re-run güvenli). Canlı kanıt 2026-06-12: test MinIO
-   3 bucket lifecycle Enabled.
+   (~7 yıl). Idempotent (re-run güvenli). `retention_gate.py` için bu kaynak
+   konfigürasyon tek başına yeterli değildir; acceptance snapshot'ı ayrıca
+   her bucket için metadata-only runtime lifecycle export kanıtı ister.
 6. Prod aynı akış, `--profile prod`, ayrı kimlikler + `setup-lifecycle.sh`.
 
 ## k8s tüketicileri
@@ -54,6 +55,7 @@ s3://meetings/{tenant_id}/{meeting_id}/...
 - **VERBIS uyumu**: Süreler sekmesi beyanı ↔ bu lifecycle DAVRANIŞI eşleşmeli
   (beyan ↔ gerçek uyumsuzluğu KVKK ihlali). VERBIS 13-İşitsel "Diğer:" metni:
   kamera 1 ay + ses 7 gün + transkript 1 yıl + özet/karar 2 yıl (#53).
-- Tam #156 go-live kabulü için MinIO lifecycle tek başına yeterli değildir.
-  DB cleanup ve VERBIS kanıtını birlikte doğrulamak için:
+- Tam #156 go-live kabulü için MinIO kaynak lifecycle script'i tek başına
+  yeterli değildir. Metadata-only runtime lifecycle export, DB cleanup ve
+  VERBIS kanıtını birlikte doğrulamak için:
   `python3 scripts/retention_gate.py --evidence docs/evidence/retention-readiness-2026-06-25.json --repo-root .`.

@@ -1,9 +1,9 @@
 """Faz 24 KVKK retention readiness gate.
 
 This metadata-only verifier checks whether #156 retention/automatic-destruction
-evidence is ready for go-live. It deliberately separates the completed MinIO
-lifecycle phase from the still-required DB cleanup phase so missing persistence
-cannot be hidden by optimistic documentation.
+evidence is ready for go-live. It deliberately separates MinIO lifecycle source
+configuration from runtime lifecycle export evidence so missing object-store
+proof cannot be hidden by optimistic documentation.
 """
 
 # ruff: noqa: T201 - verifier CLI prints JSON output.
@@ -38,24 +38,41 @@ EXPECTED_LAYERS: dict[str, dict[str, Any]] = {
     "db.transcript-records": {
         "retention_days": 365,
         "mechanism": "db-cleanup-job",
+        "tenant_id_field": "tenant_id",
+        "retention_timestamp_field": "created_at",
     },
     "db.meeting-intelligence": {
         "retention_days": 730,
         "mechanism": "db-cleanup-job",
+        "tenant_id_field": "tenant_id",
+        "retention_timestamp_field": "created_at",
     },
     "db.kvkk-access-log": {
         "retention_days": 730,
         "mechanism": "db-cleanup-job",
+        "tenant_id_field": "tenant_id",
+        "retention_timestamp_field": "accessed_at",
     },
 }
 
+MINIO_LAYER_IDS = {
+    "minio.meeting-audio",
+    "minio.transcripts",
+    "minio.audit-archive",
+}
 DB_LAYER_IDS = {
     "db.transcript-records",
     "db.meeting-intelligence",
     "db.kvkk-access-log",
 }
 PASS_VERBIS_STATUSES = {"recorded", "exempt-confirmed"}
-VALID_LAYER_STATUSES = {"active", "pending", "blocked", "not-implemented", "not-applicable"}
+VALID_LAYER_STATUSES = {
+    "active",
+    "pending",
+    "blocked",
+    "not-implemented",
+    "not-applicable",
+}
 TRANSCRIPT_FREE_AUDIT_VALUES = {"metadata-only", "transcript-free", "id-only"}
 
 _DISALLOWED_CONTENT_KEYS = {
@@ -86,18 +103,32 @@ _DISALLOWED_CONTENT_KEYS = {
     "speaker_name",
     "summary",
     "text",
+    "token",
     "transcript",
     "transcript_text",
 }
 _DISALLOWED_KEY_FRAGMENTS = (
+    "access_key",
+    "authorization",
+    "bearer",
+    "credential",
+    "password",
     "raw_transcript",
     "prompt_text",
     "response_text",
+    "secret",
     "source_quote",
 )
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _TC_OR_PHONE_RE = re.compile(r"\b(?:\+90|0)?5\d{9}\b|\b[1-9]\d{10}\b")
 _TR_IBAN_RE = re.compile(r"\bTR\d{2}(?:[ -]?\d){22}\b", re.IGNORECASE)
+_SECRET_VALUE_RE = re.compile(
+    r"(?:\bBearer\s+[A-Za-z0-9._~+/=-]{16,}|"
+    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|"
+    r"\bAKIA[0-9A-Z]{16}\b|"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----)",
+    re.IGNORECASE,
+)
 
 
 def _load_document(path: Path) -> dict[str, Any]:
@@ -112,7 +143,11 @@ def _load_document(path: Path) -> dict[str, Any]:
 
 def _is_disallowed_content_key(key: str) -> bool:
     lowered = key.lower()
-    if lowered.endswith("_hash") or lowered.endswith("_ref") or lowered == "evidence_ref":
+    if (
+        lowered.endswith("_hash")
+        or lowered.endswith("_ref")
+        or lowered == "evidence_ref"
+    ):
         return False
     return lowered in _DISALLOWED_CONTENT_KEYS or any(
         fragment in lowered for fragment in _DISALLOWED_KEY_FRAGMENTS
@@ -125,15 +160,24 @@ def _privacy_value_findings(value: Any, *, location: str) -> list[str]:
         for key, nested in value.items():
             nested_location = f"{location}.{key}"
             if _is_disallowed_content_key(key) and nested not in (None, "", [], {}):
-                findings.append(f"{nested_location} uses disallowed content field `{key}`")
+                findings.append(
+                    f"{nested_location} uses disallowed content field `{key}`"
+                )
             findings.extend(_privacy_value_findings(nested, location=nested_location))
     elif isinstance(value, list):
         for index, nested in enumerate(value):
-            findings.extend(_privacy_value_findings(nested, location=f"{location}[{index}]"))
-    elif isinstance(value, str) and (
-        _EMAIL_RE.search(value) or _TC_OR_PHONE_RE.search(value) or _TR_IBAN_RE.search(value)
-    ):
-        findings.append(f"{location} contains PII-shaped value")
+            findings.extend(
+                _privacy_value_findings(nested, location=f"{location}[{index}]")
+            )
+    elif isinstance(value, str):
+        if (
+            _EMAIL_RE.search(value)
+            or _TC_OR_PHONE_RE.search(value)
+            or _TR_IBAN_RE.search(value)
+        ):
+            findings.append(f"{location} contains PII-shaped value")
+        if _SECRET_VALUE_RE.search(value):
+            findings.append(f"{location} contains secret-shaped value")
     return findings
 
 
@@ -147,7 +191,9 @@ def _privacy_findings(document: dict[str, Any]) -> list[str]:
     return findings
 
 
-def _layers_by_id(document: dict[str, Any], findings: list[str]) -> dict[str, dict[str, Any]]:
+def _layers_by_id(
+    document: dict[str, Any], findings: list[str]
+) -> dict[str, dict[str, Any]]:
     raw_layers = document.get("layers")
     if not isinstance(raw_layers, list):
         findings.append("layers must be a JSON array")
@@ -169,7 +215,9 @@ def _layers_by_id(document: dict[str, Any], findings: list[str]) -> dict[str, di
     return layers
 
 
-def _source_assertions(repo_root: Path | None) -> tuple[list[dict[str, Any]], list[str]]:
+def _source_assertions(
+    repo_root: Path | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
     if repo_root is None:
         return [], []
 
@@ -185,7 +233,10 @@ def _source_assertions(repo_root: Path | None) -> tuple[list[dict[str, Any]], li
         if not bucket:
             continue
         days = expected["retention_days"]
-        ok = re.search(rf"\badd_if_absent\s+{re.escape(bucket)}\s+{days}\b", source) is not None
+        ok = (
+            re.search(rf"\badd_if_absent\s+{re.escape(bucket)}\s+{days}\b", source)
+            is not None
+        )
         assertions.append(
             {
                 "layer": layer_id,
@@ -195,13 +246,65 @@ def _source_assertions(repo_root: Path | None) -> tuple[list[dict[str, Any]], li
             }
         )
         if not ok:
-            findings.append(f"{layer_id} source lifecycle does not assert {bucket}:{days}d")
+            findings.append(
+                f"{layer_id} source lifecycle does not assert {bucket}:{days}d"
+            )
     return assertions, findings
 
 
-def _require_non_empty(layer: dict[str, Any], key: str, layer_id: str, findings: list[str]) -> None:
+def _require_non_empty(
+    layer: dict[str, Any], key: str, layer_id: str, findings: list[str]
+) -> None:
     if not layer.get(key):
         findings.append(f"{layer_id} active claim is missing {key}")
+
+
+def _evaluate_minio_layer(
+    *,
+    layer_id: str,
+    layer: dict[str, Any],
+    expected: dict[str, Any],
+    findings: list[str],
+) -> None:
+    if layer.get("bucket_name") != expected["source_bucket"]:
+        findings.append(f"{layer_id} bucket_name must be {expected['source_bucket']}")
+    if layer.get("observed_expiration_days") != expected["retention_days"]:
+        findings.append(
+            f"{layer_id} observed_expiration_days must be {expected['retention_days']}"
+        )
+    if str(layer.get("observed_rule_status", "")).lower() != "enabled":
+        findings.append(f"{layer_id} observed_rule_status must be Enabled")
+    if layer.get("evidence_payload") != "metadata-only":
+        findings.append(f"{layer_id} must declare evidence_payload=metadata-only")
+
+    _require_non_empty(layer, "runtime_environment", layer_id, findings)
+    _require_non_empty(layer, "lifecycle_export_ref", layer_id, findings)
+    _require_non_empty(layer, "runtime_evidence_ref", layer_id, findings)
+
+
+def _evaluate_db_layer(
+    *,
+    layer_id: str,
+    layer: dict[str, Any],
+    expected: dict[str, Any],
+    findings: list[str],
+) -> None:
+    _require_non_empty(layer, "persistence_ref", layer_id, findings)
+    _require_non_empty(layer, "cleanup_job_ref", layer_id, findings)
+    _require_non_empty(layer, "destruction_audit_ref", layer_id, findings)
+    if layer.get("tenant_id_field") != expected["tenant_id_field"]:
+        findings.append(
+            f"{layer_id} must declare tenant_id_field={expected['tenant_id_field']}"
+        )
+    if layer.get("retention_timestamp_field") != expected["retention_timestamp_field"]:
+        findings.append(
+            f"{layer_id} must declare retention_timestamp_field="
+            f"{expected['retention_timestamp_field']}"
+        )
+    if layer.get("audit_payload") not in TRANSCRIPT_FREE_AUDIT_VALUES:
+        findings.append(
+            f"{layer_id} must prove transcript-free destruction audit payload"
+        )
 
 
 def _evaluate_layer(
@@ -223,21 +326,30 @@ def _evaluate_layer(
     if layer.get("mechanism") != expected["mechanism"]:
         findings.append(f"{layer_id} mechanism must be {expected['mechanism']}")
     if layer.get("retention_days") != expected["retention_days"]:
-        findings.append(f"{layer_id} retention_days must be {expected['retention_days']}")
+        findings.append(
+            f"{layer_id} retention_days must be {expected['retention_days']}"
+        )
     _require_non_empty(layer, "evidence_ref", layer_id, findings)
 
-    if layer_id not in DB_LAYER_IDS:
+    if layer_id in MINIO_LAYER_IDS:
+        _evaluate_minio_layer(
+            layer_id=layer_id,
+            layer=layer,
+            expected=expected,
+            findings=findings,
+        )
         return
 
-    _require_non_empty(layer, "persistence_ref", layer_id, findings)
-    _require_non_empty(layer, "cleanup_job_ref", layer_id, findings)
-    _require_non_empty(layer, "destruction_audit_ref", layer_id, findings)
-    if layer.get("tenant_id_field") != "tenant_id":
-        findings.append(f"{layer_id} must declare tenant_id_field=tenant_id")
-    if layer.get("created_at_field") != "created_at":
-        findings.append(f"{layer_id} must declare created_at_field=created_at")
-    if layer.get("audit_payload") not in TRANSCRIPT_FREE_AUDIT_VALUES:
-        findings.append(f"{layer_id} must prove transcript-free destruction audit payload")
+    if layer_id in DB_LAYER_IDS:
+        _evaluate_db_layer(
+            layer_id=layer_id,
+            layer=layer,
+            expected=expected,
+            findings=findings,
+        )
+        return
+
+    findings.append(f"{layer_id} has no evaluator")
 
 
 def evaluate_gate(
@@ -303,7 +415,9 @@ def evaluate_gate(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify Faz 24 #156 retention readiness")
+    parser = argparse.ArgumentParser(
+        description="Verify Faz 24 #156 retention readiness"
+    )
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument(
         "--repo-root",

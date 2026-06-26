@@ -30,7 +30,7 @@ Option B (Ollama on-prem) ile zaten düştüğünden kalan kapsam dar:
 | Redaction-before-LLM (env ile kapatılamaz) | meeting-ai `_enforce_kvkk_redaction_boundary` (#49) |
 | Transcript-free loglar | stream.py (#30); prod Loki ingestion transcript-free |
 | Ülke-içi işleme (yurt dışı aktarım yok) | #54 Option B (Ollama), VERBIS "Yabancı Ülkeler" boş |
-| Saklama/imha otomasyonu | MinIO lifecycle (#156/#158): ses 7g / transkript 1y / audit-archive 7y; KVKK m.12 logu 2y (DB, ikinci faz) |
+| Saklama/imha otomasyonu | MinIO lifecycle source config (#156/#158): ses 7g / transkript 1y / audit-archive 7y; DB cleanup test runtime smoke (#156) kanıtlı; MinIO runtime export + VERBIS hâlâ go-live gate |
 | Anonim diarizasyon | SPEAKER_XX, voiceprint/biyometrik yok (#48) |
 
 ## Audit retention — İKİ AYRI katman (karıştırma!)
@@ -58,9 +58,10 @@ DEĞİLDİR** (o ayrı bir rejim). TTK/VUK uygulanabilirliği hukuk paketine
 
 Machine-readable go-live kontrolü:
 `scripts/retention_gate.py --evidence docs/evidence/retention-readiness-2026-06-25.json --repo-root .`
-mevcut durumda bilinçli olarak `blocked` döner; MinIO lifecycle tamamdır, fakat
-DB cleanup job'ları + VERBIS recorded/exempt-confirmed kanıtı olmadan #156
-go-live kabulü yapılamaz.
+mevcut durumda bilinçli olarak `blocked` döner; DB cleanup smoke test runtime'da
+metadata-only destruction audit ile kanıtlıdır, fakat MinIO lifecycle runtime
+export + VERBIS recorded/exempt-confirmed kanıtı olmadan #156 go-live kabulü
+yapılamaz.
 
 ## Paralel hukuk paketi (a yolu — async)
 `docs/legal/adr-0030-hukuk-review-paketi.md` — pilot launch'tan en geç 2 hafta

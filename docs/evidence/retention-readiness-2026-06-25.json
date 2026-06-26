@@ -1,13 +1,16 @@
 {
   "schema": "faz24.retention-readiness.v1",
   "evidence_id": "retention-readiness-2026-06-25-current",
-  "generated_at": "2026-06-25T00:00:00+03:00",
+  "generated_at": "2026-06-26T06:10:00+03:00",
   "source_refs": [
     "platform-ai#156",
     "platform-ai#158",
     "deploy/minio/setup-lifecycle.sh",
     "docs/adr/0030-kvkk-uyum-cercevesi.md",
-    "docs/adr/0032-tenant-isolation-transcript-db.md"
+    "docs/adr/0032-tenant-isolation-transcript-db.md",
+    "platform-backend#764",
+    "platform-k8s-gitops#2041",
+    "platform-k8s-gitops:docs/faz-24-evidence/2026-06-26-retention-runtime-smoke.md"
   ],
   "verbis": {
     "status": "pending",
@@ -16,45 +19,64 @@
   "layers": [
     {
       "id": "minio.meeting-audio",
-      "status": "active",
+      "status": "blocked",
       "mechanism": "s3-lifecycle",
       "retention_days": 7,
-      "evidence_ref": "platform-ai#156 owner comment plus deploy/minio/setup-lifecycle.sh"
+      "evidence_ref": "deploy/minio/setup-lifecycle.sh source rule exists; runtime mc ilm export evidence pending"
     },
     {
       "id": "minio.transcripts",
-      "status": "active",
+      "status": "blocked",
       "mechanism": "s3-lifecycle",
       "retention_days": 365,
-      "evidence_ref": "platform-ai#156 owner comment plus deploy/minio/setup-lifecycle.sh"
+      "evidence_ref": "deploy/minio/setup-lifecycle.sh source rule exists; runtime mc ilm export evidence pending"
     },
     {
       "id": "minio.audit-archive",
-      "status": "active",
+      "status": "blocked",
       "mechanism": "s3-lifecycle",
       "retention_days": 2557,
-      "evidence_ref": "platform-ai#156 owner comment plus deploy/minio/setup-lifecycle.sh"
+      "evidence_ref": "deploy/minio/setup-lifecycle.sh source rule exists; runtime mc ilm export evidence pending"
     },
     {
       "id": "db.transcript-records",
-      "status": "pending",
+      "status": "active",
       "mechanism": "db-cleanup-job",
       "retention_days": 365,
-      "evidence_ref": "blocked until transcript DB persistence exists"
+      "evidence_ref": "platform-k8s-gitops#2041 metadata-only test runtime smoke",
+      "persistence_ref": "platform-backend#764 transcript-service V1 transcript_segments plus V3 transcript_retention_destruction_audit",
+      "cleanup_job_ref": "platform-backend#764 TranscriptRetentionCleanupService / transcript-records-retention-cleanup",
+      "destruction_audit_ref": "platform-k8s-gitops:docs/faz-24-evidence/2026-06-26-retention-runtime-smoke.md",
+      "tenant_id_field": "tenant_id",
+      "retention_timestamp_field": "created_at",
+      "audit_payload": "metadata-only"
     },
     {
       "id": "db.meeting-intelligence",
-      "status": "pending",
+      "status": "active",
       "mechanism": "db-cleanup-job",
       "retention_days": 730,
-      "evidence_ref": "blocked until meeting-ai DB persistence exists"
+      "evidence_ref": "platform-k8s-gitops#2041 metadata-only test runtime smoke",
+      "persistence_ref": "platform-backend#764 meeting-service V1 meeting_actions/meeting_decisions plus V2 meeting_retention_destruction_audit",
+      "cleanup_job_ref": "platform-backend#764 MeetingRetentionCleanupService / meeting-intelligence-retention-cleanup",
+      "destruction_audit_ref": "platform-k8s-gitops:docs/faz-24-evidence/2026-06-26-retention-runtime-smoke.md",
+      "tenant_id_field": "tenant_id",
+      "retention_timestamp_field": "created_at",
+      "audit_payload": "metadata-only"
     },
     {
       "id": "db.kvkk-access-log",
-      "status": "pending",
+      "status": "active",
       "mechanism": "db-cleanup-job",
       "retention_days": 730,
-      "evidence_ref": "blocked until KVKK access-processing DB log persistence exists"
+      "evidence_ref": "platform-k8s-gitops#2041 metadata-only test runtime smoke",
+      "persistence_ref": "platform-backend#764 transcript-service V1 transcript_access_audit plus V3 transcript_retention_destruction_audit",
+      "cleanup_job_ref": "platform-backend#764 TranscriptRetentionCleanupService / kvkk-access-log-retention-cleanup",
+      "destruction_audit_ref": "platform-k8s-gitops:docs/faz-24-evidence/2026-06-26-retention-runtime-smoke.md",
+      "tenant_id_field": "tenant_id",
+      "retention_timestamp_field": "accessed_at",
+      "retention_timestamp_semantics": "access event timestamp; transcript_access_audit V1 has no created_at column",
+      "audit_payload": "metadata-only"
     }
   ]
 }

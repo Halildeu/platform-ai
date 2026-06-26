@@ -36,11 +36,11 @@ jobs:
             --repo-root .
           gate_status=$?
           if [ "$gate_status" -eq 0 ]; then
-            echo "Current #156 snapshot passed prematurely; DB retention + VERBIS evidence is still pending"
+            echo "Current #156 snapshot passed prematurely; MinIO runtime lifecycle export + VERBIS evidence is still pending"
             exit 1
           fi
           if [ "$gate_status" -ne 1 ]; then
-            echo "Current #156 snapshot must remain blocked until DB retention + VERBIS evidence exists"
+            echo "Current #156 snapshot must remain blocked until MinIO runtime lifecycle export + VERBIS evidence exists"
             exit 1
           fi
 
