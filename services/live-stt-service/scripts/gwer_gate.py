@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,26 @@ _TEXT_OR_AUDIO_KEYS = {
 }
 
 _FILE_MARKERS = (".wav", ".rttm", ".mp3", ".flac", ".opus", ".m4a", ".webm", ".ogg")
+_SHA256_RE = re.compile(r"^sha256:[a-f0-9]{64}$", re.IGNORECASE)
+
+_PILOT_REQUIRED_METADATA = {
+    "wer": (
+        "model",
+        "compute",
+        "n_samples",
+        "ref_words",
+        "evidence_hash",
+        "eval_set_hash",
+    ),
+    "der": (
+        "backend",
+        "model",
+        "collar",
+        "n_samples",
+        "evidence_hash",
+        "eval_set_hash",
+    ),
+}
 
 
 def _load_rows(path: Path) -> list[dict[str, Any]]:
@@ -74,7 +95,9 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _kind(row: dict[str, Any], *, metric: str) -> str:
-    explicit = row.get("dataset_kind") or row.get("fixture_kind") or row.get("benchmark_kind")
+    explicit = (
+        row.get("dataset_kind") or row.get("fixture_kind") or row.get("benchmark_kind")
+    )
     if explicit:
         return str(explicit)
     tag = str(row.get("tag", "")).lower()
@@ -93,6 +116,32 @@ def _metric_value(row: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     return None
 
 
+def _missing_pilot_metadata(row: dict[str, Any], *, metric: str) -> list[str]:
+    missing: list[str] = []
+    for key in _PILOT_REQUIRED_METADATA[metric]:
+        value = row.get(key)
+        if value is None or value == "":
+            missing.append(key)
+    if metric == "wer" and _metric_value(row, ("wer", "corpus_wer")) is None:
+        missing.append("wer or corpus_wer")
+    if metric == "der" and _metric_value(row, ("der_corpus", "der")) is None:
+        missing.append("der_corpus or der")
+    return missing
+
+
+def _pilot_integrity_findings(
+    row: dict[str, Any], *, metric: str, index: int
+) -> list[str]:
+    findings: list[str] = []
+    if _kind(row, metric=metric) not in PILOT_KINDS:
+        return findings
+    for key in ("evidence_hash", "eval_set_hash"):
+        value = str(row.get(key, ""))
+        if value and not _SHA256_RE.fullmatch(value):
+            findings.append(f"{metric} pilot row {index} {key} must be sha256:<64 hex>")
+    return findings
+
+
 def _privacy_value_findings(value: Any, *, location: str) -> list[str]:
     findings: list[str] = []
     if isinstance(value, dict):
@@ -103,8 +152,12 @@ def _privacy_value_findings(value: Any, *, location: str) -> list[str]:
             findings.extend(_privacy_value_findings(nested, location=nested_location))
     elif isinstance(value, list):
         for index, nested in enumerate(value):
-            findings.extend(_privacy_value_findings(nested, location=f"{location}[{index}]"))
-    elif isinstance(value, str) and any(marker in value.lower() for marker in _FILE_MARKERS):
+            findings.extend(
+                _privacy_value_findings(nested, location=f"{location}[{index}]")
+            )
+    elif isinstance(value, str) and any(
+        marker in value.lower() for marker in _FILE_MARKERS
+    ):
         findings.append(f"{location} contains file-path-like value")
     return findings
 
@@ -137,6 +190,31 @@ def _best_row(
     return best, best_value
 
 
+def _complete_pilot_rows(
+    rows: list[dict[str, Any]], *, metric: str, findings: list[str]
+) -> list[dict[str, Any]]:
+    complete: list[dict[str, Any]] = []
+    for index, row in enumerate(
+        [
+            candidate
+            for candidate in rows
+            if _kind(candidate, metric=metric) in PILOT_KINDS
+        ],
+        1,
+    ):
+        integrity = _pilot_integrity_findings(row, metric=metric, index=index)
+        findings.extend(integrity)
+        missing = _missing_pilot_metadata(row, metric=metric)
+        if missing:
+            findings.append(
+                f"{metric} pilot row {index} is missing required metadata: "
+                + ", ".join(missing)
+            )
+        if not integrity and not missing:
+            complete.append(row)
+    return complete
+
+
 def _summarize_row(
     row: dict[str, Any] | None,
     *,
@@ -153,6 +231,8 @@ def _summarize_row(
         "n_samples": row.get("n_samples"),
         "rtf": row.get("rtf"),
         "p50_ms": row.get("p50_ms"),
+        "evidence_hash": row.get("evidence_hash"),
+        "eval_set_hash": row.get("eval_set_hash"),
     }
     if metric == "wer":
         summary["model"] = row.get("model")
@@ -190,17 +270,40 @@ def evaluate_gate(
     if not der_rows:
         findings.append("no DER evidence rows supplied")
 
-    wer_pilot, wer_value = _best_row(wer_rows, metric="wer", value_keys=("wer", "corpus_wer"))
-    der_pilot, der_value = _best_row(der_rows, metric="der", value_keys=("der_corpus", "der"))
     wer_kinds = sorted({_kind(row, metric="wer") for row in wer_rows})
     der_kinds = sorted({_kind(row, metric="der") for row in der_rows})
+    wer_pilot_rows = [
+        row for row in wer_rows if _kind(row, metric="wer") in PILOT_KINDS
+    ]
+    der_pilot_rows = [
+        row for row in der_rows if _kind(row, metric="der") in PILOT_KINDS
+    ]
 
-    if wer_rows and wer_pilot is None:
+    if wer_rows and not wer_pilot_rows:
         findings.append(
             "no pilot-meeting WER row; Common Voice/synthetic evidence cannot satisfy G-WER"
         )
-    if der_rows and der_pilot is None:
-        findings.append("no pilot-meeting DER row; synthetic-smoke evidence cannot satisfy G-WER")
+    if der_rows and not der_pilot_rows:
+        findings.append(
+            "no pilot-meeting DER row; synthetic-smoke evidence cannot satisfy G-WER"
+        )
+
+    complete_wer_rows = _complete_pilot_rows(wer_rows, metric="wer", findings=findings)
+    complete_der_rows = _complete_pilot_rows(der_rows, metric="der", findings=findings)
+    if wer_pilot_rows and not complete_wer_rows:
+        findings.append(
+            "no complete pilot WER row with all required metadata and hashes"
+        )
+    if der_pilot_rows and not complete_der_rows:
+        findings.append(
+            "no complete pilot DER row with all required metadata and hashes"
+        )
+    wer_pilot, wer_value = _best_row(
+        complete_wer_rows, metric="wer", value_keys=("wer", "corpus_wer")
+    )
+    der_pilot, der_value = _best_row(
+        complete_der_rows, metric="der", value_keys=("der_corpus", "der")
+    )
 
     if findings:
         return {
