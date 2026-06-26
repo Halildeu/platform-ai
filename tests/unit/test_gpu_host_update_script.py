@@ -36,6 +36,19 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self._assert_ps51_safe_script(script)
         self.assertIn('$behindRange = "HEAD..{0}" -f $originRef', script)
 
+    def test_live_stt_start_sets_cold_load_timeout_before_local_overrides(self) -> None:
+        script = self._read_script("start-live-stt.ps1")
+
+        timeout_line = '$env:STT_REQUEST_TIMEOUT = "180"'
+        self.assertIn(timeout_line, script)
+        self.assertLess(script.index(timeout_line), script.index("$envLocal = Join-Path"))
+
+    def test_live_stt_update_warmup_budget_matches_gpu_cold_load_timeout(self) -> None:
+        script = self._read_script("update.ps1")
+
+        self.assertIn("--max-time 240", script)
+        self.assertNotIn("--max-time 120 -F", script)
+
 
 if __name__ == "__main__":
     unittest.main()
