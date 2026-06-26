@@ -5,10 +5,11 @@ Faz 24 Meeting Intelligence — meeting summary / decisions / action items (skel
 FastAPI service: **transcript → summary + decisions + action items**.
 
 > **KVKK boundary:** the transcript is **redacted before any analyzer/LLM call**
-> (`MAI_REDACT_PII=True` by default). Even a real LLM backend only ever receives
-> redacted text. Raw transcript is never logged. Redaction is **fail-closed**
-> (ADR-0043 D3): for a real LLM backend, if a broad residual detector still finds a
-> PII shape after redaction, the request is **blocked with 422** rather than sent.
+> (`MAI_REDACT_PII=True` by default). The post-meeting `/ask` path also redacts the
+> question before prompt construction. Even a real LLM backend only ever receives
+> redacted text. Raw transcript/question text is never logged. Redaction is
+> **fail-closed** (ADR-0043 D3): if a broad residual detector still finds a PII
+> shape after redaction, the request is **blocked with 422** rather than sent.
 
 ## Citation grounding & hallucination guard (ADR-0043 D4/D8.1)
 

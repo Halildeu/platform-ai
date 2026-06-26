@@ -5,8 +5,8 @@ ground the answer to a source sentence (citation) and flag it if unsupported
 (hallucination guard) — the same honesty contract as the analyze path.
 
 Backends mirror analyze.py: `mock` (deterministic, no LLM — picks the best
-sentence) and `ollama` (local LLM, Option B #54). KVKK: transcript is redacted
-before the LLM sees it; only redacted text is grounded.
+sentence) and `ollama` (local LLM, Option B #54). KVKK: transcript and question
+are redacted before a real LLM sees them; only redacted text is grounded.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import httpx
 from app.core.config import Settings
 from app.models.schemas import AskResponse, Citation
 from app.services.citation import ground_claim, split_sentences
-from app.services.redact import redact_pii
+from app.services.redact import assert_no_residual_pii, redact_pii
 
 _ASK_PROMPT = """\
 Sen bir toplantı asistanısın. SADECE aşağıdaki toplantı metnine dayanarak
@@ -65,13 +65,22 @@ def answer_question(transcript: str, question: str, settings: Settings) -> AskRe
     start = time.perf_counter()
     if settings.redact_pii:
         redacted, _ = redact_pii(transcript)
+        redacted_question, _ = redact_pii(question)
+        assert_no_residual_pii(redacted)
+        assert_no_residual_pii(redacted_question)
     else:
         redacted = transcript
+        redacted_question = question
 
     if settings.backend == "ollama":
-        answer = _ollama_answer(question, redacted, settings)
-    else:  # mock (and unwired anthropic/openai fall back to mock-safe behaviour)
-        answer = _mock_answer(question, redacted)
+        answer = _ollama_answer(redacted_question, redacted, settings)
+    elif settings.backend == "mock":
+        answer = _mock_answer(redacted_question, redacted)
+    else:
+        raise NotImplementedError(
+            f"backend '{settings.backend}' requires ADR-0030 legal approval (#52). "
+            "Use MAI_BACKEND=mock or MAI_BACKEND=ollama."
+        )
 
     # Ground the answer to a transcript sentence (skip the "no info" sentinel).
     sentences = split_sentences(redacted)
