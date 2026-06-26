@@ -28,6 +28,14 @@ jobs:
       - name: Diarization decision gate unit tests
         run: python3 -m unittest discover -s tests/unit -p "test_diar_decision_gate.py"
 
+      - name: GPU host update script unit tests
+        run: python3 -m unittest discover -s tests/unit -p "test_gpu_host_update_script.py"
+
+      - name: GPU host update script PowerShell parse
+        shell: pwsh
+        run: |
+          [scriptblock]::Create((Get-Content -Raw deploy/gpu-host/update.ps1)) | Out-Null
+
       - name: Current retention readiness snapshot
         run: |
           set +e
