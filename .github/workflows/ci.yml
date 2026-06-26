@@ -34,7 +34,9 @@ jobs:
       - name: GPU host update script PowerShell parse
         shell: pwsh
         run: |
-          [scriptblock]::Create((Get-Content -Raw deploy/gpu-host/update.ps1)) | Out-Null
+          foreach ($script in @("deploy/gpu-host/update.ps1", "deploy/gpu-host/drift-guard.ps1")) {
+            [scriptblock]::Create((Get-Content -Raw $script)) | Out-Null
+          }
 
       - name: Current retention readiness snapshot
         run: |
