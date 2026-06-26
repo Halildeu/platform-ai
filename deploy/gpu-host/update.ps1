@@ -45,6 +45,17 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
 function Fail($msg) { Write-Error $msg; exit 1 }
+function Invoke-GitStream {
+  param([Parameter(Mandatory = $true)][string[]]$GitArgs)
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & git @GitArgs | Out-Host
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
 
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
   $scriptDir = $PSScriptRoot
@@ -67,8 +78,9 @@ Set-Location $RepoRoot
 Write-Host "[update] repo=$RepoRoot branch=$Branch" -ForegroundColor Cyan
 
 # 1. Refresh remote refs (needed to compare against origin/$Branch). Fail-closed.
-git fetch --prune origin 2>&1 | Out-Host
-if ($LASTEXITCODE -ne 0) { Fail "git fetch failed (network / auth). Aborting - no mutation." }
+if ((Invoke-GitStream -GitArgs @("fetch", "--prune", "origin")) -ne 0) {
+  Fail "git fetch failed (network / auth). Aborting - no mutation."
+}
 
 # 2. FAIL-CLOSED guard. EVERY safety query must succeed; if we cannot positively
 #    verify the state we ABORT, rather than risk a reset --hard that loses work.
@@ -113,13 +125,14 @@ $before = (git rev-parse HEAD).Trim()
 # -Force genuinely discards confirmed-preserved local work (clobbers a dirty
 # tracked tree); the non-Force path stays safe and aborts on any obstruction.
 if ($Force) {
-  git checkout -f -B $Branch $originRef 2>&1 | Out-Host
+  $checkoutExit = Invoke-GitStream -GitArgs @("checkout", "-f", "-B", $Branch, $originRef)
 } else {
-  git checkout -B $Branch $originRef 2>&1 | Out-Host
+  $checkoutExit = Invoke-GitStream -GitArgs @("checkout", "-B", $Branch, $originRef)
 }
-if ($LASTEXITCODE -ne 0) { Fail "git checkout -B $Branch $originRef failed - deploy state unchanged." }
-git reset --hard $originRef 2>&1 | Out-Host
-if ($LASTEXITCODE -ne 0) { Fail "git reset --hard $originRef failed." }
+if ($checkoutExit -ne 0) { Fail "git checkout -B $Branch $originRef failed - deploy state unchanged." }
+if ((Invoke-GitStream -GitArgs @("reset", "--hard", $originRef)) -ne 0) {
+  Fail "git reset --hard $originRef failed."
+}
 $after = (git rev-parse HEAD).Trim()
 Write-Host "[update] $before -> $after (tracked tree pinned to $originRef)" -ForegroundColor Green
 
