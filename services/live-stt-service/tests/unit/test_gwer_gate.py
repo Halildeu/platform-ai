@@ -66,12 +66,31 @@ def _pilot_der(value: float = 0.22) -> dict[str, object]:
     }
 
 
+def _evaluate(
+    *,
+    wer_rows: list[dict[str, object]],
+    der_rows: list[dict[str, object]],
+    max_wer: float | None = 0.25,
+    max_der: float | None = 0.30,
+    min_wer_samples: int | None = 3,
+    min_der_samples: int | None = 3,
+    min_wer_ref_words: int | None = 1000,
+) -> dict[str, object]:
+    return gwer_gate.evaluate_gate(
+        wer_rows=wer_rows,
+        der_rows=der_rows,
+        max_wer=max_wer,
+        max_der=max_der,
+        min_wer_samples=min_wer_samples,
+        min_der_samples=min_der_samples,
+        min_wer_ref_words=min_wer_ref_words,
+    )
+
+
 def test_gate_passes_with_pilot_wer_and_der_under_threshold() -> None:
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[_pilot_wer(0.18)],
         der_rows=[_pilot_der(0.22)],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "pass"
@@ -97,7 +116,7 @@ def test_gate_passes_with_pilot_wer_and_der_under_threshold() -> None:
 
 
 def test_common_voice_and_synthetic_do_not_satisfy_pilot_gate() -> None:
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[
             {
                 "tag": "large-v3-turbo-fp16",
@@ -121,8 +140,6 @@ def test_common_voice_and_synthetic_do_not_satisfy_pilot_gate() -> None:
                 "n_samples": 6,
             }
         ],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "blocked"
@@ -134,11 +151,9 @@ def test_common_voice_and_synthetic_do_not_satisfy_pilot_gate() -> None:
 
 
 def test_gate_fails_when_pilot_metric_exceeds_threshold() -> None:
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[_pilot_wer(0.31)],
         der_rows=[_pilot_der(0.22)],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "fail"
@@ -146,16 +161,50 @@ def test_gate_fails_when_pilot_metric_exceeds_threshold() -> None:
     assert "exceeds threshold" in result["findings"][0]
 
 
+def test_gate_fails_when_pilot_denominators_are_below_thresholds() -> None:
+    wer = _pilot_wer(0.18)
+    der = _pilot_der(0.22)
+    wer["n_samples"] = 2
+    wer["sample_count_hash"] = _sample_count_hash(_sha("b"), 2)
+    der["n_samples"] = 2
+    der["sample_count_hash"] = _sample_count_hash(_sha("d"), 2)
+
+    result = _evaluate(
+        wer_rows=[wer],
+        der_rows=[der],
+        min_wer_samples=3,
+        min_der_samples=3,
+        min_wer_ref_words=1500,
+    )
+
+    assert result["status"] == "fail"
+    assert any(
+        "WER n_samples 2 is below minimum 3" in item for item in result["findings"]
+    )
+    assert any(
+        "DER n_samples 2 is below minimum 3" in item for item in result["findings"]
+    )
+    assert any(
+        "WER ref_words 1200 is below minimum 1500" in item
+        for item in result["findings"]
+    )
+
+
 def test_thresholds_are_required() -> None:
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[_pilot_wer(0.18)],
         der_rows=[_pilot_der(0.22)],
         max_wer=None,
-        max_der=0.30,
+        min_wer_ref_words=None,
     )
 
     assert result["status"] == "blocked"
-    assert "explicit max_wer and max_der thresholds are required" in result["findings"]
+    assert any(
+        "explicit G-WER/DER thresholds are required" in finding
+        for finding in result["findings"]
+    )
+    assert any("maxWer" in finding for finding in result["findings"])
+    assert any("minWerRefWords" in finding for finding in result["findings"])
 
 
 def test_pilot_label_alone_does_not_satisfy_wer_or_der_gate() -> None:
@@ -177,11 +226,9 @@ def test_pilot_label_alone_does_not_satisfy_wer_or_der_gate() -> None:
     ):
         del der[key]
 
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[wer],
         der_rows=[der],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "blocked"
@@ -205,11 +252,9 @@ def test_pilot_hashes_must_be_full_sha256_values() -> None:
     der["eval_set_hash"] = "abc123"
     der["sample_count_hash"] = "abc123"
 
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[wer],
         der_rows=[der],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "blocked"
@@ -238,11 +283,9 @@ def test_pilot_count_hashes_must_match_eval_set_denominators() -> None:
     wer["ref_word_count_hash"] = _sha("8")
     der["sample_count_hash"] = _sha("7")
 
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[wer],
         der_rows=[der],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "blocked"
@@ -270,11 +313,9 @@ def test_pilot_denominators_must_be_positive_integers() -> None:
     wer["ref_words"] = 0
     der["n_samples"] = False
 
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[wer],
         der_rows=[der],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "blocked"
@@ -302,11 +343,9 @@ def test_gate_rejects_raw_audio_or_text_fields(unsafe_key: str) -> None:
         "customer-meeting.wav" if unsafe_key in {"audio_path", "wav"} else "raw text"
     )
 
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[row],
         der_rows=[_pilot_der(0.22)],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "fail"
@@ -319,11 +358,9 @@ def test_gate_rejects_nested_audio_or_text_fields() -> None:
         "segments": [{"speaker": "SPEAKER_00", "audio_url": "sample.flac"}],
     }
 
-    result = gwer_gate.evaluate_gate(
+    result = _evaluate(
         wer_rows=[_pilot_wer(0.18)],
         der_rows=[row],
-        max_wer=0.25,
-        max_der=0.30,
     )
 
     assert result["status"] == "fail"

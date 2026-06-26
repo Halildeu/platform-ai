@@ -166,7 +166,10 @@ python scripts/gwer_gate.py \
   --wer-evidence ../../docs/evidence/wer-results-2026-06-10.jsonl \
   --der-evidence ../../docs/evidence/diar-results-2026-06-17.jsonl \
   --max-wer 0.25 \
-  --max-der 0.30
+  --max-der 0.30 \
+  --min-wer-samples 3 \
+  --min-der-samples 3 \
+  --min-wer-ref-words 1000
 ```
 
 Current repository evidence is expected to return `blocked` because it contains
@@ -181,7 +184,9 @@ must also carry `ref_word_count_hash`. `sample_count_hash` binds the declared
 `n_samples` denominator to the eval-set hash, and `ref_word_count_hash` binds
 the WER `ref_words` denominator without emitting transcript or reference text.
 Changing only `dataset_kind`, `n_samples`, or `ref_words` is not enough to pass
-the gate.
+the gate. Passing evidence must also clear explicit minimum denominator
+thresholds (`minWerSamples`, `minDerSamples`, and `minWerRefWords`) so a tiny
+pilot cannot satisfy G-WER with a lucky WER/DER value.
 
 ## Faz 24 G-LAT/COST quality gate
 

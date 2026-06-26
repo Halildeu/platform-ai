@@ -35,7 +35,13 @@ def _gwer_envelope(*, dataset_kind: str = "pilot-meeting") -> dict[str, object]:
     return {
         "schema": "faz24.ai-gate-ingest.v1",
         "gate": "gwer",
-        "thresholds": {"maxWer": 0.25, "maxDer": 0.30},
+        "thresholds": {
+            "maxWer": 0.25,
+            "maxDer": 0.30,
+            "minWerSamples": 3,
+            "minDerSamples": 3,
+            "minWerRefWords": 1000,
+        },
         "evidence": {
             "werRows": [
                 {
