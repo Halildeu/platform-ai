@@ -11,6 +11,7 @@ from __future__ import annotations
 from app.services.citation import (
     CitationStatus,
     ground_claim,
+    owner_supported_by_source,
     split_sentences,
 )
 
@@ -130,3 +131,70 @@ def test_d8_1_ungrounded_decision_is_withheld() -> None:
     assert any(rc.claim == "Şirket yeni fabrika açtı" for rc in r.rejected_claims)
     # every shipped decision has a PASSED citation
     assert all(c.status == "PASSED" for c in r.citations)
+
+
+def test_action_owner_must_be_in_same_source_sentence() -> None:
+    assert owner_supported_by_source("Ali", "Ali raporu cuma gününe kadar hazırlayacak.")
+    assert owner_supported_by_source(
+        "Kalite Ekibi", "Kalite Ekibi raporu cuma gününe kadar hazırlayacak."
+    )
+    assert not owner_supported_by_source("Ali", "Rapor cuma gününe kadar hazırlanacak.")
+
+
+def test_action_owner_absent_from_grounded_source_is_withheld() -> None:
+    """A grounded action can ship, but an unsupported assignee cannot."""
+    from app.core.config import Settings
+    from app.models.schemas import ActionItem
+    from app.services.analyze import AnalysisDraft, MeetingAnalysisService
+
+    class _StubAnalyzer:
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            return AnalysisDraft(
+                summary="özet",
+                decisions=[],
+                action_items=[ActionItem(text="Rapor cuma gününe kadar hazırlanacak", owner="Ali")],
+            )
+
+        @property
+        def model_loaded(self) -> bool:
+            return True
+
+    svc = MeetingAnalysisService(
+        Settings(backend="mock", redact_pii=False), analyzer=_StubAnalyzer()
+    )
+    result = svc.analyze("Rapor cuma gününe kadar hazırlanacak. Ali toplantıya katılmadı.")
+
+    assert len(result.action_items) == 1
+    assert result.action_items[0].text == "Rapor cuma gününe kadar hazırlanacak"
+    assert result.action_items[0].owner is None
+    assert result.ungrounded_count == 1
+    assert result.rejected_claims[0].kind == "action_owner"
+    assert "owner" in result.rejected_claims[0].reason
+
+
+def test_action_owner_in_grounded_source_is_kept() -> None:
+    from app.core.config import Settings
+    from app.models.schemas import ActionItem
+    from app.services.analyze import AnalysisDraft, MeetingAnalysisService
+
+    class _StubAnalyzer:
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            return AnalysisDraft(
+                summary="özet",
+                decisions=[],
+                action_items=[
+                    ActionItem(text="Ali raporu cuma gününe kadar hazırlayacak", owner="Ali")
+                ],
+            )
+
+        @property
+        def model_loaded(self) -> bool:
+            return True
+
+    svc = MeetingAnalysisService(
+        Settings(backend="mock", redact_pii=False), analyzer=_StubAnalyzer()
+    )
+    result = svc.analyze("Ali raporu cuma gününe kadar hazırlayacak.")
+
+    assert result.action_items[0].owner == "Ali"
+    assert result.ungrounded_count == 0
