@@ -32,7 +32,8 @@ against the transcript with **deterministic contradiction gates**, not merely ov
 > `verified`, `partial_verified`, `withheld`, or `empty`. When fully withheld,
 > `summary` is an empty string; clients should render any fallback copy from the
 > status field rather than treating a static API string as meeting data.
-> Entity-NER + embedding-backed semantic summary grounding are roadmap.
+> Relative-date normalization, Entity-NER + embedding-backed semantic summary
+> grounding are roadmap.
 
 A claim is `PASSED` (shipped) only if its best-matching sentence survives a layered,
 CPU-only, zero-model verifier (`app/services/citation.py`):
@@ -45,6 +46,10 @@ CPU-only, zero-model verifier (`app/services/citation.py`):
 5. **owner attribution** — an action assignee is shown only when that owner appears in
    the same cited sentence; otherwise the action is kept with `owner=null` and the
    unsupported assignment is recorded as `rejected_claims[].kind=action_owner`.
+6. **due-date attribution** — an action `due_date` is shown only when the same cited
+   sentence contains the copied relative phrase (`cuma`, `yarın`, etc.) or copied
+   numeric date/time text. Unsupported, reformatted, or normalized dates are nulled
+   and recorded as `rejected_claims[].kind=action_due_date`.
 
 Verdicts are 3-way (`PASSED` / `FAILED` / `LOW_CONFIDENCE`); only `PASSED` reaches the
 user-visible `summary`, `decisions`, or `action_items`. **Ungrounded/contradicted

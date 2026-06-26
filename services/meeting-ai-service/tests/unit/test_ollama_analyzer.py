@@ -34,13 +34,14 @@ def test_ollama_parses_valid_json(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {
         "summary": "Bütçe görüşüldü.",
         "decisions": ["Bütçe artışı onaylandı."],
-        "action_items": [{"text": "Rapor hazırlanacak", "owner": "Ali"}],
+        "action_items": [{"text": "Rapor hazırlanacak", "owner": "Ali", "due_date": "cuma"}],
     }
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
     draft = OllamaAnalyzer(_settings()).analyze("redacted transcript")
     assert draft.summary == "Bütçe görüşüldü."
     assert draft.decisions == ["Bütçe artışı onaylandı."]
     assert draft.action_items[0].owner == "Ali"
+    assert draft.action_items[0].due_date == "cuma"
 
 
 def test_ollama_strips_markdown_fences(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,6 +156,19 @@ def test_ollama_action_text_nonstr_is_schema_invalid(monkeypatch: pytest.MonkeyP
 
 def test_ollama_action_owner_nonstr_is_schema_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"summary": "x", "decisions": [], "action_items": [{"text": "a", "owner": 42}]}
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
+    with pytest.raises(OllamaSchemaInvalidError):
+        OllamaAnalyzer(_settings()).analyze("redacted transcript")
+
+
+def test_ollama_action_due_date_nonstr_is_schema_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "summary": "x",
+        "decisions": [],
+        "action_items": [{"text": "a", "owner": None, "due_date": 42}],
+    }
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
     with pytest.raises(OllamaSchemaInvalidError):
         OllamaAnalyzer(_settings()).analyze("redacted transcript")

@@ -18,6 +18,10 @@ can pin it to the exact transcript span (tamper/version guard).
 
 Action owners are guarded separately: an assignee extracted for an action item is
 only shippable when it appears in the same source sentence as the grounded action.
+Action due dates/times are guarded the same way: the extracted due-date phrase is
+only shippable when its copied text appears in the same source sentence. Numeric
+date/time reformatting and relative-date normalization ("Friday" → calendar date)
+are intentionally not inferred without meeting-date context.
 
 Pure-Python, deterministic, CPU-unit-testable (no LLM/embeddings). A heavy NLI model
 (SummaC/AlignScore-class) is a future upgrade behind the same interface; the polarity
@@ -242,6 +246,33 @@ def owner_supported_by_source(owner: str | None, source_text: str) -> bool:
     if not owner_tokens:
         return False
     return owner_tokens.issubset(_tokens(source_text))
+
+
+def due_date_supported_by_source(due_date: str | None, source_text: str) -> bool:
+    """Return whether an extracted due date/time is grounded in the cited sentence.
+
+    Due-date attribution is a separate claim from the action text. We deliberately
+    avoid converting relative phrases to absolute dates because the analyzer does
+    not receive an authoritative meeting date here. `2026-06-26` cited only to
+    "cuma" is therefore rejected; `2026-06-26` cited to `26.06.2026` is also
+    rejected because reformatting a date is a separate unverified inference. Copied
+    numeric dates/times or copied relative phrases such as "cuma" are accepted when
+    present in the same source sentence.
+    """
+    if due_date is None or not due_date.strip():
+        return True
+    folded_due_date = unicodedata.normalize("NFKC", due_date).casefold().strip()
+    folded_source = unicodedata.normalize("NFKC", source_text).casefold()
+    if folded_due_date in folded_source:
+        return True
+
+    if _numbers(due_date):
+        return False
+
+    due_date_tokens = _tokens(due_date)
+    if not due_date_tokens:
+        return False
+    return due_date_tokens.issubset(_tokens(source_text))
 
 
 def _similarity(claim_tokens: set[str], sent_tokens: set[str]) -> float:

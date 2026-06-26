@@ -23,7 +23,12 @@ from app.core.config import Settings
 from app.models.schemas import ActionItem, AnalyzeResponse, Citation, RejectedClaim
 from app.services.citation import Citation as GroundedCitation
 from app.services.citation import Sentence as GroundedSentence
-from app.services.citation import ground_claim, owner_supported_by_source, split_sentences
+from app.services.citation import (
+    due_date_supported_by_source,
+    ground_claim,
+    owner_supported_by_source,
+    split_sentences,
+)
 from app.services.redact import assert_no_residual_pii, redact_pii
 
 
@@ -97,11 +102,11 @@ def _require_ollama_schema(data: object) -> dict[str, Any]:
 
     A schema break (missing key, wrong type — ``decisions`` as a string that would
     become a per-character list, a decision that is an object, an action ``text``
-    that is a list, an ``owner`` that is an int) MUST be distinguishable from a
-    legitimate "no decisions": otherwise a model that breaks the contract is
-    mis-scored as merely low-recall. We fail closed with ``OllamaSchemaInvalidError``
-    and the eval counts these as ``schema_invalid`` (a model-quality signal),
-    separate from infra/backend failures.
+    that is a list, an ``owner`` or ``due_date`` that is an int) MUST be
+    distinguishable from a legitimate "no decisions": otherwise a model that breaks
+    the contract is mis-scored as merely low-recall. We fail closed with
+    ``OllamaSchemaInvalidError`` and the eval counts these as ``schema_invalid`` (a
+    model-quality signal), separate from infra/backend failures.
     """
     if not isinstance(data, dict):
         raise OllamaSchemaInvalidError("Ollama JSON is not an object")
@@ -122,6 +127,9 @@ def _require_ollama_schema(data: object) -> dict[str, Any]:
         owner = item.get("owner")
         if owner is not None and not isinstance(owner, str):
             raise OllamaSchemaInvalidError("action_items[].owner must be a string or null")
+        due_date = item.get("due_date")
+        if due_date is not None and not isinstance(due_date, str):
+            raise OllamaSchemaInvalidError("action_items[].due_date must be a string or null")
     return data
 
 
@@ -166,6 +174,10 @@ aynen koru.
 ekleme, uydurma.
 - Metinde karar yoksa "decisions" boş liste; aksiyon yoksa "action_items" boş \
 liste döndür.
+- Aksiyon sorumlusu veya termin/tarih/saat metinde açıkça yoksa ilgili alanı null \
+döndür.
+- "due_date" alanını normalize etme; metinde nasıl geçiyorsa öyle yaz. Örneğin \
+metinde sadece "cuma" varsa "cuma" yaz, takvim tarihi uydurma.
 
 Metin:
 {transcript}
@@ -175,7 +187,11 @@ Lütfen sadece geçerli JSON döndür, başka bir şey ekleme:
   "summary": "<maksimum 3 cümle toplantı özeti>",
   "decisions": ["<karar 1>", "<karar 2>"],
   "action_items": [
-    {{"text": "<aksiyon açıklaması>", "owner": "<sorumlu kişi veya null>"}}
+    {{
+      "text": "<aksiyon açıklaması>",
+      "owner": "<sorumlu kişi veya null>",
+      "due_date": "<termin/tarih/saat ifadesi veya null>"
+    }}
   ]
 }}
 """
@@ -216,7 +232,9 @@ class OllamaAnalyzer:
                 summary=str(data["summary"]),
                 decisions=[str(d) for d in data["decisions"]],
                 action_items=[
-                    ActionItem(text=str(a["text"]), owner=a.get("owner"))
+                    ActionItem(
+                        text=str(a["text"]), owner=a.get("owner"), due_date=a.get("due_date")
+                    )
                     for a in data["action_items"]
                 ],
             )
@@ -295,31 +313,46 @@ def _to_rejected(claim: str, kind: str, c: GroundedCitation) -> RejectedClaim:
     )
 
 
-def _with_grounded_owner(
+def _with_grounded_action_metadata(
     action: ActionItem, citation: GroundedCitation
-) -> tuple[ActionItem, RejectedClaim | None]:
-    """Keep a grounded action, but drop unsupported owner attribution.
+) -> tuple[ActionItem, list[RejectedClaim]]:
+    """Keep a grounded action, but drop unsupported metadata attribution.
 
-    The action text and the assignee are distinct claims. If the text is grounded
-    but the owner does not appear in the same cited sentence, shipping the owner
-    would turn a correct action into a false assignment. Preserve the action with
-    `owner=None` and record an auditable rejection for the attribution only.
+    The action text, assignee, and due date are distinct claims. If the text is
+    grounded but a metadata field does not appear in the same cited sentence,
+    shipping that field would turn a correct action into a false assignment/date.
+    Preserve the action with unsupported metadata set to `None` and record
+    auditable rejections for the attribution only.
     """
     owner = action.owner.strip() if action.owner else None
-    if not owner:
-        return ActionItem(text=action.text, owner=None), None
-    if owner_supported_by_source(owner, citation.source_text):
-        return ActionItem(text=action.text, owner=owner), None
-    return (
-        ActionItem(text=action.text, owner=None),
-        RejectedClaim(
-            claim=action.text,
-            kind="action_owner",
-            status="FAILED",
-            reason="owner not found in grounded source sentence",
-            similarity=citation.similarity,
-        ),
-    )
+    due_date = action.due_date.strip() if action.due_date else None
+    rejections: list[RejectedClaim] = []
+
+    if owner and not owner_supported_by_source(owner, citation.source_text):
+        owner = None
+        rejections.append(
+            RejectedClaim(
+                claim=action.text,
+                kind="action_owner",
+                status="FAILED",
+                reason="owner not found in grounded source sentence",
+                similarity=citation.similarity,
+            )
+        )
+
+    if due_date and not due_date_supported_by_source(due_date, citation.source_text):
+        due_date = None
+        rejections.append(
+            RejectedClaim(
+                claim=action.text,
+                kind="action_due_date",
+                status="FAILED",
+                reason="due date not found in grounded source sentence",
+                similarity=citation.similarity,
+            )
+        )
+
+    return ActionItem(text=action.text, owner=owner, due_date=due_date), rejections
 
 
 def _ground_summary(
@@ -415,11 +448,12 @@ class MeetingAnalysisService:
                 continue
             verdict = ground_claim(action.text, sentences)
             if verdict.grounded:
-                grounded_action, owner_rejection = _with_grounded_owner(action, verdict)
+                grounded_action, metadata_rejections = _with_grounded_action_metadata(
+                    action, verdict
+                )
                 kept_actions.append(grounded_action)
                 citations.append(_to_schema_citation(verdict))
-                if owner_rejection is not None:
-                    rejected.append(owner_rejection)
+                rejected.extend(metadata_rejections)
             else:
                 rejected.append(_to_rejected(action.text, "action", verdict))
 

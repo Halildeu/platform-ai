@@ -30,6 +30,10 @@ class ActionItem(BaseModel):
 
     text: str = Field(description="Action description")
     owner: str | None = Field(default=None, description="Owner if detected")
+    due_date: str | None = Field(
+        default=None,
+        description="Due date/time phrase if explicitly detected in the grounded source",
+    )
 
 
 class Citation(BaseModel):
@@ -59,7 +63,7 @@ class RejectedClaim(BaseModel):
     """
 
     claim: str = Field(description="The rejected claim text")
-    kind: str = Field(description="summary / decision / action / action_owner")
+    kind: str = Field(description="summary / decision / action / action_owner / action_due_date")
     status: str = Field(description="FAILED / LOW_CONFIDENCE")
     reason: str = Field(description="Why rejected (e.g. ungrounded / polarity contradiction)")
     similarity: float = Field(description="Best content-word coverage found", ge=0.0, le=1.0)
@@ -68,15 +72,17 @@ class RejectedClaim(BaseModel):
 class AnalyzeResponse(BaseModel):
     """Summary + **grounded-only** decisions/action items + #162 citations (ADR-0043 D8.1).
 
-    Contract v3 (Codex 019ee9a6 + #162 summary exposure guard):
+    Contract v4 (Codex 019ee9a6 + #162 summary/date exposure guard):
     `grounding_policy=verified_only` means user-visible summary/decisions/action_items
     are filtered to PASSED-citation claims. Empty strings/lists mean "none survived
-    the guard", NOT "none produced" (see `rejected_claims`). `ungrounded_count`
-    preserves the v2 decision/action rejection count; summary rejections are exposed
-    through `summary_grounding_status` and `rejected_claims[].kind=summary`.
+    the guard", NOT "none produced" (see `rejected_claims`). Action metadata such
+    as `owner` and `due_date` is independently same-sentence guarded; unsupported
+    metadata is nulled and recorded in `rejected_claims`. `ungrounded_count`
+    preserves the v2 decision/action/metadata rejection count; summary rejections
+    are exposed through `summary_grounding_status` and `rejected_claims[].kind=summary`.
     """
 
-    schema_version: str = Field(default="3-adr0043", description="Response contract version")
+    schema_version: str = Field(default="4-adr0043", description="Response contract version")
     grounding_policy: str = Field(
         default="verified_only", description="verified_only = decisions/actions are PASSED-only"
     )
