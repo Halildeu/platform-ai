@@ -47,6 +47,13 @@ def test_endpoint_returns_answer() -> None:
     assert body["grounded"] is True
 
 
+def test_mock_unrelated_question_returns_no_info_without_source_sentence() -> None:
+    result = answer_question(TRANSCRIPT, "Yeni ofis nerede açıldı?", _settings())
+    assert result.answer == "Metinde bu bilgi yok."
+    assert result.grounded is False
+    assert result.citation.source_index == -1
+
+
 def test_endpoint_ollama_down_502(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(*a: object, **k: object) -> httpx.Response:
         raise httpx.ConnectError("refused")
@@ -115,7 +122,7 @@ def test_ask_ollama_sends_decoding_options(monkeypatch: pytest.MonkeyPatch) -> N
     # ollama backend requires redaction on (KVKK boundary validator); the request
     # options are what we assert, so redaction of the transcript is fine here.
     settings = Settings(backend="ollama", ollama_num_ctx=16384, ollama_temperature=0.0)
-    answer_question(TRANSCRIPT, "Toplantı ne zaman?", settings)
+    result = answer_question(TRANSCRIPT, "Toplantı ne zaman?", settings)
 
     assert "format" not in captured  # ask returns prose, not a JSON object
     assert captured["keep_alive"] == settings.ollama_keep_alive
@@ -123,6 +130,8 @@ def test_ask_ollama_sends_decoding_options(monkeypatch: pytest.MonkeyPatch) -> N
     assert isinstance(opts, dict)
     assert opts["num_ctx"] == 16384
     assert opts["temperature"] == 0.0
+    assert result.answer == "Toplantı pazartesi yapılacak."
+    assert result.grounded is True
 
 
 def test_ask_ollama_redacts_question_before_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,3 +153,40 @@ def test_ask_ollama_redacts_question_before_prompt(monkeypatch: pytest.MonkeyPat
     assert isinstance(prompt, str)
     assert "ali@example.com" not in prompt
     assert "***REDACTED_EMAIL***" in prompt
+
+
+def test_ask_ollama_ungrounded_answer_is_withheld(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _hallucinate(*a: object, **k: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"response": "Şirket yeni fabrika açtı."},
+            request=httpx.Request("POST", "http://localhost:11434/api/generate"),
+        )
+
+    monkeypatch.setattr(httpx, "post", _hallucinate)
+    settings = Settings(backend="ollama")
+    result = answer_question(TRANSCRIPT, "Şirket ne açtı?", settings)
+
+    assert result.answer == "Metinde bu bilgi yok."
+    assert result.grounded is False
+    assert result.citation.source_index == -1
+    assert result.citation.claim == ""
+    assert "fabrika" not in result.answer.lower()
+
+
+def test_ask_ollama_no_info_sentinel_keeps_fixed_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_info(*a: object, **k: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"response": "Metinde bu bilgi yok."},
+            request=httpx.Request("POST", "http://localhost:11434/api/generate"),
+        )
+
+    monkeypatch.setattr(httpx, "post", _no_info)
+    result = answer_question(TRANSCRIPT, "Şirket ne açtı?", Settings(backend="ollama"))
+
+    assert result.answer == "Metinde bu bilgi yok."
+    assert result.grounded is False
+    assert result.citation.reason == "answer does not claim transcript support"
