@@ -255,6 +255,21 @@ def _tokens(text: str) -> set[str]:
     return {t for t in _WORD.findall(folded) if t not in _STOP and len(t) > 1}
 
 
+def _phrase_present(phrase: str, source_text: str) -> bool:
+    """Return whether `phrase` appears as a whole copied phrase in source text.
+
+    Raw substring matching is too permissive for attribution metadata: a short
+    owner such as "Can" must not be grounded by "canlı", and "IT" must not be
+    grounded by "kritik". Word-boundary lookarounds keep copied phrases precise
+    while still allowing punctuation-bearing entities such as "A.S.".
+    """
+    folded_phrase = unicodedata.normalize("NFKC", phrase).casefold().strip()
+    if not folded_phrase:
+        return False
+    folded_source = unicodedata.normalize("NFKC", source_text).casefold()
+    return re.search(rf"(?<!\w){re.escape(folded_phrase)}(?!\w)", folded_source) is not None
+
+
 def owner_supported_by_source(owner: str | None, source_text: str) -> bool:
     """Return whether an extracted action owner is grounded in the cited sentence.
 
@@ -266,9 +281,7 @@ def owner_supported_by_source(owner: str | None, source_text: str) -> bool:
     """
     if owner is None or not owner.strip():
         return True
-    folded_owner = unicodedata.normalize("NFKC", owner).casefold().strip()
-    folded_source = unicodedata.normalize("NFKC", source_text).casefold()
-    if folded_owner in folded_source:
+    if _phrase_present(owner, source_text):
         return True
 
     owner_tokens = _tokens(owner)
@@ -290,9 +303,7 @@ def due_date_supported_by_source(due_date: str | None, source_text: str) -> bool
     """
     if due_date is None or not due_date.strip():
         return True
-    folded_due_date = unicodedata.normalize("NFKC", due_date).casefold().strip()
-    folded_source = unicodedata.normalize("NFKC", source_text).casefold()
-    if folded_due_date in folded_source:
+    if _phrase_present(due_date, source_text):
         return True
 
     if _numbers(due_date):
