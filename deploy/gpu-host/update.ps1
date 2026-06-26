@@ -36,7 +36,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+  [string]$RepoRoot = "",
   [string]$Branch   = "main",
   [switch]$NoRestart,
   [switch]$Force
@@ -45,6 +45,20 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
 function Fail($msg) { Write-Error $msg; exit 1 }
+
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+  $scriptDir = $PSScriptRoot
+  if ([string]::IsNullOrWhiteSpace($scriptDir) -and $PSCommandPath) {
+    $scriptDir = Split-Path -Parent $PSCommandPath
+  }
+  if ([string]::IsNullOrWhiteSpace($scriptDir) -and $MyInvocation.MyCommand.Path) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+  }
+  if ([string]::IsNullOrWhiteSpace($scriptDir)) {
+    Fail "Could not resolve script directory. Pass -RepoRoot explicitly."
+  }
+  $RepoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+}
 
 if (-not (Test-Path (Join-Path $RepoRoot ".git"))) {
   Fail "RepoRoot '$RepoRoot' is not a git clone. Pass -RepoRoot explicitly."
