@@ -33,6 +33,9 @@ CPU-only, zero-model verifier (`app/services/citation.py`):
    opposite meaning → rejected (the failure mode lexical/embedding scores miss);
 3. **number/quantity gate** — "%20" cited to "%12" → rejected;
 4. **span-informativeness** — a generic filler span ("Tamam.") can't ground a decision.
+5. **owner attribution** — an action assignee is shown only when that owner appears in
+   the same cited sentence; otherwise the action is kept with `owner=null` and the
+   unsupported assignment is recorded as `rejected_claims[].kind=action_owner`.
 
 Verdicts are 3-way (`PASSED` / `FAILED` / `LOW_CONFIDENCE`); only `PASSED` reaches the
 user-visible `decisions`/`action_items`. **Ungrounded/contradicted claims are withheld**

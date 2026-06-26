@@ -22,7 +22,7 @@ import httpx
 from app.core.config import Settings
 from app.models.schemas import ActionItem, AnalyzeResponse, Citation, RejectedClaim
 from app.services.citation import Citation as GroundedCitation
-from app.services.citation import ground_claim, split_sentences
+from app.services.citation import ground_claim, owner_supported_by_source, split_sentences
 from app.services.redact import assert_no_residual_pii, redact_pii
 
 
@@ -293,6 +293,33 @@ def _to_rejected(claim: str, kind: str, c: GroundedCitation) -> RejectedClaim:
     )
 
 
+def _with_grounded_owner(
+    action: ActionItem, citation: GroundedCitation
+) -> tuple[ActionItem, RejectedClaim | None]:
+    """Keep a grounded action, but drop unsupported owner attribution.
+
+    The action text and the assignee are distinct claims. If the text is grounded
+    but the owner does not appear in the same cited sentence, shipping the owner
+    would turn a correct action into a false assignment. Preserve the action with
+    `owner=None` and record an auditable rejection for the attribution only.
+    """
+    owner = action.owner.strip() if action.owner else None
+    if not owner:
+        return ActionItem(text=action.text, owner=None), None
+    if owner_supported_by_source(owner, citation.source_text):
+        return ActionItem(text=action.text, owner=owner), None
+    return (
+        ActionItem(text=action.text, owner=None),
+        RejectedClaim(
+            claim=action.text,
+            kind="action_owner",
+            status="FAILED",
+            reason="owner not found in grounded source sentence",
+            similarity=citation.similarity,
+        ),
+    )
+
+
 class MeetingAnalysisService:
     """Redact-then-analyze meeting AI service."""
 
@@ -345,8 +372,11 @@ class MeetingAnalysisService:
                 continue
             verdict = ground_claim(action.text, sentences)
             if verdict.grounded:
-                kept_actions.append(action)
+                grounded_action, owner_rejection = _with_grounded_owner(action, verdict)
+                kept_actions.append(grounded_action)
                 citations.append(_to_schema_citation(verdict))
+                if owner_rejection is not None:
+                    rejected.append(owner_rejection)
             else:
                 rejected.append(_to_rejected(action.text, "action", verdict))
 

@@ -4,7 +4,7 @@ The product wedge for regulated use: every decision/action must be traceable to
 a transcript sentence — "şu cümleden çıkarıldı", not "AI dedi", AND the claim must
 be **entailed** by that sentence, not merely lexically overlapping.
 
-Verification ladder (ADR-0043 D4, Codex 019ee7c9 — substring/overlap ≠ entailment):
+Verification ladder (ADR-0043 D4, Codex 019ee7c9 — substring/overlap != entailment):
 1. **Content-word coverage** (necessary): how much of the claim's meaning is in the
    sentence (overlap coefficient). Below `threshold` → FAILED (ungrounded).
 2. **Polarity/negation consistency** (the key entailment fix): a claim and its
@@ -15,6 +15,9 @@ Verification ladder (ADR-0043 D4, Codex 019ee7c9 — substring/overlap ≠ entai
 Only `PASSED` is `grounded=True` (shippable; ADR-0043 D8.1). Each citation carries a
 hash/offset key (`source_char_start/end`, `source_hash`, `quote_hash`) so a verifier
 can pin it to the exact transcript span (tamper/version guard).
+
+Action owners are guarded separately: an assignee extracted for an action item is
+only shippable when it appears in the same source sentence as the grounded action.
 
 Pure-Python, deterministic, CPU-unit-testable (no LLM/embeddings). A heavy NLI model
 (SummaC/AlignScore-class) is a future upgrade behind the same interface; the polarity
@@ -217,6 +220,28 @@ def _tokens(text: str) -> set[str]:
     """Normalized Turkish content tokens (casefold, NFKC, drop stops + 1-char)."""
     folded = unicodedata.normalize("NFKC", text).casefold()
     return {t for t in _WORD.findall(folded) if t not in _STOP and len(t) > 1}
+
+
+def owner_supported_by_source(owner: str | None, source_text: str) -> bool:
+    """Return whether an extracted action owner is grounded in the cited sentence.
+
+    Owner attribution is a separate high-risk claim: an LLM can correctly extract
+    the action text while assigning it to the wrong person/team. We require the
+    assignee string or all of its content tokens to be present in the SAME source
+    sentence that grounded the action. Empty owners are safe because no assignee
+    will be shown.
+    """
+    if owner is None or not owner.strip():
+        return True
+    folded_owner = unicodedata.normalize("NFKC", owner).casefold().strip()
+    folded_source = unicodedata.normalize("NFKC", source_text).casefold()
+    if folded_owner in folded_source:
+        return True
+
+    owner_tokens = _tokens(owner)
+    if not owner_tokens:
+        return False
+    return owner_tokens.issubset(_tokens(source_text))
 
 
 def _similarity(claim_tokens: set[str], sent_tokens: set[str]) -> float:
