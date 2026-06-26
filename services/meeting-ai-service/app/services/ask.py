@@ -20,6 +20,8 @@ from app.models.schemas import AskResponse, Citation
 from app.services.citation import ground_claim, split_sentences
 from app.services.redact import assert_no_residual_pii, redact_pii
 
+_UNSUPPORTED_ANSWER = "Metinde bu bilgi yok."
+
 _ASK_PROMPT = """\
 Sen bir toplantı asistanısın. SADECE aşağıdaki toplantı metnine dayanarak
 soruyu Türkçe yanıtla. Metinde cevap yoksa "Metinde bu bilgi yok." de —
@@ -60,6 +62,22 @@ def _ollama_answer(question: str, transcript: str, settings: Settings) -> str:
     return str(resp.json().get("response", "")).strip()
 
 
+def _is_no_info_answer(answer: str) -> bool:
+    return answer.strip().casefold().startswith(_UNSUPPORTED_ANSWER.casefold())
+
+
+def _unsupported_citation(reason: str) -> Citation:
+    return Citation(
+        claim="",
+        source_index=-1,
+        source_text="",
+        similarity=0.0,
+        grounded=False,
+        status="FAILED",
+        reason=reason,
+    )
+
+
 def answer_question(transcript: str, question: str, settings: Settings) -> AskResponse:
     """Answer from the transcript + ground it (citation / hallucination guard)."""
     start = time.perf_counter()
@@ -82,21 +100,50 @@ def answer_question(transcript: str, question: str, settings: Settings) -> AskRe
             "Use MAI_BACKEND=mock or MAI_BACKEND=ollama."
         )
 
-    # Ground the answer to a transcript sentence (skip the "no info" sentinel).
+    # Ground the answer to a transcript sentence. If a real LLM produces unsupported
+    # prose, never show that prose to the user with a weak `grounded=false` flag.
     sentences = split_sentences(redacted)
-    citation = ground_claim(answer or "", sentences) if answer else None
-    grounded = bool(citation and citation.grounded)
+    if not answer or _is_no_info_answer(answer):
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return AskResponse(
+            answer=_UNSUPPORTED_ANSWER,
+            citation=_unsupported_citation("answer does not claim transcript support"),
+            grounded=False,
+            redacted=settings.redact_pii,
+            backend=settings.backend,
+            elapsed_ms=elapsed_ms,
+        )
+
+    citation = ground_claim(answer, sentences)
+    grounded = citation.grounded
+    if not grounded:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return AskResponse(
+            answer=_UNSUPPORTED_ANSWER,
+            citation=_unsupported_citation("generated answer not grounded to transcript"),
+            grounded=False,
+            redacted=settings.redact_pii,
+            backend=settings.backend,
+            elapsed_ms=elapsed_ms,
+        )
 
     return AskResponse(
-        answer=answer or "Metinde bu bilgi yok.",
+        answer=answer,
         citation=Citation(
             claim=answer,
-            source_index=citation.source_index if citation else -1,
-            source_text=citation.source_text if citation else "",
-            similarity=citation.similarity if citation else 0.0,
-            grounded=grounded,
+            source_index=citation.source_index,
+            source_text=citation.source_text,
+            similarity=citation.similarity,
+            grounded=True,
+            status=citation.status.value,
+            reason=citation.reason,
+            start_sec=citation.start_sec,
+            source_char_start=citation.source_char_start,
+            source_char_end=citation.source_char_end,
+            source_hash=citation.source_hash,
+            quote_hash=citation.quote_hash,
         ),
-        grounded=grounded,
+        grounded=True,
         redacted=settings.redact_pii,
         backend=settings.backend,
         elapsed_ms=int((time.perf_counter() - start) * 1000),

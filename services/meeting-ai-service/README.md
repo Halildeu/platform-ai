@@ -10,6 +10,10 @@ FastAPI service: **transcript → summary + decisions + action items**.
 > redacted text. Raw transcript/question text is never logged. Redaction is
 > **fail-closed** (ADR-0043 D3): if a broad residual detector still finds a PII
 > shape after redaction, the request is **blocked with 422** rather than sent.
+> `/ask` is also fail-closed for hallucination exposure: if a generated answer
+> cannot be grounded to a transcript sentence, the unsupported prose is withheld
+> and the response uses the fixed answer `Metinde bu bilgi yok.` with
+> `grounded=false`.
 
 ## Citation grounding & hallucination guard (ADR-0043 D4/D8.1)
 
