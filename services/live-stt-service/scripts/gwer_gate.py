@@ -13,6 +13,7 @@ hypothesis text, and file paths are not accepted in evidence rows.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -51,6 +52,9 @@ _PILOT_REQUIRED_METADATA = {
         "ref_words",
         "evidence_hash",
         "eval_set_hash",
+        "sample_manifest_hash",
+        "sample_count_hash",
+        "ref_word_count_hash",
     ),
     "der": (
         "backend",
@@ -59,6 +63,8 @@ _PILOT_REQUIRED_METADATA = {
         "n_samples",
         "evidence_hash",
         "eval_set_hash",
+        "sample_manifest_hash",
+        "sample_count_hash",
     ),
 }
 
@@ -116,6 +122,24 @@ def _metric_value(row: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     return None
 
 
+def _sha256_ref(raw: str) -> str:
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _sample_count_hash(eval_set_hash: str, n_samples: int) -> str:
+    return _sha256_ref(f"{eval_set_hash}\n{n_samples}\n")
+
+
+def _ref_word_count_hash(eval_set_hash: str, ref_words: int) -> str:
+    return _sha256_ref(f"{eval_set_hash}\n{ref_words}\n")
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
 def _missing_pilot_metadata(row: dict[str, Any], *, metric: str) -> list[str]:
     missing: list[str] = []
     for key in _PILOT_REQUIRED_METADATA[metric]:
@@ -135,10 +159,58 @@ def _pilot_integrity_findings(
     findings: list[str] = []
     if _kind(row, metric=metric) not in PILOT_KINDS:
         return findings
-    for key in ("evidence_hash", "eval_set_hash"):
+    hash_keys = [
+        "evidence_hash",
+        "eval_set_hash",
+        "sample_manifest_hash",
+        "sample_count_hash",
+    ]
+    if metric == "wer":
+        hash_keys.append("ref_word_count_hash")
+    for key in hash_keys:
         value = str(row.get(key, ""))
         if value and not _SHA256_RE.fullmatch(value):
             findings.append(f"{metric} pilot row {index} {key} must be sha256:<64 hex>")
+    n_samples = _positive_int(row.get("n_samples"))
+    if n_samples is None:
+        findings.append(
+            f"{metric} pilot row {index} n_samples must be a positive integer"
+        )
+    ref_words = None
+    if metric == "wer":
+        ref_words = _positive_int(row.get("ref_words"))
+        if ref_words is None:
+            findings.append(
+                f"{metric} pilot row {index} ref_words must be a positive integer"
+            )
+    eval_set_hash = row.get("eval_set_hash")
+    sample_count_hash = row.get("sample_count_hash")
+    if (
+        n_samples is not None
+        and isinstance(eval_set_hash, str)
+        and _SHA256_RE.fullmatch(eval_set_hash)
+        and isinstance(sample_count_hash, str)
+        and _SHA256_RE.fullmatch(sample_count_hash)
+        and sample_count_hash != _sample_count_hash(eval_set_hash, n_samples)
+    ):
+        findings.append(
+            f"{metric} pilot row {index} "
+            "sample_count_hash does not match eval_set_hash+n_samples"
+        )
+    ref_word_count_hash = row.get("ref_word_count_hash")
+    if (
+        metric == "wer"
+        and ref_words is not None
+        and isinstance(eval_set_hash, str)
+        and _SHA256_RE.fullmatch(eval_set_hash)
+        and isinstance(ref_word_count_hash, str)
+        and _SHA256_RE.fullmatch(ref_word_count_hash)
+        and ref_word_count_hash != _ref_word_count_hash(eval_set_hash, ref_words)
+    ):
+        findings.append(
+            f"{metric} pilot row {index} "
+            "ref_word_count_hash does not match eval_set_hash+ref_words"
+        )
     return findings
 
 
@@ -233,10 +305,14 @@ def _summarize_row(
         "p50_ms": row.get("p50_ms"),
         "evidence_hash": row.get("evidence_hash"),
         "eval_set_hash": row.get("eval_set_hash"),
+        "sample_manifest_hash": row.get("sample_manifest_hash"),
+        "sample_count_hash": row.get("sample_count_hash"),
     }
     if metric == "wer":
         summary["model"] = row.get("model")
         summary["compute"] = row.get("compute")
+        summary["ref_words"] = row.get("ref_words")
+        summary["ref_word_count_hash"] = row.get("ref_word_count_hash")
     else:
         summary["backend"] = row.get("backend")
         summary["model"] = row.get("model")

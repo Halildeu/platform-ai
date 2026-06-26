@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -18,6 +19,16 @@ def _sha(char: str) -> str:
     return "sha256:" + (char * 64)
 
 
+def _sample_count_hash(eval_set_hash: str, n_samples: int) -> str:
+    raw = f"{eval_set_hash}\n{n_samples}\n"
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _ref_word_count_hash(eval_set_hash: str, ref_words: int) -> str:
+    raw = f"{eval_set_hash}\n{ref_words}\n"
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _pilot_wer(value: float = 0.18) -> dict[str, object]:
     return {
         "tag": "pilot-large-v3-turbo",
@@ -26,9 +37,12 @@ def _pilot_wer(value: float = 0.18) -> dict[str, object]:
         "compute": "float16",
         "evidence_hash": _sha("a"),
         "eval_set_hash": _sha("b"),
+        "sample_manifest_hash": _sha("e"),
+        "sample_count_hash": _sample_count_hash(_sha("b"), 8),
         "n_samples": 8,
         "wer": value,
         "ref_words": 1200,
+        "ref_word_count_hash": _ref_word_count_hash(_sha("b"), 1200),
         "rtf": 0.08,
         "p50_ms": 420,
     }
@@ -42,6 +56,8 @@ def _pilot_der(value: float = 0.22) -> dict[str, object]:
         "model": "pyannote/speaker-diarization-3.1",
         "evidence_hash": _sha("c"),
         "eval_set_hash": _sha("d"),
+        "sample_manifest_hash": _sha("f"),
+        "sample_count_hash": _sample_count_hash(_sha("d"), 8),
         "n_samples": 8,
         "der_corpus": value,
         "collar": 0.25,
@@ -63,9 +79,21 @@ def test_gate_passes_with_pilot_wer_and_der_under_threshold() -> None:
     assert result["selectedWer"]["value"] == 0.18
     assert result["selectedWer"]["evidence_hash"] == _sha("a")
     assert result["selectedWer"]["eval_set_hash"] == _sha("b")
+    assert result["selectedWer"]["sample_manifest_hash"] == _sha("e")
+    assert result["selectedWer"]["sample_count_hash"] == _sample_count_hash(
+        _sha("b"), 8
+    )
+    assert result["selectedWer"]["ref_words"] == 1200
+    assert result["selectedWer"]["ref_word_count_hash"] == _ref_word_count_hash(
+        _sha("b"), 1200
+    )
     assert result["selectedDer"]["value"] == 0.22
     assert result["selectedDer"]["evidence_hash"] == _sha("c")
     assert result["selectedDer"]["eval_set_hash"] == _sha("d")
+    assert result["selectedDer"]["sample_manifest_hash"] == _sha("f")
+    assert result["selectedDer"]["sample_count_hash"] == _sample_count_hash(
+        _sha("d"), 8
+    )
 
 
 def test_common_voice_and_synthetic_do_not_satisfy_pilot_gate() -> None:
@@ -133,10 +161,21 @@ def test_thresholds_are_required() -> None:
 def test_pilot_label_alone_does_not_satisfy_wer_or_der_gate() -> None:
     wer = _pilot_wer(0.18)
     der = _pilot_der(0.22)
-    del wer["evidence_hash"]
-    del wer["eval_set_hash"]
-    del der["evidence_hash"]
-    del der["eval_set_hash"]
+    for key in (
+        "evidence_hash",
+        "eval_set_hash",
+        "sample_manifest_hash",
+        "sample_count_hash",
+        "ref_word_count_hash",
+    ):
+        del wer[key]
+    for key in (
+        "evidence_hash",
+        "eval_set_hash",
+        "sample_manifest_hash",
+        "sample_count_hash",
+    ):
+        del der[key]
 
     result = gwer_gate.evaluate_gate(
         wer_rows=[wer],
@@ -162,7 +201,9 @@ def test_pilot_hashes_must_be_full_sha256_values() -> None:
     wer = _pilot_wer(0.18)
     der = _pilot_der(0.22)
     wer["evidence_hash"] = "sha256:not-a-real-digest"
+    wer["sample_manifest_hash"] = "sha256:not-a-real-digest"
     der["eval_set_hash"] = "abc123"
+    der["sample_count_hash"] = "abc123"
 
     result = gwer_gate.evaluate_gate(
         wer_rows=[wer],
@@ -178,6 +219,75 @@ def test_pilot_hashes_must_be_full_sha256_values() -> None:
     )
     assert any(
         "der pilot row 1 eval_set_hash must be sha256" in item
+        for item in result["findings"]
+    )
+    assert any(
+        "wer pilot row 1 sample_manifest_hash must be sha256" in item
+        for item in result["findings"]
+    )
+    assert any(
+        "der pilot row 1 sample_count_hash must be sha256" in item
+        for item in result["findings"]
+    )
+
+
+def test_pilot_count_hashes_must_match_eval_set_denominators() -> None:
+    wer = _pilot_wer(0.18)
+    der = _pilot_der(0.22)
+    wer["sample_count_hash"] = _sha("9")
+    wer["ref_word_count_hash"] = _sha("8")
+    der["sample_count_hash"] = _sha("7")
+
+    result = gwer_gate.evaluate_gate(
+        wer_rows=[wer],
+        der_rows=[der],
+        max_wer=0.25,
+        max_der=0.30,
+    )
+
+    assert result["status"] == "blocked"
+    assert any(
+        "wer pilot row 1 sample_count_hash does not match eval_set_hash+n_samples"
+        in item
+        for item in result["findings"]
+    )
+    assert any(
+        "wer pilot row 1 ref_word_count_hash does not match eval_set_hash+ref_words"
+        in item
+        for item in result["findings"]
+    )
+    assert any(
+        "der pilot row 1 sample_count_hash does not match eval_set_hash+n_samples"
+        in item
+        for item in result["findings"]
+    )
+
+
+def test_pilot_denominators_must_be_positive_integers() -> None:
+    wer = _pilot_wer(0.18)
+    der = _pilot_der(0.22)
+    wer["n_samples"] = 0
+    wer["ref_words"] = 0
+    der["n_samples"] = False
+
+    result = gwer_gate.evaluate_gate(
+        wer_rows=[wer],
+        der_rows=[der],
+        max_wer=0.25,
+        max_der=0.30,
+    )
+
+    assert result["status"] == "blocked"
+    assert any(
+        "wer pilot row 1 n_samples must be a positive integer" in item
+        for item in result["findings"]
+    )
+    assert any(
+        "wer pilot row 1 ref_words must be a positive integer" in item
+        for item in result["findings"]
+    )
+    assert any(
+        "der pilot row 1 n_samples must be a positive integer" in item
         for item in result["findings"]
     )
 

@@ -175,6 +175,14 @@ evidence. `pass` is reserved for metadata-only pilot evidence under explicit
 thresholds. The verifier rejects raw audio paths, transcript/reference text, and
 hypothesis text in evidence rows.
 
+Pilot WER/DER rows must carry full `sha256:<64 hex>` `evidence_hash`,
+`eval_set_hash`, `sample_manifest_hash`, and `sample_count_hash` values; WER rows
+must also carry `ref_word_count_hash`. `sample_count_hash` binds the declared
+`n_samples` denominator to the eval-set hash, and `ref_word_count_hash` binds
+the WER `ref_words` denominator without emitting transcript or reference text.
+Changing only `dataset_kind`, `n_samples`, or `ref_words` is not enough to pass
+the gate.
+
 ## Faz 24 G-LAT/COST quality gate
 
 `scripts/perf_client.py`, `scripts/saturation_stats.py`, and `scripts/cost.py`

@@ -26,6 +26,11 @@ def _sample_count_hash(eval_set_hash: str, n_samples: int) -> str:
     return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _ref_word_count_hash(eval_set_hash: str, ref_words: int) -> str:
+    raw = f"{eval_set_hash}\n{ref_words}\n"
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _gwer_envelope(*, dataset_kind: str = "pilot-meeting") -> dict[str, object]:
     return {
         "schema": "faz24.ai-gate-ingest.v1",
@@ -40,9 +45,12 @@ def _gwer_envelope(*, dataset_kind: str = "pilot-meeting") -> dict[str, object]:
                     "compute": "float16",
                     "evidence_hash": _sha("e"),
                     "eval_set_hash": _sha("f"),
+                    "sample_manifest_hash": _sha("c"),
+                    "sample_count_hash": _sample_count_hash(_sha("f"), 8),
                     "n_samples": 8,
                     "wer": 0.18,
                     "ref_words": 1200,
+                    "ref_word_count_hash": _ref_word_count_hash(_sha("f"), 1200),
                     "rtf": 0.08,
                     "p50_ms": 420,
                 }
@@ -55,6 +63,8 @@ def _gwer_envelope(*, dataset_kind: str = "pilot-meeting") -> dict[str, object]:
                     "model": "pyannote/speaker-diarization-3.1",
                     "evidence_hash": _sha("a"),
                     "eval_set_hash": _sha("b"),
+                    "sample_manifest_hash": _sha("d"),
+                    "sample_count_hash": _sample_count_hash(_sha("b"), 8),
                     "n_samples": 8,
                     "der_corpus": 0.22,
                     "collar": 0.25,
