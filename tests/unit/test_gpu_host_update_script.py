@@ -24,7 +24,11 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertNotIn('"origin/$Branch"', script)
 
     def test_update_script_is_ps51_safe(self) -> None:
-        self._assert_ps51_safe_script(self._read_script("update.ps1"))
+        script = self._read_script("update.ps1")
+
+        self._assert_ps51_safe_script(script)
+        self.assertIn("function Invoke-GitStream", script)
+        self.assertNotIn("2>&1 | Out-Host", script)
 
     def test_drift_guard_script_is_ps51_safe(self) -> None:
         script = self._read_script("drift-guard.ps1")
