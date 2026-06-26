@@ -16,6 +16,7 @@ accepted in evidence rows.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -140,6 +141,21 @@ def _metric_value(row: dict[str, Any], key: str) -> float | None:
     return None
 
 
+def _positive_int_value(row: dict[str, Any], key: str) -> int | None:
+    value = row.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
+def _sha256_ref(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sample_count_hash(eval_set_hash: str, n_samples: int) -> str:
+    return _sha256_ref(f"{eval_set_hash}\n{n_samples}\n")
+
+
 def _is_disallowed_content_key(key: str) -> bool:
     lowered = key.lower()
     if lowered.endswith("_hash"):
@@ -227,12 +243,21 @@ def _missing_row_metrics(row: dict[str, Any]) -> list[str]:
         missing.append("eval_set_hash")
     if not row.get("prompt_hash"):
         missing.append("prompt_hash")
+    if not row.get("sample_manifest_hash"):
+        missing.append("sample_manifest_hash")
+    if not row.get("sample_count_hash"):
+        missing.append("sample_count_hash")
     return missing
 
 
 def _hash_format_findings(row: dict[str, Any], *, index: int) -> list[str]:
     findings: list[str] = []
-    for key in ("eval_set_hash", "prompt_hash"):
+    for key in (
+        "eval_set_hash",
+        "prompt_hash",
+        "sample_manifest_hash",
+        "sample_count_hash",
+    ):
         value = row.get(key)
         if isinstance(value, str) and value and not _SHA256_RE.fullmatch(value):
             findings.append(f"pilot row {index} {key} must be sha256:<64 hex>")
@@ -253,11 +278,14 @@ def _pilot_integrity_findings(row: dict[str, Any], *, index: int) -> list[str]:
 
     backend = str(row.get("backend", "")).lower()
     eval_set = str(row.get("eval_set", "")).replace("\\", "/").lower()
+    n_samples = _positive_int_value(row, "n_samples")
     if backend not in PILOT_BACKENDS:
         findings.append(
             f"pilot row {index} uses backend={backend or '<missing>'}; "
             "real G-INT pilot needs ollama, anthropic, or openai"
         )
+    if n_samples is None:
+        findings.append(f"pilot row {index} n_samples must be a positive integer")
     if not eval_set:
         findings.append(f"pilot row {index} is missing eval_set path")
     if "/tests/fixtures/" in f"/{eval_set}" or eval_set.startswith("tests/fixtures/"):
@@ -265,6 +293,19 @@ def _pilot_integrity_findings(row: dict[str, Any], *, index: int) -> list[str]:
             f"pilot row {index} points at tests/fixtures; fixture rows cannot satisfy G-INT"
         )
     findings.extend(_hash_format_findings(row, index=index))
+    eval_set_hash = row.get("eval_set_hash")
+    sample_count_hash = row.get("sample_count_hash")
+    if (
+        n_samples is not None
+        and isinstance(eval_set_hash, str)
+        and _SHA256_RE.fullmatch(eval_set_hash)
+        and isinstance(sample_count_hash, str)
+        and _SHA256_RE.fullmatch(sample_count_hash)
+        and sample_count_hash != _sample_count_hash(eval_set_hash, n_samples)
+    ):
+        findings.append(
+            f"pilot row {index} sample_count_hash does not match eval_set_hash+n_samples"
+        )
     return findings
 
 
@@ -327,6 +368,8 @@ def _summarize_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "n_samples": row.get("n_samples"),
         "eval_set_hash": row.get("eval_set_hash"),
         "prompt_hash": row.get("prompt_hash"),
+        "sample_manifest_hash": row.get("sample_manifest_hash"),
+        "sample_count_hash": row.get("sample_count_hash"),
         "grounding_rate": row.get("grounding_rate"),
         "action_precision": row.get("action_precision"),
         "action_recall": row.get("action_recall"),

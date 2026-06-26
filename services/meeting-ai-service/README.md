@@ -71,8 +71,11 @@ includes explicit `dataset_kind`; default is `synthetic-neutral`. Real #162 acce
 requires an approved pilot class (`pilot-meeting`, `workcube-pilot`, or
 `customer-pilot`) plus explicit thresholds checked by `scripts/gint_gate.py`.
 Pilot rows must also use a real backend, a non-fixture eval-set path, and full
-`sha256:<64 hex>` `eval_set_hash` / `prompt_hash` values; editing a synthetic
-row's `dataset_kind` field is not enough to pass the gate.
+`sha256:<64 hex>` `eval_set_hash`, `prompt_hash`, `sample_manifest_hash`, and
+`sample_count_hash` values; editing a synthetic row's `dataset_kind` field or
+only changing `n_samples` is not enough to pass the gate. `sample_manifest_hash`
+is a private eval-set fingerprint, and `sample_count_hash` binds the declared
+sample count to the eval-set hash without emitting transcript text or labels.
 
 Synthetic fixtures and mock runs are useful for CI and bakeoffs, but the gate refuses
 to let them satisfy G-INT acceptance. Evidence rows must stay metadata-only: raw

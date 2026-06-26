@@ -74,6 +74,32 @@ def _sha256_ref(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _compact_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _sample_manifest_hash(samples: list[dict[str, Any]]) -> str:
+    """Private-eval-set fingerprint without emitting transcript/label text."""
+    manifest = [
+        {
+            "index": index,
+            "transcript_hash": _sha256_ref(str(sample.get("transcript", ""))),
+            "expected_decisions_hash": _sha256_ref(
+                _compact_json(list(sample.get("expected_decisions", [])))
+            ),
+            "expected_actions_hash": _sha256_ref(
+                _compact_json(list(sample.get("expected_actions", [])))
+            ),
+        }
+        for index, sample in enumerate(samples)
+    ]
+    return _sha256_ref(_compact_json(manifest))
+
+
+def _sample_count_hash(eval_set_hash: str, n_samples: int) -> str:
+    return _sha256_ref(f"{eval_set_hash}\n{n_samples}\n")
+
+
 def _ollama_fingerprint(settings: Settings) -> dict[str, object]:
     """Best-effort live artifact fingerprint (model digest + Ollama version) so a
     result row is reproducible even though model tags are mutable. Null when the
@@ -305,6 +331,8 @@ def main() -> None:
     ]
     eval_set_hash = _sha256_ref(raw)
     prompt_hash = _sha256_ref(_OLLAMA_PROMPT)
+    sample_manifest_hash = _sample_manifest_hash(samples)
+    sample_count_hash = _sample_count_hash(eval_set_hash, len(samples))
     # Pin + announce the comparison surface up front so cells are auditably
     # identical (Codex: an env re-read could otherwise make cells incomparable).
     print(
@@ -333,6 +361,8 @@ def main() -> None:
                 "dataset_kind": args.dataset_kind,
                 "eval_set_hash": eval_set_hash,
                 "prompt_hash": prompt_hash,
+                "sample_manifest_hash": sample_manifest_hash,
+                "sample_count_hash": sample_count_hash,
                 "n_samples": len(samples),
                 **run,
                 # Full effective decoding config + live artifact fingerprint so the
@@ -366,6 +396,8 @@ def main() -> None:
                 "n_seeds": len(per_seed_runs),
                 "eval_set_hash": eval_set_hash,
                 "prompt_hash": prompt_hash,
+                "sample_manifest_hash": sample_manifest_hash,
+                "sample_count_hash": sample_count_hash,
             }
             for k in _METRIC_KEYS:
                 vals = [r[k] for r in per_seed_runs]

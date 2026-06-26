@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -18,6 +19,11 @@ def _sha(char: str) -> str:
     return "sha256:" + (char * 64)
 
 
+def _sample_count_hash(eval_set_hash: str, n_samples: int) -> str:
+    raw = f"{eval_set_hash}\n{n_samples}\n"
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _pilot_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "tag": "ollama-pilot",
@@ -27,6 +33,7 @@ def _pilot_row(**overrides: object) -> dict[str, object]:
         "eval_set": "C:/faz24-pilot/intel-pilot-2026-06-25.json",
         "eval_set_hash": _sha("a"),
         "prompt_hash": _sha("b"),
+        "sample_manifest_hash": _sha("c"),
         "n_samples": 8,
         "grounding_rate": 1.0,
         "action_precision": 0.86,
@@ -44,6 +51,10 @@ def _pilot_row(**overrides: object) -> dict[str, object]:
         "keep_alive": "0",
     }
     row.update(overrides)
+    if "sample_count_hash" not in overrides:
+        row["sample_count_hash"] = _sample_count_hash(
+            str(row["eval_set_hash"]), int(row["n_samples"])
+        )
     return row
 
 
@@ -77,6 +88,10 @@ def test_gate_passes_with_pilot_gint_under_thresholds() -> None:
     assert result["selectedGint"]["grounding_rate"] == 1.0
     assert result["selectedGint"]["eval_set_hash"] == _sha("a")
     assert result["selectedGint"]["prompt_hash"] == _sha("b")
+    assert result["selectedGint"]["sample_manifest_hash"] == _sha("c")
+    assert result["selectedGint"]["sample_count_hash"] == _sample_count_hash(
+        _sha("a"), 8
+    )
 
 
 def test_synthetic_rows_do_not_satisfy_pilot_gate() -> None:
@@ -146,6 +161,8 @@ def test_pilot_hashes_must_be_full_sha256_values() -> None:
             _pilot_row(
                 eval_set_hash="abc123def456",
                 prompt_hash="sha256:not-a-real-digest",
+                sample_manifest_hash="not-a-real-digest",
+                sample_count_hash="also-not-a-real-digest",
             )
         ]
     )
@@ -157,6 +174,36 @@ def test_pilot_hashes_must_be_full_sha256_values() -> None:
     )
     assert any(
         "pilot row 1 prompt_hash must be sha256:<64 hex>" in finding
+        for finding in result["findings"]
+    )
+    assert any(
+        "pilot row 1 sample_manifest_hash must be sha256:<64 hex>" in finding
+        for finding in result["findings"]
+    )
+    assert any(
+        "pilot row 1 sample_count_hash must be sha256:<64 hex>" in finding
+        for finding in result["findings"]
+    )
+    assert result["selectedGint"] is None
+
+
+def test_pilot_sample_count_hash_must_match_eval_set_hash_and_count() -> None:
+    result = _evaluate([_pilot_row(sample_count_hash=_sha("f"))])
+
+    assert result["status"] == "blocked"
+    assert any(
+        "sample_count_hash does not match eval_set_hash+n_samples" in finding
+        for finding in result["findings"]
+    )
+    assert result["selectedGint"] is None
+
+
+def test_pilot_sample_count_must_be_positive_integer() -> None:
+    result = _evaluate([_pilot_row(n_samples=8.5, sample_count_hash=_sha("f"))])
+
+    assert result["status"] == "blocked"
+    assert any(
+        "n_samples must be a positive integer" in finding
         for finding in result["findings"]
     )
     assert result["selectedGint"] is None
