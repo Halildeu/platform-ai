@@ -26,7 +26,10 @@ Use schema `faz24.ai-gate-ingest.v1` and one of these gate names:
 - `glat-cost`: requires `evidence.rows` and explicit G-LAT/COST thresholds.
 - `gint`: requires `evidence.rows`, explicit G-INT thresholds, and pilot rows
   with `sha256:<64 hex>` `eval_set_hash`, `prompt_hash`,
-  `sample_manifest_hash`, and `sample_count_hash` metadata.
+  `sample_manifest_hash`, and `sample_count_hash` metadata. G-INT thresholds
+  include `minGroundingRate`, `minCitationCoverage`, `minSummaryVerifiedRate`,
+  decision/action precision/recall floors, model output-contract ceilings, and
+  `minSamples`.
 - `diar-decision`: requires `evidence.rows` and explicit diarization decision
   thresholds: `maxDer`, `maxRtf`, `maxLatencyMs`,
   `maxPeakVramDeltaMb`, and `minSamples`. Passing rows also need approved pilot

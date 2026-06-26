@@ -76,6 +76,10 @@ Pilot rows must also use a real backend, a non-fixture eval-set path, and full
 only changing `n_samples` is not enough to pass the gate. `sample_manifest_hash`
 is a private eval-set fingerprint, and `sample_count_hash` binds the declared
 sample count to the eval-set hash without emitting transcript text or labels.
+G-INT rows also carry metadata-only `citation_coverage` and
+`summary_verified_rate`: a pilot cannot pass merely because decisions/actions
+look grounded while shipped outputs lack PASSED citations or summaries are
+silently withheld.
 
 Synthetic fixtures and mock runs are useful for CI and bakeoffs, but the gate refuses
 to let them satisfy G-INT acceptance. Evidence rows must stay metadata-only: raw
@@ -88,6 +92,8 @@ Current synthetic evidence is expected to remain blocked:
 python scripts/gint_gate.py \
   --gint-evidence ../../docs/evidence/intel-eval-2026-06-17.jsonl \
   --min-grounding-rate 0.95 \
+  --min-citation-coverage 1.0 \
+  --min-summary-verified-rate 0.90 \
   --min-action-precision 0.80 \
   --min-action-recall 0.80 \
   --min-decision-precision 0.75 \

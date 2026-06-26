@@ -329,6 +329,12 @@ def _dispatch_gint(envelope: dict[str, Any]) -> dict[str, Any]:
         min_grounding_rate=_float_threshold(
             thresholds, "minGroundingRate", "min_grounding_rate"
         ),
+        min_citation_coverage=_float_threshold(
+            thresholds, "minCitationCoverage", "min_citation_coverage"
+        ),
+        min_summary_verified_rate=_float_threshold(
+            thresholds, "minSummaryVerifiedRate", "min_summary_verified_rate"
+        ),
         min_action_precision=_float_threshold(
             thresholds, "minActionPrecision", "min_action_precision"
         ),

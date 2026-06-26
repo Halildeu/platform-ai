@@ -31,6 +31,7 @@ import json
 import statistics
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -47,11 +48,14 @@ from app.services.analyze import (
     MeetingAnalysisService,
     OllamaSchemaInvalidError,
     OllamaUnparseableOutputError,
+    _sentences,
 )
 from app.services.eval_metrics import claim_metrics, grounding_rate
 
 _METRIC_KEYS = (
     "grounding_rate",
+    "citation_coverage",
+    "summary_verified_rate",
     "action_precision",
     "action_recall",
     "action_f1",
@@ -100,6 +104,57 @@ def _sample_count_hash(eval_set_hash: str, n_samples: int) -> str:
     return _sha256_ref(f"{eval_set_hash}\n{n_samples}\n")
 
 
+def _passed_claim_counts(citations: list[Any]) -> Counter[str]:
+    return Counter(
+        str(getattr(citation, "claim", ""))
+        for citation in citations
+        if getattr(citation, "grounded", False)
+        and getattr(citation, "status", "") == "PASSED"
+        and str(getattr(citation, "claim", "")).strip()
+    )
+
+
+def _covered_claim_count(claims: list[str], citations: list[Any]) -> int:
+    remaining = _passed_claim_counts(citations)
+    covered = 0
+    for claim in claims:
+        if remaining[claim] > 0:
+            covered += 1
+            remaining[claim] -= 1
+    return covered
+
+
+def _citation_metrics(result: Any) -> dict[str, float]:
+    """Metadata-only proof that shipped outputs carry PASSED citations.
+
+    `citation_coverage` measures the visible output units that have a matching
+    PASSED citation. `summary_verified_rate` is sample-level: a transcript sample
+    gets credit only when a non-empty summary is shipped and every retained
+    summary sentence has a PASSED summary citation. Empty summaries therefore do
+    not accidentally satisfy the summary side of G-INT.
+    """
+    summary_claims = _sentences(str(getattr(result, "summary", "")))
+    decision_action_claims = list(getattr(result, "decisions", [])) + [
+        action.text for action in getattr(result, "action_items", [])
+    ]
+    summary_covered = _covered_claim_count(
+        summary_claims, list(getattr(result, "summary_citations", []))
+    )
+    decision_action_covered = _covered_claim_count(
+        decision_action_claims, list(getattr(result, "citations", []))
+    )
+    total_outputs = len(summary_claims) + len(decision_action_claims)
+    covered_outputs = summary_covered + decision_action_covered
+    citation_coverage = 1.0 if total_outputs == 0 else covered_outputs / total_outputs
+    summary_verified = (
+        1.0 if summary_claims and summary_covered == len(summary_claims) else 0.0
+    )
+    return {
+        "citation_coverage": round(citation_coverage, 3),
+        "summary_verified_rate": round(summary_verified, 3),
+    }
+
+
 def _ollama_fingerprint(settings: Settings) -> dict[str, object]:
     """Best-effort live artifact fingerprint (model digest + Ollama version) so a
     result row is reproducible even though model tags are mutable. Null when the
@@ -142,6 +197,8 @@ def _score_run(
     drop is not mistaken for a model weakness.
     """
     groundings: list[float] = []
+    citation_coverages: list[float] = []
+    summary_verified_rates: list[float] = []
     act_p: list[float] = []
     act_r: list[float] = []
     act_f: list[float] = []
@@ -155,7 +212,17 @@ def _score_run(
     truncation_risk = 0
 
     def _zero_credit() -> None:
-        for xs in (groundings, act_p, act_r, act_f, dec_p, dec_r, dec_f):
+        for xs in (
+            groundings,
+            citation_coverages,
+            summary_verified_rates,
+            act_p,
+            act_r,
+            act_f,
+            dec_p,
+            dec_r,
+            dec_f,
+        ):
             xs.append(0.0)
 
     for i, s in enumerate(samples, 1):
@@ -196,6 +263,9 @@ def _score_run(
             )
             continue
         latencies.append((time.perf_counter() - t0) * 1000)
+        citation = _citation_metrics(r)
+        citation_coverages.append(citation["citation_coverage"])
+        summary_verified_rates.append(citation["summary_verified_rate"])
         claims = list(r.decisions) + [a.text for a in r.action_items]
         groundings.append(grounding_rate(claims, transcript))
         am = claim_metrics(
@@ -216,6 +286,8 @@ def _score_run(
         dec_f.append(dm["f1"])
         print(
             f"    [{i}/{len(samples)}] grounding={groundings[-1]} "
+            f"citation={citation['citation_coverage']} "
+            f"summary_verified={citation['summary_verified_rate']} "
             f"act P={am['precision']} R={am['recall']} "
             f"dec P={dm['precision']} R={dm['recall']}",
             file=sys.stderr,
@@ -228,6 +300,8 @@ def _score_run(
 
     return {
         "grounding_rate": _mean(groundings),  # lexical, not semantic faithfulness
+        "citation_coverage": _mean(citation_coverages),
+        "summary_verified_rate": _mean(summary_verified_rates),
         "action_precision": _mean(act_p),
         "action_recall": _mean(act_r),
         "action_f1": _mean(act_f),  # macro: per-sample F1 mean (not F1-of-means)
@@ -376,6 +450,8 @@ def main() -> None:
             per_seed_runs.append(run)
             print(
                 f"  == {row['model']} seed={seed}: grounding {run['grounding_rate']:.0%}, "
+                f"citation {run['citation_coverage']:.0%}, "
+                f"summary {run['summary_verified_rate']:.0%}, "
                 f"action P {run['action_precision']:.0%}/R {run['action_recall']:.0%}, "
                 f"decision P {run['decision_precision']:.0%}/R {run['decision_recall']:.0%}, "
                 f"schema_invalid {run['schema_invalid_rate']:.0%}, "
@@ -407,6 +483,8 @@ def main() -> None:
             print(
                 f"  ## {model} over {agg['n_seeds']} seeds: "
                 f"grounding {agg['grounding_rate_mean']:.0%} ±{agg['grounding_rate_stdev']:.1%}, "
+                f"citation {agg['citation_coverage_mean']:.0%} "
+                f"±{agg['citation_coverage_stdev']:.1%}, "
                 f"decision R {agg['decision_recall_mean']:.0%} "
                 f"±{agg['decision_recall_stdev']:.1%}",
                 file=sys.stderr,
