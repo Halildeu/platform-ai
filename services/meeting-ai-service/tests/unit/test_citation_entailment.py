@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from app.services.citation import (
     CitationStatus,
+    due_date_supported_by_source,
     ground_claim,
     owner_supported_by_source,
     split_sentences,
@@ -141,6 +142,21 @@ def test_action_owner_must_be_in_same_source_sentence() -> None:
     assert not owner_supported_by_source("Ali", "Rapor cuma gününe kadar hazırlanacak.")
 
 
+def test_action_due_date_must_be_in_same_source_sentence() -> None:
+    assert due_date_supported_by_source("cuma", "Ali raporu cuma gününe kadar hazırlayacak.")
+    assert due_date_supported_by_source("26.06.2026", "Rapor 26.06.2026 tarihinde teslim edilecek.")
+    assert not due_date_supported_by_source(
+        "2026-06-26", "Rapor 26.06.2026 tarihinde teslim edilecek."
+    )
+    assert not due_date_supported_by_source(
+        "26 Haziran 2026", "Rapor 26.06.2026 tarihinde teslim edilecek."
+    )
+    assert not due_date_supported_by_source(
+        "2026-06-26", "Ali raporu cuma gününe kadar hazırlayacak."
+    )
+    assert not due_date_supported_by_source("salı", "Ali raporu cuma gününe kadar hazırlayacak.")
+
+
 def test_action_owner_absent_from_grounded_source_is_withheld() -> None:
     """A grounded action can ship, but an unsupported assignee cannot."""
     from app.core.config import Settings
@@ -172,6 +188,43 @@ def test_action_owner_absent_from_grounded_source_is_withheld() -> None:
     assert "owner" in result.rejected_claims[0].reason
 
 
+def test_action_due_date_absent_from_grounded_source_is_withheld() -> None:
+    """A grounded action can ship, but an unsupported due date cannot."""
+    from app.core.config import Settings
+    from app.models.schemas import ActionItem
+    from app.services.analyze import AnalysisDraft, MeetingAnalysisService
+
+    class _StubAnalyzer:
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            return AnalysisDraft(
+                summary="",
+                decisions=[],
+                action_items=[
+                    ActionItem(
+                        text="Rapor cuma gününe kadar hazırlanacak",
+                        due_date="2026-06-26",
+                    )
+                ],
+            )
+
+        @property
+        def model_loaded(self) -> bool:
+            return True
+
+    svc = MeetingAnalysisService(
+        Settings(backend="mock", redact_pii=False), analyzer=_StubAnalyzer()
+    )
+    result = svc.analyze("Rapor cuma gününe kadar hazırlanacak.")
+
+    assert result.schema_version == "4-adr0043"
+    assert len(result.action_items) == 1
+    assert result.action_items[0].text == "Rapor cuma gününe kadar hazırlanacak"
+    assert result.action_items[0].due_date is None
+    assert result.ungrounded_count == 1
+    assert result.rejected_claims[0].kind == "action_due_date"
+    assert "due date" in result.rejected_claims[0].reason
+
+
 def test_action_owner_in_grounded_source_is_kept() -> None:
     from app.core.config import Settings
     from app.models.schemas import ActionItem
@@ -197,6 +250,39 @@ def test_action_owner_in_grounded_source_is_kept() -> None:
     result = svc.analyze("Ali raporu cuma gününe kadar hazırlayacak.")
 
     assert result.action_items[0].owner == "Ali"
+    assert result.ungrounded_count == 0
+
+
+def test_action_due_date_in_grounded_source_is_kept() -> None:
+    from app.core.config import Settings
+    from app.models.schemas import ActionItem
+    from app.services.analyze import AnalysisDraft, MeetingAnalysisService
+
+    class _StubAnalyzer:
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            return AnalysisDraft(
+                summary="",
+                decisions=[],
+                action_items=[
+                    ActionItem(
+                        text="Ali raporu cuma gününe kadar hazırlayacak",
+                        owner="Ali",
+                        due_date="cuma",
+                    )
+                ],
+            )
+
+        @property
+        def model_loaded(self) -> bool:
+            return True
+
+    svc = MeetingAnalysisService(
+        Settings(backend="mock", redact_pii=False), analyzer=_StubAnalyzer()
+    )
+    result = svc.analyze("Ali raporu cuma gününe kadar hazırlayacak.")
+
+    assert result.action_items[0].owner == "Ali"
+    assert result.action_items[0].due_date == "cuma"
     assert result.ungrounded_count == 0
 
 
