@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import Settings, get_settings
 from app.models.schemas import AskRequest, AskResponse
 from app.services.ask import answer_question
+from app.services.redact import RedactionError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -38,9 +39,25 @@ async def ask_endpoint(
         )
     corr_id = getattr(request.state, "correlation_id", "")
     try:
-        result = await run_in_threadpool(
-            answer_question, body.transcript, body.question, settings
+        result = await run_in_threadpool(answer_question, body.transcript, body.question, settings)
+    except RedactionError as exc:
+        logger.warning(
+            "Ask blocked: residual PII after redaction (KVKK fail-closed)",
+            extra={"correlation_id": corr_id, "err_class": type(exc).__name__},
         )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Redaction could not guarantee PII removal; blocked ({exc})",
+        ) from exc
+    except NotImplementedError as exc:
+        logger.warning(
+            "Ask backend not implemented",
+            extra={"correlation_id": corr_id, "err_class": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Selected LLM backend is not wired yet",
+        ) from exc
     except httpx.HTTPError as exc:
         # transcript-free log
         logger.warning(

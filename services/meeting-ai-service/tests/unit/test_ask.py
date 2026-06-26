@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.main import app
 from app.services.ask import answer_question
+from app.services.redact import RedactionError
 
 TRANSCRIPT = (
     "Bütçe artışı yönetim kurulunda onaylandı. "
@@ -57,6 +58,45 @@ def test_endpoint_ollama_down_502(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.status_code == 502
 
 
+def test_endpoint_ask_nonmock_residual_transcript_pii_blocked_422(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAI_BACKEND", "ollama")
+    with TestClient(app) as client:
+        resp = client.post(
+            "/ask",
+            json={"transcript": "Kayıt 01234567890 girildi.", "question": "Ne girildi?"},
+        )
+    assert resp.status_code == 422
+    assert "01234567890" not in resp.text
+
+
+def test_endpoint_ask_nonmock_residual_question_pii_blocked_422(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAI_BACKEND", "ollama")
+    with TestClient(app) as client:
+        resp = client.post(
+            "/ask",
+            json={"transcript": TRANSCRIPT, "question": "01234567890 hangi kayda ait?"},
+        )
+    assert resp.status_code == 422
+    assert "01234567890" not in resp.text
+
+
+def test_answer_question_blocks_residual_question_before_llm() -> None:
+    settings = Settings(backend="ollama")
+    with pytest.raises(RedactionError):
+        answer_question(TRANSCRIPT, "01234567890 hangi kayda ait?", settings)
+
+
+def test_endpoint_ask_llm_backend_501(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAI_BACKEND", "anthropic")
+    with TestClient(app) as client:
+        resp = client.post("/ask", json={"transcript": TRANSCRIPT, "question": "Ne oldu?"})
+    assert resp.status_code == 501
+
+
 def test_ask_ollama_sends_decoding_options(monkeypatch: pytest.MonkeyPatch) -> None:
     # The ask path must carry the same num_ctx/temperature contract as analyze (no
     # 2048-truncation, deterministic) — but ask returns PROSE, so it must NOT force
@@ -83,3 +123,24 @@ def test_ask_ollama_sends_decoding_options(monkeypatch: pytest.MonkeyPatch) -> N
     assert isinstance(opts, dict)
     assert opts["num_ctx"] == 16384
     assert opts["temperature"] == 0.0
+
+
+def test_ask_ollama_redacts_question_before_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _capture(*a: object, **k: object) -> httpx.Response:
+        captured.update(k.get("json", {}))  # type: ignore[arg-type]
+        return httpx.Response(
+            200,
+            json={"response": "Metinde bu bilgi yok."},
+            request=httpx.Request("POST", "http://localhost:11434/api/generate"),
+        )
+
+    monkeypatch.setattr(httpx, "post", _capture)
+    settings = Settings(backend="ollama")
+    answer_question(TRANSCRIPT, "ali@example.com hangi aksiyona bağlı?", settings)
+
+    prompt = captured["prompt"]
+    assert isinstance(prompt, str)
+    assert "ali@example.com" not in prompt
+    assert "***REDACTED_EMAIL***" in prompt
