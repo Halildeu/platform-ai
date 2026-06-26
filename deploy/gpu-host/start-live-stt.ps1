@@ -39,6 +39,10 @@ $env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"
 # on a GPU host. Align it so health reflects the real device.
 $env:STT_DEVICE = "cuda"
 $env:STT_COMPUTE_TYPE = "float16"
+# GPU host first transcribe includes lazy Whisper model load. Historical smoke
+# evidence uses a 180s budget; the default 60s can kill the worker before it ever
+# warms, causing every retry to cold-start again. env.local.ps1 can still override.
+$env:STT_REQUEST_TIMEOUT = "180"
 
 if ($HfHome) {
     $env:HF_HOME = $HfHome
