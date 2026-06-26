@@ -320,14 +320,91 @@ def _summarize_row(
     return summary
 
 
+def _thresholds(
+    *,
+    max_wer: float | None,
+    max_der: float | None,
+    min_wer_samples: int | None,
+    min_der_samples: int | None,
+    min_wer_ref_words: int | None,
+) -> dict[str, float | int | None]:
+    return {
+        "maxWer": max_wer,
+        "maxDer": max_der,
+        "minWerSamples": min_wer_samples,
+        "minDerSamples": min_der_samples,
+        "minWerRefWords": min_wer_ref_words,
+    }
+
+
+def _quality_findings(
+    *,
+    wer_row: dict[str, Any],
+    der_row: dict[str, Any],
+    wer_value: float,
+    der_value: float,
+    thresholds: dict[str, float | int | None],
+) -> list[str]:
+    findings: list[str] = []
+    max_wer = thresholds["maxWer"]
+    max_der = thresholds["maxDer"]
+    min_wer_samples = thresholds["minWerSamples"]
+    min_der_samples = thresholds["minDerSamples"]
+    min_wer_ref_words = thresholds["minWerRefWords"]
+
+    if isinstance(max_wer, int | float) and wer_value > max_wer:
+        findings.append(f"pilot WER {wer_value:.4f} exceeds threshold {max_wer:.4f}")
+    if isinstance(max_der, int | float) and der_value > max_der:
+        findings.append(f"pilot DER {der_value:.4f} exceeds threshold {max_der:.4f}")
+
+    wer_samples = _positive_int(wer_row.get("n_samples"))
+    der_samples = _positive_int(der_row.get("n_samples"))
+    ref_words = _positive_int(wer_row.get("ref_words"))
+    if (
+        isinstance(min_wer_samples, int)
+        and wer_samples is not None
+        and wer_samples < min_wer_samples
+    ):
+        findings.append(
+            f"pilot WER n_samples {wer_samples} is below minimum {min_wer_samples}"
+        )
+    if (
+        isinstance(min_der_samples, int)
+        and der_samples is not None
+        and der_samples < min_der_samples
+    ):
+        findings.append(
+            f"pilot DER n_samples {der_samples} is below minimum {min_der_samples}"
+        )
+    if (
+        isinstance(min_wer_ref_words, int)
+        and ref_words is not None
+        and ref_words < min_wer_ref_words
+    ):
+        findings.append(
+            f"pilot WER ref_words {ref_words} is below minimum {min_wer_ref_words}"
+        )
+    return findings
+
+
 def evaluate_gate(
     *,
     wer_rows: list[dict[str, Any]],
     der_rows: list[dict[str, Any]],
     max_wer: float | None,
     max_der: float | None,
+    min_wer_samples: int | None,
+    min_der_samples: int | None,
+    min_wer_ref_words: int | None,
 ) -> dict[str, Any]:
     """Return a metadata-only G-WER gate decision."""
+    thresholds = _thresholds(
+        max_wer=max_wer,
+        max_der=max_der,
+        min_wer_samples=min_wer_samples,
+        min_der_samples=min_der_samples,
+        min_wer_ref_words=min_wer_ref_words,
+    )
     findings: list[str] = []
     findings.extend(_privacy_findings(wer_rows, label="wer"))
     findings.extend(_privacy_findings(der_rows, label="der"))
@@ -339,8 +416,12 @@ def evaluate_gate(
             "findings": findings,
         }
 
-    if max_wer is None or max_der is None:
-        findings.append("explicit max_wer and max_der thresholds are required")
+    missing_thresholds = [key for key, value in thresholds.items() if value is None]
+    if missing_thresholds:
+        findings.append(
+            "explicit G-WER/DER thresholds are required: "
+            + ", ".join(missing_thresholds)
+        )
     if not wer_rows:
         findings.append("no WER evidence rows supplied")
     if not der_rows:
@@ -393,7 +474,13 @@ def evaluate_gate(
             "selectedDer": _summarize_row(der_pilot, metric="der", value=der_value),
         }
 
-    if max_wer is None or max_der is None or wer_value is None or der_value is None:
+    if (
+        wer_pilot is None
+        or der_pilot is None
+        or wer_value is None
+        or der_value is None
+        or missing_thresholds
+    ):
         return {
             "schema": "faz24.gwer.quality-gate.v1",
             "status": "fail",
@@ -401,10 +488,15 @@ def evaluate_gate(
             "findings": ["internal gate invariant failed after blocked checks"],
         }
 
-    if wer_value > max_wer:
-        findings.append(f"pilot WER {wer_value:.4f} exceeds threshold {max_wer:.4f}")
-    if der_value > max_der:
-        findings.append(f"pilot DER {der_value:.4f} exceeds threshold {max_der:.4f}")
+    findings.extend(
+        _quality_findings(
+            wer_row=wer_pilot,
+            der_row=der_pilot,
+            wer_value=wer_value,
+            der_value=der_value,
+            thresholds=thresholds,
+        )
+    )
 
     return {
         "schema": "faz24.gwer.quality-gate.v1",
@@ -413,10 +505,7 @@ def evaluate_gate(
         "findings": findings,
         "werKinds": wer_kinds,
         "derKinds": der_kinds,
-        "thresholds": {
-            "maxWer": max_wer,
-            "maxDer": max_der,
-        },
+        "thresholds": thresholds,
         "selectedWer": _summarize_row(wer_pilot, metric="wer", value=wer_value),
         "selectedDer": _summarize_row(der_pilot, metric="der", value=der_value),
         "boundary": (
@@ -432,6 +521,9 @@ def main() -> int:
     parser.add_argument("--der-evidence", type=Path, required=True)
     parser.add_argument("--max-wer", type=float, default=None)
     parser.add_argument("--max-der", type=float, default=None)
+    parser.add_argument("--min-wer-samples", type=int, default=None)
+    parser.add_argument("--min-der-samples", type=int, default=None)
+    parser.add_argument("--min-wer-ref-words", type=int, default=None)
     args = parser.parse_args()
 
     result = evaluate_gate(
@@ -439,6 +531,9 @@ def main() -> int:
         der_rows=_load_rows(args.der_evidence),
         max_wer=args.max_wer,
         max_der=args.max_der,
+        min_wer_samples=args.min_wer_samples,
+        min_der_samples=args.min_der_samples,
+        min_wer_ref_words=args.min_wer_ref_words,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["status"] == "pass" else 1

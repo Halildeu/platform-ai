@@ -28,7 +28,10 @@ Tek oturumda üç ölçüm de alınabilir: aynı kayıt → WER (A) + DER (B) + 
    ```
    Pratik: `wer.py` ref+hyp alır. Hızlı yol — Python'da:
    `from wer import corpus_wer, normalize_tr; corpus_wer([(ref, hyp)])`.
-4. **Sonuç** → gerçek toplantı WER'i → docs/evidence'a not + #161 yorumu.
+4. **Sonuç** → gerçek toplantı WER'i → metadata-only WER row olarak
+   `docs/evidence/wer-pilot-<tarih>.jsonl` dosyasına yaz. Row ham audio path,
+   transcript, reference veya hypothesis metni taşımamalı; yalnız model/compute,
+   WER, `n_samples`, `ref_words`, hash ve latency/RTF gibi metadata taşımalı.
 
 ## Bölüm B — DER pilotu (2 kişi: sen + rızalı biri)
 > 2 farklı ses ŞART (diarization ayıracak şey ister). Kimlik önemsiz (anonim
@@ -52,8 +55,30 @@ Tek oturumda üç ölçüm de alınabilir: aynı kayıt → WER (A) + DER (B) + 
    # speechbrain (token gerekmez):
    python scripts\diar_matrix.py --backend speechbrain --device cuda --audio-dir tests\fixtures\diar-pilot --tag speechbrain-pilot
    ```
-4. **Sonuç** → gerçek DER (pyannote vs speechbrain) → ADR-0033'ü gerçek veriyle
-   doldur → G-WER gate kalibre → #161 kapanışa.
+4. **Sonuç** → gerçek DER (pyannote vs speechbrain) → metadata-only DER row olarak
+   `docs/evidence/der-pilot-<tarih>.jsonl` dosyasına yaz.
+
+## Bölüm B2 — G-WER/DER gate
+
+WER ve DER metadata row'ları hazırlandıktan sonra gate'i explicit denominator
+threshold'larıyla çalıştır:
+
+```powershell
+cd services\live-stt-service
+python scripts\gwer_gate.py `
+  --wer-evidence ..\..\docs\evidence\wer-pilot-<tarih>.jsonl `
+  --der-evidence ..\..\docs\evidence\der-pilot-<tarih>.jsonl `
+  --max-wer 0.25 `
+  --max-der 0.30 `
+  --min-wer-samples 3 `
+  --min-der-samples 3 `
+  --min-wer-ref-words 1000 `
+  > ..\..\docs\evidence\gwer-gate-pilot-<tarih>.json
+```
+
+**Sonuç** → gerçek WER + DER + denominator threshold PASS envelope → #161 +
+ADR-0033 kalibre. Bu hâlâ model/backend kalıcı seçimi değildir; reviewer/operator
+acceptance gerekir.
 
 > Not: `diar_matrix.py` collar **default 0.25** (dscore standardı) kullanır;
 > başka değer istersen `--collar 0.0` / `--skip-overlap` ekle. Promote-grade

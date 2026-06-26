@@ -22,7 +22,8 @@ diarization backend decision gate only.
 Use schema `faz24.ai-gate-ingest.v1` and one of these gate names:
 
 - `gwer`: requires `evidence.werRows`, `evidence.derRows`,
-  `thresholds.maxWer`, and `thresholds.maxDer`.
+  `thresholds.maxWer`, `thresholds.maxDer`, `thresholds.minWerSamples`,
+  `thresholds.minDerSamples`, and `thresholds.minWerRefWords`.
 - `glat-cost`: requires `evidence.rows` and explicit G-LAT/COST thresholds.
 - `gint`: requires `evidence.rows`, explicit G-INT thresholds, and pilot rows
   with `sha256:<64 hex>` `eval_set_hash`, `prompt_hash`,
@@ -45,7 +46,10 @@ Example G-WER envelope:
   "gate": "gwer",
   "thresholds": {
     "maxWer": 0.25,
-    "maxDer": 0.3
+    "maxDer": 0.3,
+    "minWerSamples": 3,
+    "minDerSamples": 3,
+    "minWerRefWords": 1000
   },
   "evidence": {
     "werRows": [
@@ -54,9 +58,14 @@ Example G-WER envelope:
         "dataset_kind": "pilot-meeting",
         "model": "deepdml/faster-whisper-large-v3-turbo-ct2",
         "compute": "float16",
+        "evidence_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "eval_set_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sample_manifest_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "sample_count_hash": "sha256:3d01889d9609ee20583304ab0a9bf686a9f83560bdfb4bae3471f1aac9b95120",
         "n_samples": 8,
         "wer": 0.18,
         "ref_words": 1200,
+        "ref_word_count_hash": "sha256:2a3a2c703a5e643a184856f3048cd6329a916d04a89ae2e36b69eb51b3573ab8",
         "rtf": 0.08,
         "p50_ms": 420
       }
@@ -67,6 +76,10 @@ Example G-WER envelope:
         "fixture_kind": "pilot-meeting",
         "backend": "pyannote",
         "model": "pyannote/speaker-diarization-3.1",
+        "evidence_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eval_set_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sample_manifest_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sample_count_hash": "sha256:c6bfbbaa59a6f4994aa14ce8bb723142bef54473ab306f49648e735429e4e54e",
         "n_samples": 8,
         "der_corpus": 0.22,
         "collar": 0.25,

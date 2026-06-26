@@ -281,6 +281,11 @@ def _dispatch_gwer(envelope: dict[str, Any]) -> dict[str, Any]:
         der_rows=_rows(evidence, "derRows", "der_rows"),
         max_wer=_float_threshold(thresholds, "maxWer", "max_wer"),
         max_der=_float_threshold(thresholds, "maxDer", "max_der"),
+        min_wer_samples=_int_threshold(thresholds, "minWerSamples", "min_wer_samples"),
+        min_der_samples=_int_threshold(thresholds, "minDerSamples", "min_der_samples"),
+        min_wer_ref_words=_int_threshold(
+            thresholds, "minWerRefWords", "min_wer_ref_words"
+        ),
     )
 
 
