@@ -257,6 +257,30 @@ class Faz24AiGateIngestTests(unittest.TestCase):
         self.assertNotIn("secret-token", rendered)
         self.assertNotIn("ali@example.com", rendered)
 
+    def test_common_token_shapes_rejected_before_source_dispatch_without_echo(
+        self,
+    ) -> None:
+        token_samples = [
+            "sk-abcdefghijklmnopqrstuvwxyz123456",
+            "xoxb-123456789012-ABCDEFGHIJKL",
+            "ghp_abcdefghijklmnopqrstuvwxyz123456",
+            "github_pat_1234567890abcdefghijklmnopqrstuvwxyz",
+        ]
+
+        for token in token_samples:
+            with self.subTest(token_prefix=token[:4]):
+                envelope = _glat_cost_envelope()
+                rows = envelope["evidence"]["rows"]  # type: ignore[index]
+                rows[0]["operator_note"] = f"token={token}"  # type: ignore[index]
+
+                result = ingest.evaluate_envelope(envelope)
+
+                self.assertEqual(result["status"], "fail")
+                self.assertFalse(result["sourceInvoked"])
+                rendered = json.dumps(result, ensure_ascii=False)
+                self.assertIn("secret-shaped", rendered)
+                self.assertNotIn(token, rendered)
+
     def test_unsupported_gate_is_rejected(self) -> None:
         envelope = _gwer_envelope()
         envelope["gate"] = "unknown"
