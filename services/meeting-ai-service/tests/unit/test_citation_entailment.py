@@ -111,7 +111,7 @@ def test_d8_1_ungrounded_decision_is_withheld() -> None:
     class _StubAnalyzer:
         def analyze(self, transcript: str) -> AnalysisDraft:
             return AnalysisDraft(
-                summary="özet",
+                summary="",
                 decisions=["Bütçe artışı onaylandı", "Şirket yeni fabrika açtı"],
                 action_items=[],
             )
@@ -150,7 +150,7 @@ def test_action_owner_absent_from_grounded_source_is_withheld() -> None:
     class _StubAnalyzer:
         def analyze(self, transcript: str) -> AnalysisDraft:
             return AnalysisDraft(
-                summary="özet",
+                summary="",
                 decisions=[],
                 action_items=[ActionItem(text="Rapor cuma gününe kadar hazırlanacak", owner="Ali")],
             )
@@ -180,7 +180,7 @@ def test_action_owner_in_grounded_source_is_kept() -> None:
     class _StubAnalyzer:
         def analyze(self, transcript: str) -> AnalysisDraft:
             return AnalysisDraft(
-                summary="özet",
+                summary="",
                 decisions=[],
                 action_items=[
                     ActionItem(text="Ali raporu cuma gününe kadar hazırlayacak", owner="Ali")
@@ -198,3 +198,65 @@ def test_action_owner_in_grounded_source_is_kept() -> None:
 
     assert result.action_items[0].owner == "Ali"
     assert result.ungrounded_count == 0
+
+
+def test_unsupported_summary_sentence_is_withheld() -> None:
+    """User-visible summary prose must be filtered like decisions/actions."""
+    from app.core.config import Settings
+    from app.services.analyze import AnalysisDraft, MeetingAnalysisService
+
+    class _StubAnalyzer:
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            return AnalysisDraft(
+                summary="Bütçe artışı onaylandı. Şirket yeni fabrika açtı.",
+                decisions=[],
+                action_items=[],
+            )
+
+        @property
+        def model_loaded(self) -> bool:
+            return True
+
+    svc = MeetingAnalysisService(
+        Settings(backend="mock", redact_pii=False), analyzer=_StubAnalyzer()
+    )
+    result = svc.analyze("Bütçe artışı onaylandı.")
+
+    assert result.summary == "Bütçe artışı onaylandı."
+    assert result.summary_grounding_status == "partial_verified"
+    assert len(result.summary_citations) == 1
+    assert result.summary_citations[0].claim == "Bütçe artışı onaylandı."
+    assert result.ungrounded_count == 0
+    assert len(result.rejected_claims) == 1
+    assert result.rejected_claims[0].kind == "summary"
+    assert result.rejected_claims[0].claim == "Şirket yeni fabrika açtı."
+    assert "fabrika" not in result.summary
+
+
+def test_fully_ungrounded_summary_uses_fixed_safe_text() -> None:
+    from app.core.config import Settings
+    from app.services.analyze import AnalysisDraft, MeetingAnalysisService
+
+    class _StubAnalyzer:
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            return AnalysisDraft(
+                summary="Şirket yeni fabrika açtı.",
+                decisions=[],
+                action_items=[],
+            )
+
+        @property
+        def model_loaded(self) -> bool:
+            return True
+
+    svc = MeetingAnalysisService(
+        Settings(backend="mock", redact_pii=False), analyzer=_StubAnalyzer()
+    )
+    result = svc.analyze("Bütçe artışı onaylandı.")
+
+    assert result.summary == ""
+    assert result.summary_grounding_status == "withheld"
+    assert result.summary_citations == []
+    assert result.ungrounded_count == 0
+    assert len(result.rejected_claims) == 1
+    assert result.rejected_claims[0].kind == "summary"

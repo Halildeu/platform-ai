@@ -17,6 +17,8 @@ def test_analyze_mock_returns_summary() -> None:
     body = resp.json()
     assert body["backend"] == "mock"
     assert body["redacted"] is True
+    assert body["summary_grounding_status"] in ("verified", "partial_verified")
+    assert body["summary_citations"]
     assert len(body["summary"]) > 0
 
 

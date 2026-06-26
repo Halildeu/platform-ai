@@ -22,6 +22,7 @@ import httpx
 from app.core.config import Settings
 from app.models.schemas import ActionItem, AnalyzeResponse, Citation, RejectedClaim
 from app.services.citation import Citation as GroundedCitation
+from app.services.citation import Sentence as GroundedSentence
 from app.services.citation import ground_claim, owner_supported_by_source, split_sentences
 from app.services.redact import assert_no_residual_pii, redact_pii
 
@@ -79,6 +80,7 @@ _ACTION_CUES = (
     "todo",
     "to-do",
 )
+_SUMMARY_GROUNDING_THRESHOLD = 0.65
 
 
 def _sentences(text: str) -> list[str]:
@@ -320,6 +322,42 @@ def _with_grounded_owner(
     )
 
 
+def _ground_summary(
+    summary: str, sentences: list[GroundedSentence]
+) -> tuple[str, str, list[Citation], list[RejectedClaim]]:
+    """Return only summary sentences that survive the citation guard.
+
+    Decisions/actions have been verified-only since ADR-0043 D8.1. A free-form
+    summary is just as user-visible, so unsupported summary prose must not be
+    shown merely because the response labels it "unverified". Use a stricter
+    threshold than discrete claims: summary sentences are longer and can hide a
+    hallucinated clause behind a few overlapping words.
+    """
+    claims = _sentences(summary)
+    if not claims:
+        return "", "empty", [], []
+
+    kept: list[str] = []
+    citations: list[Citation] = []
+    rejected: list[RejectedClaim] = []
+    for claim in claims:
+        verdict = ground_claim(claim, sentences, threshold=_SUMMARY_GROUNDING_THRESHOLD)
+        if verdict.grounded:
+            kept.append(claim)
+            citations.append(_to_schema_citation(verdict))
+        else:
+            rejected.append(_to_rejected(claim, "summary", verdict))
+
+    if len(kept) == len(claims):
+        status = "verified"
+    elif kept:
+        status = "partial_verified"
+    else:
+        status = "withheld"
+    safe_summary = " ".join(kept) if kept else ""
+    return safe_summary, status, citations, rejected
+
+
 class MeetingAnalysisService:
     """Redact-then-analyze meeting AI service."""
 
@@ -352,10 +390,15 @@ class MeetingAnalysisService:
         # claims; withhold ungrounded/contradicted ones into `rejected_claims` so they
         # are auditable but never presented as fact (fail-closed hallucination guard).
         sentences = split_sentences(redacted, segments)
+        (
+            safe_summary,
+            summary_grounding_status,
+            summary_citations,
+            rejected,
+        ) = _ground_summary(draft.summary, sentences)
         kept_decisions: list[str] = []
         kept_actions: list[ActionItem] = []
         citations: list[Citation] = []
-        rejected: list[RejectedClaim] = []
 
         for decision in draft.decisions:
             if not decision.strip():
@@ -381,14 +424,17 @@ class MeetingAnalysisService:
                 rejected.append(_to_rejected(action.text, "action", verdict))
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
+        ungrounded_decision_action_count = sum(1 for claim in rejected if claim.kind != "summary")
 
         return AnalyzeResponse(
-            summary=draft.summary,
+            summary=safe_summary,
+            summary_grounding_status=summary_grounding_status,
+            summary_citations=summary_citations,
             decisions=kept_decisions,
             action_items=kept_actions,
             citations=citations,
             rejected_claims=rejected,
-            ungrounded_count=len(rejected),
+            ungrounded_count=ungrounded_decision_action_count,
             redacted=self._settings.redact_pii,
             redaction_count=count,
             backend=self._settings.backend,

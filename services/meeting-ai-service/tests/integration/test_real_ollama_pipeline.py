@@ -9,8 +9,8 @@ against a live Ollama and proves, on real model output:
   2. EVERY shipped decision/action carries a PASSED citation;
   3. EVERY citation's hash/offset round-trips into the (redacted) transcript — the
      span is real, not model-invented;
-  4. the explicit contract holds (grounding_policy=verified_only,
-     summary_grounding_status=unverified);
+  4. the explicit contract holds (grounding_policy=verified_only, summary prose is
+     verified/partial/withheld before user exposure);
   5. any claim the LLM produced that is NOT grounded is WITHHELD into rejected_claims
      (the hallucination guard no competitor ships).
 
@@ -83,7 +83,10 @@ def test_real_ollama_every_shipped_claim_is_verified(monkeypatch) -> None:  # ty
 
     # (4) explicit verified-only contract
     assert body["grounding_policy"] == "verified_only"
-    assert body["summary_grounding_status"] == "unverified"
+    assert body["summary_grounding_status"] in {"verified", "partial_verified", "withheld"}
+    for c in body["summary_citations"]:
+        assert c["status"] == "PASSED"
+        assert c["grounded"] is True
 
     # (2)+(3) every shipped decision/action is backed by a PASSED citation whose
     # hash/offset round-trips into the transcript — proof the span is REAL.
@@ -105,8 +108,14 @@ def test_real_ollama_every_shipped_claim_is_verified(monkeypatch) -> None:  # ty
         assert span == c["source_text"], "citation offset must point at the cited span"
         assert hashlib.sha256(span.encode()).hexdigest() == c["source_hash"]
 
-    # (5) any ungrounded LLM claim was WITHHELD, not shipped
-    assert body["ungrounded_count"] == len(body["rejected_claims"])
+    # (5) any ungrounded LLM claim was WITHHELD, not shipped. `ungrounded_count`
+    # preserves the v2 decision/action count; summary rejections are exposed by kind.
+    assert body["ungrounded_count"] == len(
+        [rc for rc in body["rejected_claims"] if rc["kind"] != "summary"]
+    )
     for rc in body["rejected_claims"]:
-        assert rc["claim"] not in body["decisions"]
-        assert rc["claim"] not in [a["text"] for a in body["action_items"]]
+        if rc["kind"] == "summary":
+            assert rc["claim"] not in body["summary"]
+        else:
+            assert rc["claim"] not in body["decisions"]
+            assert rc["claim"] not in [a["text"] for a in body["action_items"]]

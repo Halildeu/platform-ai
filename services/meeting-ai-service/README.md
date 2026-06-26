@@ -25,9 +25,14 @@ against the transcript with **deterministic contradiction gates**, not merely ov
 > **Honest scope (v1):** this is **verified span-grounding with deterministic
 > contradiction gates**, NOT full NLI entailment. It is model-free / CPU-only; it
 > high-precision-FAILs the cases overlap and embedding-cosine miss (negation/number),
-> but it does not prove positive entailment. The **`summary` is unverified narrative**
-> (`summary_grounding_status=unverified`); only `decisions`/`action_items` carry the
-> verified-grounding guarantee. Entity-NER + embedding + summary-grounding are roadmap.
+> but it does not prove positive entailment. The **`summary` is also exposure-guarded**:
+> only summary sentences that pass the same transcript-span guard are returned.
+> Unsupported summary prose is withheld and tracked through
+> `rejected_claims[].kind=summary`; `summary_grounding_status` is
+> `verified`, `partial_verified`, `withheld`, or `empty`. When fully withheld,
+> `summary` is an empty string; clients should render any fallback copy from the
+> status field rather than treating a static API string as meeting data.
+> Entity-NER + embedding-backed semantic summary grounding are roadmap.
 
 A claim is `PASSED` (shipped) only if its best-matching sentence survives a layered,
 CPU-only, zero-model verifier (`app/services/citation.py`):
@@ -42,10 +47,12 @@ CPU-only, zero-model verifier (`app/services/citation.py`):
    unsupported assignment is recorded as `rejected_claims[].kind=action_owner`.
 
 Verdicts are 3-way (`PASSED` / `FAILED` / `LOW_CONFIDENCE`); only `PASSED` reaches the
-user-visible `decisions`/`action_items`. **Ungrounded/contradicted claims are withheld**
-into `rejected_claims` (auditable, never presented as fact — ADR-0043 D8.1 fail-closed).
-Each citation carries a hash/offset key (`source_char_start/end`, `source_hash`,
-`quote_hash`) pinning it to the exact transcript span.
+user-visible `summary`, `decisions`, or `action_items`. **Ungrounded/contradicted
+claims are withheld** into `rejected_claims` (auditable, never presented as fact —
+ADR-0043 D8.1 fail-closed). Each citation carries a hash/offset key
+(`source_char_start/end`, `source_hash`, `quote_hash`) pinning it to the exact
+transcript span. Summary citations live in `summary_citations`; decision/action
+citations live in `citations`.
 
 ## G-INT evidence gate
 
