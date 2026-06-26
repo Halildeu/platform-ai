@@ -36,6 +36,8 @@ def _pilot_row(**overrides: object) -> dict[str, object]:
         "sample_manifest_hash": _sha("c"),
         "n_samples": 8,
         "grounding_rate": 1.0,
+        "citation_coverage": 1.0,
+        "summary_verified_rate": 1.0,
         "action_precision": 0.86,
         "action_recall": 0.83,
         "action_f1": 0.845,
@@ -61,6 +63,8 @@ def _pilot_row(**overrides: object) -> dict[str, object]:
 def _thresholds() -> dict[str, object]:
     return {
         "min_grounding_rate": 0.95,
+        "min_citation_coverage": 1.0,
+        "min_summary_verified_rate": 0.90,
         "min_action_precision": 0.80,
         "min_action_recall": 0.80,
         "min_decision_precision": 0.75,
@@ -86,6 +90,8 @@ def test_gate_passes_with_pilot_gint_under_thresholds() -> None:
     assert result["findingCount"] == 0
     assert result["selectedGint"]["kind"] == "pilot-meeting"
     assert result["selectedGint"]["grounding_rate"] == 1.0
+    assert result["selectedGint"]["citation_coverage"] == 1.0
+    assert result["selectedGint"]["summary_verified_rate"] == 1.0
     assert result["selectedGint"]["eval_set_hash"] == _sha("a")
     assert result["selectedGint"]["prompt_hash"] == _sha("b")
     assert result["selectedGint"]["sample_manifest_hash"] == _sha("c")
@@ -106,6 +112,8 @@ def test_synthetic_rows_do_not_satisfy_pilot_gate() -> None:
                 "prompt_hash": "prompthash",
                 "n_samples": 8,
                 "grounding_rate": 1.0,
+                "citation_coverage": 1.0,
+                "summary_verified_rate": 1.0,
                 "action_precision": 1.0,
                 "action_recall": 1.0,
                 "decision_precision": 1.0,
@@ -226,10 +234,26 @@ def test_thresholds_are_required() -> None:
     )
 
 
+def test_pilot_row_requires_citation_coverage_metadata() -> None:
+    row = _pilot_row()
+    row.pop("citation_coverage")
+    row.pop("summary_verified_rate")
+
+    result = _evaluate([row])
+
+    assert result["status"] == "blocked"
+    assert any(
+        "citation_coverage, summary_verified_rate" in finding
+        for finding in result["findings"]
+    )
+
+
 @pytest.mark.parametrize(
     ("metric", "value"),
     [
         ("grounding_rate", 0.90),
+        ("citation_coverage", 0.95),
+        ("summary_verified_rate", 0.80),
         ("action_precision", 0.70),
         ("action_recall", 0.70),
         ("decision_precision", 0.70),

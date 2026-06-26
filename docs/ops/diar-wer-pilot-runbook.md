@@ -88,6 +88,8 @@ Tek oturumda üç ölçüm de alınabilir: aynı kayıt → WER (A) + DER (B) + 
    python scripts\gint_gate.py `
      --gint-evidence ..\..\docs\evidence\intel-eval-pilot-<tarih>.jsonl `
      --min-grounding-rate 0.95 `
+     --min-citation-coverage 1.0 `
+     --min-summary-verified-rate 0.90 `
      --min-action-precision 0.80 `
      --min-action-recall 0.80 `
      --min-decision-precision 0.75 `
@@ -99,8 +101,9 @@ Tek oturumda üç ölçüm de alınabilir: aynı kayıt → WER (A) + DER (B) + 
      --min-samples 3 `
      > ..\..\docs\evidence\gint-gate-pilot-<tarih>.json
    ```
-4. **Sonuç** → gerçek G-INT (grounding rate + decision/action P/R) + verifier
-   `status=pass` → #162 + ADR-0034 kalibre (sentetik-smoke yerine gerçek sayı).
+4. **Sonuç** → gerçek G-INT (grounding rate + citation coverage + summary verified
+   rate + decision/action P/R) + verifier `status=pass` → #162 + ADR-0034 kalibre
+   (sentetik-smoke yerine gerçek sayı).
    Lexical metrik olduğu unutulmasın (token-overlap, semantik değil).
 
 ## Ön hazırlık (pilot öncesi, GPU host)

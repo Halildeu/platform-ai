@@ -75,6 +75,8 @@ _SHA256_RE = re.compile(r"^sha256:[a-f0-9]{64}$", re.IGNORECASE)
 
 _MIN_METRICS = {
     "grounding_rate": "minGroundingRate",
+    "citation_coverage": "minCitationCoverage",
+    "summary_verified_rate": "minSummaryVerifiedRate",
     "action_precision": "minActionPrecision",
     "action_recall": "minActionRecall",
     "decision_precision": "minDecisionPrecision",
@@ -205,6 +207,8 @@ def _privacy_findings(rows: list[dict[str, Any]]) -> list[str]:
 def _thresholds(
     *,
     min_grounding_rate: float | None,
+    min_citation_coverage: float | None,
+    min_summary_verified_rate: float | None,
     min_action_precision: float | None,
     min_action_recall: float | None,
     min_decision_precision: float | None,
@@ -217,6 +221,8 @@ def _thresholds(
 ) -> dict[str, float | int | None]:
     return {
         "minGroundingRate": min_grounding_rate,
+        "minCitationCoverage": min_citation_coverage,
+        "minSummaryVerifiedRate": min_summary_verified_rate,
         "minActionPrecision": min_action_precision,
         "minActionRecall": min_action_recall,
         "minDecisionPrecision": min_decision_precision,
@@ -371,6 +377,8 @@ def _summarize_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "sample_manifest_hash": row.get("sample_manifest_hash"),
         "sample_count_hash": row.get("sample_count_hash"),
         "grounding_rate": row.get("grounding_rate"),
+        "citation_coverage": row.get("citation_coverage"),
+        "summary_verified_rate": row.get("summary_verified_rate"),
         "action_precision": row.get("action_precision"),
         "action_recall": row.get("action_recall"),
         "action_f1": row.get("action_f1"),
@@ -393,6 +401,8 @@ def evaluate_gate(
     *,
     rows: list[dict[str, Any]],
     min_grounding_rate: float | None,
+    min_citation_coverage: float | None,
+    min_summary_verified_rate: float | None,
     min_action_precision: float | None,
     min_action_recall: float | None,
     min_decision_precision: float | None,
@@ -406,6 +416,8 @@ def evaluate_gate(
     """Return a metadata-only G-INT gate decision."""
     thresholds = _thresholds(
         min_grounding_rate=min_grounding_rate,
+        min_citation_coverage=min_citation_coverage,
+        min_summary_verified_rate=min_summary_verified_rate,
         min_action_precision=min_action_precision,
         min_action_recall=min_action_recall,
         min_decision_precision=min_decision_precision,
@@ -503,6 +515,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Verify Faz 24 T-C G-INT quality gate")
     parser.add_argument("--gint-evidence", type=Path, required=True)
     parser.add_argument("--min-grounding-rate", type=float, default=None)
+    parser.add_argument("--min-citation-coverage", type=float, default=None)
+    parser.add_argument("--min-summary-verified-rate", type=float, default=None)
     parser.add_argument("--min-action-precision", type=float, default=None)
     parser.add_argument("--min-action-recall", type=float, default=None)
     parser.add_argument("--min-decision-precision", type=float, default=None)
@@ -517,6 +531,8 @@ def main() -> int:
     result = evaluate_gate(
         rows=_load_rows(args.gint_evidence),
         min_grounding_rate=args.min_grounding_rate,
+        min_citation_coverage=args.min_citation_coverage,
+        min_summary_verified_rate=args.min_summary_verified_rate,
         min_action_precision=args.min_action_precision,
         min_action_recall=args.min_action_recall,
         min_decision_precision=args.min_decision_precision,

@@ -12,8 +12,9 @@
 ("AI dedi" değil "şu cümleden çıkarıldı"). The 2-AI istişare (Claude + Codex
 `019ed1f5`) concluded that for a regulated (KVKK) sector the differentiator is
 **grounded output**, not raw summarization. The acceptance gate is **G-INT**:
-summary grounding (lexical proxy for faithfulness) + action-item
-precision/recall ≥ target + every output carries a citation.
+summary grounding (lexical proxy for faithfulness) + metadata-only summary
+verified rate + every shipped output carrying a PASSED citation + action-item
+precision/recall ≥ target.
 
 A regulated customer cannot be forced onto a single deployment mode: some
 tenants require fully on-prem self-host (no data leaves the cluster), others
@@ -110,9 +111,10 @@ this service. This ADR records the requirement; the manifest is its enforcement.
 
 Synthetic G-INT numbers are in (2026-06-17, `llama3.1:8b`). Promote to **ACCEPTED**
 when `intel_eval.py` has been run on a **real-meeting** transcript (consent +
-neutral content, recording imha'd after measurement) and grounding rate +
-decision/action precision/recall meet the G-INT target — ideally with a semantic
-faithfulness check (entailment), not lexical-only.
+neutral content, recording imha'd after measurement) and grounding rate,
+citation coverage, summary verified rate, and decision/action precision/recall
+meet the G-INT target — ideally with a semantic faithfulness check (entailment),
+not lexical-only.
 
 Acceptance evidence now has two files:
 

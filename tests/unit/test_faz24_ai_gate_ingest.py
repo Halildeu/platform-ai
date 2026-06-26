@@ -120,6 +120,8 @@ def _gint_envelope() -> dict[str, object]:
         "gate": "gint",
         "thresholds": {
             "minGroundingRate": 0.95,
+            "minCitationCoverage": 1.0,
+            "minSummaryVerifiedRate": 0.90,
             "minActionPrecision": 0.80,
             "minActionRecall": 0.80,
             "minDecisionPrecision": 0.75,
@@ -144,6 +146,8 @@ def _gint_envelope() -> dict[str, object]:
                     "sample_count_hash": _sample_count_hash(_sha("c"), 8),
                     "n_samples": 8,
                     "grounding_rate": 1.0,
+                    "citation_coverage": 1.0,
+                    "summary_verified_rate": 1.0,
                     "action_precision": 0.86,
                     "action_recall": 0.83,
                     "action_f1": 0.845,
