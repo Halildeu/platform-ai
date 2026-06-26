@@ -14,12 +14,18 @@ sys.path.insert(0, str(_SCRIPTS))
 import gwer_gate  # noqa: E402
 
 
+def _sha(char: str) -> str:
+    return "sha256:" + (char * 64)
+
+
 def _pilot_wer(value: float = 0.18) -> dict[str, object]:
     return {
         "tag": "pilot-large-v3-turbo",
         "dataset_kind": "pilot-meeting",
         "model": "deepdml/faster-whisper-large-v3-turbo-ct2",
         "compute": "float16",
+        "evidence_hash": _sha("a"),
+        "eval_set_hash": _sha("b"),
         "n_samples": 8,
         "wer": value,
         "ref_words": 1200,
@@ -34,6 +40,8 @@ def _pilot_der(value: float = 0.22) -> dict[str, object]:
         "fixture_kind": "pilot-meeting",
         "backend": "pyannote",
         "model": "pyannote/speaker-diarization-3.1",
+        "evidence_hash": _sha("c"),
+        "eval_set_hash": _sha("d"),
         "n_samples": 8,
         "der_corpus": value,
         "collar": 0.25,
@@ -53,7 +61,11 @@ def test_gate_passes_with_pilot_wer_and_der_under_threshold() -> None:
     assert result["status"] == "pass"
     assert result["findingCount"] == 0
     assert result["selectedWer"]["value"] == 0.18
+    assert result["selectedWer"]["evidence_hash"] == _sha("a")
+    assert result["selectedWer"]["eval_set_hash"] == _sha("b")
     assert result["selectedDer"]["value"] == 0.22
+    assert result["selectedDer"]["evidence_hash"] == _sha("c")
+    assert result["selectedDer"]["eval_set_hash"] == _sha("d")
 
 
 def test_common_voice_and_synthetic_do_not_satisfy_pilot_gate() -> None:
@@ -118,13 +130,67 @@ def test_thresholds_are_required() -> None:
     assert "explicit max_wer and max_der thresholds are required" in result["findings"]
 
 
+def test_pilot_label_alone_does_not_satisfy_wer_or_der_gate() -> None:
+    wer = _pilot_wer(0.18)
+    der = _pilot_der(0.22)
+    del wer["evidence_hash"]
+    del wer["eval_set_hash"]
+    del der["evidence_hash"]
+    del der["eval_set_hash"]
+
+    result = gwer_gate.evaluate_gate(
+        wer_rows=[wer],
+        der_rows=[der],
+        max_wer=0.25,
+        max_der=0.30,
+    )
+
+    assert result["status"] == "blocked"
+    assert any(
+        "wer pilot row 1 is missing required metadata" in item
+        for item in result["findings"]
+    )
+    assert any(
+        "der pilot row 1 is missing required metadata" in item
+        for item in result["findings"]
+    )
+    assert any("no complete pilot WER row" in item for item in result["findings"])
+    assert any("no complete pilot DER row" in item for item in result["findings"])
+
+
+def test_pilot_hashes_must_be_full_sha256_values() -> None:
+    wer = _pilot_wer(0.18)
+    der = _pilot_der(0.22)
+    wer["evidence_hash"] = "sha256:not-a-real-digest"
+    der["eval_set_hash"] = "abc123"
+
+    result = gwer_gate.evaluate_gate(
+        wer_rows=[wer],
+        der_rows=[der],
+        max_wer=0.25,
+        max_der=0.30,
+    )
+
+    assert result["status"] == "blocked"
+    assert any(
+        "wer pilot row 1 evidence_hash must be sha256" in item
+        for item in result["findings"]
+    )
+    assert any(
+        "der pilot row 1 eval_set_hash must be sha256" in item
+        for item in result["findings"]
+    )
+
+
 @pytest.mark.parametrize(
     "unsafe_key",
     ["audio_path", "hypothesis", "reference", "transcript", "wav"],
 )
 def test_gate_rejects_raw_audio_or_text_fields(unsafe_key: str) -> None:
     row = _pilot_wer(0.18)
-    row[unsafe_key] = "customer-meeting.wav" if unsafe_key in {"audio_path", "wav"} else "raw text"
+    row[unsafe_key] = (
+        "customer-meeting.wav" if unsafe_key in {"audio_path", "wav"} else "raw text"
+    )
 
     result = gwer_gate.evaluate_gate(
         wer_rows=[row],
@@ -158,7 +224,8 @@ def test_gate_rejects_nested_audio_or_text_fields() -> None:
 def test_load_rows_supports_jsonl_and_object_with_rows(tmp_path: Path) -> None:
     jsonl = tmp_path / "wer.jsonl"
     jsonl.write_text(
-        json.dumps(_pilot_wer(0.18), ensure_ascii=False) + "\n"
+        json.dumps(_pilot_wer(0.18), ensure_ascii=False)
+        + "\n"
         + json.dumps(_pilot_wer(0.19), ensure_ascii=False)
         + "\n",
         encoding="utf-8",
