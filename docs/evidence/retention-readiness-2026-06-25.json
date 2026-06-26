@@ -1,7 +1,7 @@
 {
   "schema": "faz24.retention-readiness.v1",
   "evidence_id": "retention-readiness-2026-06-25-current",
-  "generated_at": "2026-06-26T06:10:00+03:00",
+  "generated_at": "2026-06-26T06:50:00+03:00",
   "source_refs": [
     "platform-ai#156",
     "platform-ai#158",
@@ -10,7 +10,9 @@
     "docs/adr/0032-tenant-isolation-transcript-db.md",
     "platform-backend#764",
     "platform-k8s-gitops#2041",
-    "platform-k8s-gitops:docs/faz-24-evidence/2026-06-26-retention-runtime-smoke.md"
+    "platform-k8s-gitops:docs/faz-24-evidence/2026-06-26-retention-runtime-smoke.md",
+    "docs/evidence/minio-lifecycle-runtime-2026-06-26.json",
+    "platform-ai#156 issuecomment-4805932172"
   ],
   "verbis": {
     "status": "pending",
@@ -19,24 +21,45 @@
   "layers": [
     {
       "id": "minio.meeting-audio",
-      "status": "blocked",
+      "status": "active",
       "mechanism": "s3-lifecycle",
       "retention_days": 7,
-      "evidence_ref": "deploy/minio/setup-lifecycle.sh source rule exists; runtime mc ilm export evidence pending"
+      "evidence_ref": "docs/evidence/minio-lifecycle-runtime-2026-06-26.json",
+      "bucket_name": "meeting-audio",
+      "observed_expiration_days": 7,
+      "observed_rule_status": "Enabled",
+      "runtime_environment": "k3d-test/staging-sw host-compose MinIO test",
+      "lifecycle_export_ref": "platform-ai#156 issuecomment-4805932172",
+      "runtime_evidence_ref": "docs/evidence/minio-lifecycle-runtime-2026-06-26.json",
+      "evidence_payload": "metadata-only"
     },
     {
       "id": "minio.transcripts",
-      "status": "blocked",
+      "status": "active",
       "mechanism": "s3-lifecycle",
       "retention_days": 365,
-      "evidence_ref": "deploy/minio/setup-lifecycle.sh source rule exists; runtime mc ilm export evidence pending"
+      "evidence_ref": "docs/evidence/minio-lifecycle-runtime-2026-06-26.json",
+      "bucket_name": "transcripts",
+      "observed_expiration_days": 365,
+      "observed_rule_status": "Enabled",
+      "runtime_environment": "k3d-test/staging-sw host-compose MinIO test",
+      "lifecycle_export_ref": "platform-ai#156 issuecomment-4805932172",
+      "runtime_evidence_ref": "docs/evidence/minio-lifecycle-runtime-2026-06-26.json",
+      "evidence_payload": "metadata-only"
     },
     {
       "id": "minio.audit-archive",
-      "status": "blocked",
+      "status": "active",
       "mechanism": "s3-lifecycle",
       "retention_days": 2557,
-      "evidence_ref": "deploy/minio/setup-lifecycle.sh source rule exists; runtime mc ilm export evidence pending"
+      "evidence_ref": "docs/evidence/minio-lifecycle-runtime-2026-06-26.json",
+      "bucket_name": "audit-archive",
+      "observed_expiration_days": 2557,
+      "observed_rule_status": "Enabled",
+      "runtime_environment": "k3d-test/staging-sw host-compose MinIO test",
+      "lifecycle_export_ref": "platform-ai#156 issuecomment-4805932172",
+      "runtime_evidence_ref": "docs/evidence/minio-lifecycle-runtime-2026-06-26.json",
+      "evidence_payload": "metadata-only"
     },
     {
       "id": "db.transcript-records",

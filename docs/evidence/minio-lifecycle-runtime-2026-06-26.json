@@ -1,0 +1,52 @@
+{
+  "schema": "faz24.minio-lifecycle-runtime-evidence.v1",
+  "evidence_id": "minio-lifecycle-runtime-2026-06-26-test",
+  "generated_at": "2026-06-26T06:45:00+03:00",
+  "runtime_environment": "k3d-test/staging-sw host-compose MinIO test",
+  "target": {
+    "host_ref": "staging-sw",
+    "container_ref": "minio-minio-test-1",
+    "scope": "test-minio-only"
+  },
+  "privacy_boundary": {
+    "metadata_only": true,
+    "raw_audio_included": false,
+    "transcript_included": false,
+    "prompt_or_response_included": false,
+    "object_keys_included": false,
+    "secret_values_included": false
+  },
+  "method": {
+    "client": "mc ilm rule export",
+    "mc_config": "temporary MC_CONFIG_DIR removed after export",
+    "mutation": "added missing audit-archive 2557-day lifecycle rule before final export",
+    "issue_evidence_ref": "platform-ai#156 issuecomment-4805932172"
+  },
+  "buckets": [
+    {
+      "bucket_name": "meeting-audio",
+      "expected_expiration_days": 7,
+      "observed_expiration_days": 7,
+      "observed_rule_status": "Enabled",
+      "rule_id_ref": "runtime-export-rule-id-present",
+      "evidence_payload": "metadata-only"
+    },
+    {
+      "bucket_name": "transcripts",
+      "expected_expiration_days": 365,
+      "observed_expiration_days": 365,
+      "observed_rule_status": "Enabled",
+      "rule_id_ref": "runtime-export-rule-id-present",
+      "evidence_payload": "metadata-only"
+    },
+    {
+      "bucket_name": "audit-archive",
+      "expected_expiration_days": 2557,
+      "observed_expiration_days": 2557,
+      "observed_rule_status": "Enabled",
+      "rule_id_ref": "runtime-export-rule-id-present",
+      "evidence_payload": "metadata-only"
+    }
+  ],
+  "boundary": "This proves test MinIO lifecycle runtime metadata only. It does not prove VERBIS/legal acceptance, production lifecycle, object deletion, DB cleanup, G-COMP pass, direct-STT, raw-audio governance, or go-live readiness."
+}

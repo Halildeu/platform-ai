@@ -14,16 +14,15 @@ python3 scripts/retention_gate.py \
 ```
 
 Beklenen mevcut sonuç: `status=blocked`. Bu doğru durumdur; DB cleanup katmanı
-test runtime smoke ile kanıtlıdır, fakat MinIO lifecycle için metadata-only
-runtime export kanıtı ve VERBIS portal/operator kararı henüz go-live kabulüne
-yetmez.
+test runtime smoke ile, MinIO lifecycle katmanı ise metadata-only runtime export
+ile kanıtlıdır. VERBIS portal/operator kararı henüz go-live kabulüne yetmez.
 
 ## Status Anlamı
 
 | Status | Anlam |
 |---|---|
 | `pass` | Tüm required layer'lar aktif, süreler doğru, MinIO runtime lifecycle export kanıtı var, DB cleanup job + transcript-free imha audit kanıtı var, VERBIS recorded/exempt-confirmed. |
-| `blocked` | Kanıt eksik veya bilinçli pending; örn. MinIO runtime export veya VERBIS kararı yok. Bu, fake closure engelidir. |
+| `blocked` | Kanıt eksik veya bilinçli pending; mevcut snapshot'ta VERBIS kararı yok. Bu, fake closure engelidir. |
 | `fail` | Kanıt şekli hatalı, süre uyumsuz, aktif MinIO iddiası runtime export refsiz, aktif DB iddiası cleanup/audit refsiz, ya da evidence içinde raw transcript/audio/PII/secret benzeri değer var. |
 
 ## Required Layer'lar
