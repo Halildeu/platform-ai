@@ -71,6 +71,24 @@ def test_fused_claim_with_unsupported_clause_is_rejected() -> None:
     assert "unsupported content" in c.reason
 
 
+def test_short_unsupported_clause_is_rejected_even_when_coverage_is_high() -> None:
+    # Regression: with a two-token unsupported allowance, the supported long
+    # clause below dominated overlap and "fabrika açtı" still shipped. In a
+    # regulated product, two unsupported content tokens are enough to change the
+    # business fact.
+    sents = split_sentences(
+        "Bütçe artışı yönetim kurulunda oy birliğiyle onaylandı ve ödeme takvimi netleşti."
+    )
+    c = ground_claim(
+        "Bütçe artışı yönetim kurulunda oy birliğiyle onaylandı ve ödeme takvimi "
+        "netleşti, fabrika açtı",
+        sents,
+    )
+
+    assert c.grounded is False
+    assert "unsupported content" in c.reason
+
+
 def test_generic_span_is_low_confidence_not_shipped() -> None:
     sents = split_sentences("Tamam. Bütçe artışı onaylandı.")
     # A claim that best-matches the 1-word "Tamam." span must not ground a decision.
@@ -331,6 +349,39 @@ def test_fused_decision_is_withheld_from_analyze_response() -> None:
     )
 
     assert result.schema_version == "5-adr0043"
+    assert result.decisions == []
+    assert result.ungrounded_count == 1
+    assert result.rejected_claims[0].kind == "decision"
+    assert "unsupported content" in result.rejected_claims[0].reason
+
+
+def test_short_fused_decision_is_withheld_from_analyze_response() -> None:
+    """A short unsupported fact must not ride along with a long grounded decision."""
+    from app.core.config import Settings
+    from app.services.analyze import AnalysisDraft, MeetingAnalysisService
+
+    class _StubAnalyzer:
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            return AnalysisDraft(
+                summary="",
+                decisions=[
+                    "Bütçe artışı yönetim kurulunda oy birliğiyle onaylandı ve ödeme takvimi "
+                    "netleşti, fabrika açtı"
+                ],
+                action_items=[],
+            )
+
+        @property
+        def model_loaded(self) -> bool:
+            return True
+
+    svc = MeetingAnalysisService(
+        Settings(backend="mock", redact_pii=False), analyzer=_StubAnalyzer()
+    )
+    result = svc.analyze(
+        "Bütçe artışı yönetim kurulunda oy birliğiyle onaylandı ve ödeme takvimi netleşti."
+    )
+
     assert result.decisions == []
     assert result.ungrounded_count == 1
     assert result.rejected_claims[0].kind == "decision"

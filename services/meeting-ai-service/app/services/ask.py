@@ -17,7 +17,7 @@ import httpx
 
 from app.core.config import Settings
 from app.models.schemas import AskResponse, Citation
-from app.services.citation import ground_claim, split_sentences
+from app.services.citation import best_matching_sentence, ground_claim, split_sentences
 from app.services.redact import assert_no_residual_pii, redact_pii
 
 _UNSUPPORTED_ANSWER = "Metinde bu bilgi yok."
@@ -38,8 +38,8 @@ Yanıt (tek-iki cümle, yalnız metne dayalı):"""
 def _mock_answer(question: str, transcript: str) -> str:
     """Deterministic: the transcript sentence best matching the question."""
     sentences = split_sentences(transcript)
-    best = ground_claim(question, sentences, threshold=0.0)
-    return best.source_text if best.source_index >= 0 else ""
+    best = best_matching_sentence(question, sentences)
+    return best.text if best is not None else ""
 
 
 def _ollama_answer(question: str, transcript: str, settings: Settings) -> str:

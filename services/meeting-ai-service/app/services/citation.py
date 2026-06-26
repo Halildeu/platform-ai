@@ -119,7 +119,10 @@ _CITATION_VERIFIER_VERSION = "v4-adr0043-single-source-materiality"
 # fused claim with one grounded clause plus one unsupported clause.
 _DEFAULT_THRESHOLD = 0.65
 _MIN_EVIDENCE_CONTENT_TOKENS = 2
-_MAX_UNSUPPORTED_CONTENT_TOKENS = 2
+# Regulated meeting intelligence is precision-first: even a short unsupported
+# clause such as "fabrika açtı" is material. Morphology/paraphrase recall belongs
+# behind a future verifier, not a free unsupported-token allowance.
+_MAX_UNSUPPORTED_CONTENT_TOKENS = 0
 
 
 def _sha256_hex(text: str) -> str:
@@ -225,6 +228,25 @@ def split_sentences(
         pos = end
         idx += 1
     return out
+
+
+def best_matching_sentence(query: str, sentences: list[Sentence]) -> Sentence | None:
+    """Return the transcript sentence with positive lexical overlap for a query.
+
+    This is retrieval-only, used by the deterministic mock `/ask` backend to pick
+    a candidate source sentence. It intentionally does not apply acceptance gates
+    such as unsupported-token, number, or polarity checks. Any returned answer is
+    still passed through `ground_claim()` before user exposure.
+    """
+    query_tokens = _tokens(query)
+    best: Sentence | None = None
+    best_sim = 0.0
+    for sentence in sentences:
+        sim = _similarity(query_tokens, _tokens(sentence.text))
+        if sim > best_sim:
+            best = sentence
+            best_sim = sim
+    return best
 
 
 def _tokens(text: str) -> set[str]:
@@ -369,14 +391,6 @@ def ground_claim(
     if best_sim < threshold:
         return _ungrounded(claim, best_sim, "no transcript sentence covers the claim")
 
-    unsupported_tokens = ctoks - best_tokens
-    if len(unsupported_tokens) > _MAX_UNSUPPORTED_CONTENT_TOKENS:
-        return _ungrounded(
-            claim,
-            best_sim,
-            "claim contains unsupported content outside the cited source sentence",
-        )
-
     # Coverage met → hard acceptance gates (high-precision; ADR-0043 D4 + Codex 019ee9a6:
     # lexical overlap / embedding cosine BOTH miss these, so they gate AFTER retrieval).
     # GATE — number/quantity equality: every number/percent/date-digit in the claim
@@ -384,6 +398,14 @@ def ground_claim(
     claim_nums = _numbers(claim)
     if claim_nums and not claim_nums.issubset(_numbers(best.text)):
         return _ungrounded(claim, best_sim, "number/quantity in claim not found in source")
+
+    unsupported_tokens = ctoks - best_tokens
+    if len(unsupported_tokens) > _MAX_UNSUPPORTED_CONTENT_TOKENS:
+        return _ungrounded(
+            claim,
+            best_sim,
+            "claim contains unsupported content outside the cited source sentence",
+        )
 
     evidence_informative = len(best_tokens) >= _MIN_EVIDENCE_CONTENT_TOKENS
     status = CitationStatus.PASSED if evidence_informative else CitationStatus.LOW_CONFIDENCE
