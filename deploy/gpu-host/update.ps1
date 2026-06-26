@@ -4,10 +4,10 @@
   tree to origin/main, then restarts the live-stt + meeting-ai scheduled tasks.
 
 .DESCRIPTION
-  Replaces the fragile `cd C:\platform-ai; git pull` in README §Güncelleme.
+  Replaces the fragile `cd C:\platform-ai; git pull` in README update section.
 
   The deploy clone (e.g. C:\Users\denetimpc\platform-ai) is a READ-ONLY MIRROR
-  of origin/main. Development must NEVER happen here — see drift-guard.ps1 and
+  of origin/main. Development must NEVER happen here - see drift-guard.ps1 and
   the 2026-06-21 incident where 13 unpushed diarization commits (#161/#164) sat
   local-only on this clone (single point of failure, no GitHub backup).
 
@@ -54,7 +54,7 @@ Write-Host "[update] repo=$RepoRoot branch=$Branch" -ForegroundColor Cyan
 
 # 1. Refresh remote refs (needed to compare against origin/$Branch). Fail-closed.
 git fetch --prune origin 2>&1 | Out-Host
-if ($LASTEXITCODE -ne 0) { Fail "git fetch failed (network / auth). Aborting — no mutation." }
+if ($LASTEXITCODE -ne 0) { Fail "git fetch failed (network / auth). Aborting - no mutation." }
 
 # 2. FAIL-CLOSED guard. EVERY safety query must succeed; if we cannot positively
 #    verify the state we ABORT, rather than risk a reset --hard that loses work.
@@ -63,26 +63,26 @@ $originRemoteRef = "refs/remotes/{0}" -f $originRef
 $unpushedRange = "{0}..HEAD" -f $originRef
 
 git rev-parse --verify --quiet $originRemoteRef *> $null
-if ($LASTEXITCODE -ne 0) { Fail "$originRef not found after fetch — cannot verify safety. Aborting." }
+if ($LASTEXITCODE -ne 0) { Fail "$originRef not found after fetch - cannot verify safety. Aborting." }
 
 $head = git rev-parse --abbrev-ref HEAD
-if ($LASTEXITCODE -ne 0) { Fail "git rev-parse HEAD failed — cannot verify safety. Aborting." }
+if ($LASTEXITCODE -ne 0) { Fail "git rev-parse HEAD failed - cannot verify safety. Aborting." }
 $head = "$head".Trim()
 
 $dirty = @(git status --porcelain --untracked-files=no)
-if ($LASTEXITCODE -ne 0) { Fail "git status failed — cannot verify safety. Aborting." }
+if ($LASTEXITCODE -ne 0) { Fail "git status failed - cannot verify safety. Aborting." }
 
 $unpushed = @(git log --oneline $unpushedRange)
-if ($LASTEXITCODE -ne 0) { Fail "git log $unpushedRange failed — cannot verify local work. Aborting." }
+if ($LASTEXITCODE -ne 0) { Fail "git log $unpushedRange failed - cannot verify local work. Aborting." }
 
 if (($unpushed.Count -gt 0 -or $dirty.Count -gt 0) -and -not $Force) {
   Write-Host ""
-  Write-Host "  ABORT — un-backed-up local work would be DESTROYED by reset --hard:" -ForegroundColor Red
+  Write-Host "  ABORT - un-backed-up local work would be DESTROYED by reset --hard:" -ForegroundColor Red
   if ($head -ne $Branch)     { Write-Host "    - HEAD is on '$head', not '$Branch'" -ForegroundColor Yellow }
   if ($unpushed.Count -gt 0) { Write-Host "    - $($unpushed.Count) local commit(s) not in ${originRef}:" -ForegroundColor Yellow; $unpushed | ForEach-Object { Write-Host "        $_" } }
   if ($dirty.Count -gt 0)    { Write-Host "    - $($dirty.Count) modified tracked file(s)" -ForegroundColor Yellow }
   Write-Host ""
-  Write-Host "  This clone is a deploy MIRROR — it must not hold local work." -ForegroundColor Red
+  Write-Host "  This clone is a deploy MIRROR - it must not hold local work." -ForegroundColor Red
   Write-Host "  Preserve it FIRST, then re-run:" -ForegroundColor Red
   Write-Host "    1. In your DEV clone (not here): push the branch + open a PR." -ForegroundColor Gray
   Write-Host "    2. If the work only exists here: extract via git bundle ->" -ForegroundColor Gray
@@ -93,7 +93,7 @@ if (($unpushed.Count -gt 0 -or $dirty.Count -gt 0) -and -not $Force) {
 }
 
 # 3. Pin to origin/$Branch atomically (checkout -B sets the branch + tree), then
-#    reset --hard (belt-and-suspenders). Each step is exit-checked — a failed
+#    reset --hard (belt-and-suspenders). Each step is exit-checked - a failed
 #    checkout must NOT fall through to reset on the wrong ref.
 $before = (git rev-parse HEAD).Trim()
 # -Force genuinely discards confirmed-preserved local work (clobbers a dirty
@@ -103,7 +103,7 @@ if ($Force) {
 } else {
   git checkout -B $Branch $originRef 2>&1 | Out-Host
 }
-if ($LASTEXITCODE -ne 0) { Fail "git checkout -B $Branch $originRef failed — deploy state unchanged." }
+if ($LASTEXITCODE -ne 0) { Fail "git checkout -B $Branch $originRef failed - deploy state unchanged." }
 git reset --hard $originRef 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) { Fail "git reset --hard $originRef failed." }
 $after = (git rev-parse HEAD).Trim()
@@ -112,18 +112,18 @@ Write-Host "[update] $before -> $after (tracked tree pinned to $originRef)" -For
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
 #    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
 #    ScheduledTasks module is ABSENT on some hosts (this GPU host's Windows
-#    PowerShell 5.1 has no Restart-ScheduledTask — Get-ScheduledTask would throw
+#    PowerShell 5.1 has no Restart-ScheduledTask - Get-ScheduledTask would throw
 #    CommandNotFound and, under $ErrorActionPreference=Stop, abort the whole
 #    update after the git pin already landed). #193 follow-up; Codex review #194.
 #
 #    CRITICAL: schtasks writes benign stderr on /Query-missing and /End-not-
 #    running. PowerShell's `2>&1` pipe can wrap native stderr into a
 #    NativeCommandError that, under $ErrorActionPreference=Stop, terminates BEFORE
-#    the $LASTEXITCODE check — re-introducing the same "git pin landed, restart
+#    the $LASTEXITCODE check - re-introducing the same "git pin landed, restart
 #    aborted" failure. So route every call through a helper that drops stderr
 #    WITHOUT the PS 2>&1 pipe and forces EAP=Continue around the native call.
 # Explicit -Action/-TaskName (NOT ValueFromRemainingArguments, which is unreliable
-# on Windows PowerShell 5.1 — it can collapse the remaining positionals into one
+# on Windows PowerShell 5.1 - it can collapse the remaining positionals into one
 # argument, mangling `/Query /TN <task>` so a present task reads as "not installed"
 # and the restart is silently skipped). Codex review #194.
 function Invoke-SchtasksTask {
@@ -167,10 +167,10 @@ if ($NoRestart) {
 
 # 5. Warm live-stt so /health reaches "ok" after the deploy without a manual
 #    transcribe (the /transcribe model is lazy-loaded on the first request). This
-#    is a plain FOREGROUND curl in update.ps1's own process — NOT a Start-Job: an
+#    is a plain FOREGROUND curl in update.ps1's own process - NOT a Start-Job: an
 #    in-process background job inside the SYSTEM start task breaks the uvicorn
 #    launch under WinPS 5.1 (#193 live-acceptance failed). Running it here, outside
-#    the service tree, cannot affect the service. Best-effort — never fails update;
+#    the service tree, cannot affect the service. Best-effort - never fails update;
 #    a reboot (not via this script) stays lazy until the first real transcribe.
 if (-not $NoRestart -and -not $restartFailed) {
   $warmupWav = Join-Path $RepoRoot "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.wav"
@@ -182,7 +182,7 @@ if (-not $NoRestart -and -not $restartFailed) {
       Write-Host "[update] warming live-stt (lazy model load)..." -ForegroundColor Cyan
       # Health-wait via Invoke-RestMethod (NOT curl -o $null -w http_code: under
       # WinPS 5.1 a $null arg mangles curl so the code is never "200" and the
-      # warmup is always skipped — caught live 2026-06-22). IRM throws on non-200,
+      # warmup is always skipped - caught live 2026-06-22). IRM throws on non-200,
       # caught; EAP=Continue is already set so it stays best-effort.
       $up = $false
       for ($i = 0; $i -lt 30; $i++) {

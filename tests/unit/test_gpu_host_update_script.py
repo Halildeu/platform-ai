@@ -13,6 +13,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
     def test_update_script_avoids_branch_range_interpolation(self) -> None:
         script = (ROOT / "deploy/gpu-host/update.ps1").read_text(encoding="utf-8")
 
+        script.encode("ascii")
         self.assertIn('$originRef = "origin/{0}" -f $Branch', script)
         self.assertIn('$unpushedRange = "{0}..HEAD" -f $originRef', script)
         self.assertNotIn("$Branch..HEAD", script)
