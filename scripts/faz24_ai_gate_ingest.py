@@ -37,7 +37,12 @@ _JWT_RE = re.compile(
 _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/\-=]+", re.IGNORECASE)
 _AUTH_HEADER_RE = re.compile(r"\bAuthorization\s*:", re.IGNORECASE)
 _PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
-_TOKEN_RE = re.compile(r"\b(?:ghp|github_pat|sk|xox[baprs])_[A-Za-z0-9_=-]{12,}\b")
+_TOKEN_RE = re.compile(
+    r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{12,}\b"
+    r"|\bgithub_pat_[A-Za-z0-9_]{20,}\b"
+    r"|\bsk-[A-Za-z0-9_-]{16,}\b"
+    r"|\bxox[baprs]-[A-Za-z0-9-]{12,}\b"
+)
 
 _RAW_CONTENT_KEYS = {
     "action_items",
