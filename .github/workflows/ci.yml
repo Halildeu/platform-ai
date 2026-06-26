@@ -25,6 +25,9 @@ jobs:
       - name: Faz 24 AI gate ingest unit tests
         run: python3 -m unittest discover -s tests/unit -p "test_faz24_ai_gate_ingest.py"
 
+      - name: Diarization decision gate unit tests
+        run: python3 -m unittest discover -s tests/unit -p "test_diar_decision_gate.py"
+
       - name: Current retention readiness snapshot
         run: |
           set +e
@@ -38,6 +41,34 @@ jobs:
           fi
           if [ "$gate_status" -ne 1 ]; then
             echo "Current #156 snapshot must remain blocked until DB retention + VERBIS evidence exists"
+            exit 1
+          fi
+
+      - name: Current diarization decision snapshot
+        run: |
+          set +e
+          python3 services/diarization-service/scripts/diar_decision_gate.py \
+            --evidence docs/evidence/diar-results-2026-06-17.jsonl \
+            --max-der 0.30 \
+            --max-rtf 0.15 \
+            --max-latency-ms 2500 \
+            --max-peak-vram-delta-mb 4096 \
+            --min-samples 8 > /tmp/diar-decision-result.json
+          gate_status=$?
+          set -e
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(Path("/tmp/diar-decision-result.json").read_text())
+          if result.get("status") != "blocked":
+              raise SystemExit(
+                  "Current #161 diarization snapshot must remain blocked until "
+                  "approved pilot decision evidence exists"
+              )
+          PY
+          if [ "$gate_status" -ne 1 ]; then
+            echo "Current #161 diarization decision snapshot must return non-zero while blocked"
             exit 1
           fi
 

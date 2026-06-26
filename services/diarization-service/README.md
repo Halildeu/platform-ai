@@ -47,3 +47,21 @@ curl -X POST -F "audio=@sample.wav;type=audio/wav" http://localhost:8300/diarize
 - Wire the real `pyannote.audio` pipeline behind `DIA_BACKEND=pyannote`.
 - GPU Dockerfile variant after the M5 hardware decision.
 - Integration with `live-stt`/`final-stt` transcript alignment.
+
+## Faz 24 #161 decision gate
+
+`scripts/diar_decision_gate.py` is the source-side guard for selecting a
+diarization backend. It consumes metadata-only candidate rows from
+`diar_matrix.py`-style measurements, but synthetic/lab evidence cannot select a
+backend. A pass requires approved pilot evidence, explicit DER/RTF/latency/VRAM
+thresholds, approved license/deployment metadata, a `sha256:<64 hex>` evidence
+hash, and explicit non-biometric posture:
+
+- `voiceprint_enabled=false`
+- `biometric_processing=false`
+- `speaker_identity_mapping=false`
+
+The current repo snapshot at `docs/evidence/diar-results-2026-06-17.jsonl` is
+expected to remain `blocked` because it is synthetic-smoke evidence. This gate
+does not process real audio, enable voiceprint, mutate runtime, prove
+direct-STT/app-mTLS, or make a production readiness claim.

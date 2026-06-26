@@ -139,6 +139,48 @@ def _gint_envelope() -> dict[str, object]:
     }
 
 
+def _diar_decision_envelope(
+    *, dataset_kind: str = "pilot-meeting"
+) -> dict[str, object]:
+    return {
+        "schema": "faz24.ai-gate-ingest.v1",
+        "gate": "diar-decision",
+        "thresholds": {
+            "maxDer": 0.30,
+            "maxRtf": 0.15,
+            "maxLatencyMs": 2500.0,
+            "maxPeakVramDeltaMb": 4096.0,
+            "minSamples": 8,
+        },
+        "evidence": {
+            "rows": [
+                {
+                    "tag": "pilot-pyannote",
+                    "dataset_kind": dataset_kind,
+                    "backend": "pyannote",
+                    "model": "pyannote/speaker-diarization-3.1",
+                    "revision": "abc123",
+                    "device": "cuda",
+                    "deployment_mode": "self-host",
+                    "license_status": "commercial-approved",
+                    "n_samples": 12,
+                    "der_corpus": 0.21,
+                    "der": 0.23,
+                    "collar": 0.25,
+                    "skip_overlap": False,
+                    "lat_max_ms": 1900.0,
+                    "rtf": 0.05,
+                    "peak_vram_delta_mb": 2300.0,
+                    "evidence_hash": _sha("d"),
+                    "biometric_processing": False,
+                    "speaker_identity_mapping": False,
+                    "voiceprint_enabled": False,
+                }
+            ]
+        },
+    }
+
+
 class Faz24AiGateIngestTests(unittest.TestCase):
     def test_gwer_envelope_passes_with_redacted_pilot_evidence(self) -> None:
         result = ingest.evaluate_envelope(_gwer_envelope())
@@ -152,13 +194,25 @@ class Faz24AiGateIngestTests(unittest.TestCase):
         result = ingest.evaluate_envelope(_glat_cost_envelope())
 
         self.assertEqual(result["status"], "pass")
-        self.assertEqual(result["sourceReport"]["selectedGlatCost"]["evidence_hash"], _sha("a"))
+        self.assertEqual(
+            result["sourceReport"]["selectedGlatCost"]["evidence_hash"], _sha("a")
+        )
 
     def test_gint_envelope_passes_with_redacted_pilot_evidence(self) -> None:
         result = ingest.evaluate_envelope(_gint_envelope())
 
         self.assertEqual(result["status"], "pass")
-        self.assertEqual(result["sourceReport"]["selectedGint"]["kind"], "pilot-meeting")
+        self.assertEqual(
+            result["sourceReport"]["selectedGint"]["kind"], "pilot-meeting"
+        )
+
+    def test_diar_decision_envelope_passes_with_redacted_pilot_evidence(self) -> None:
+        result = ingest.evaluate_envelope(_diar_decision_envelope())
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(
+            result["sourceReport"]["selectedDiarization"]["backend"], "pyannote"
+        )
 
     def test_synthetic_evidence_stays_blocked(self) -> None:
         envelope = _gwer_envelope(dataset_kind="synthetic-smoke")
@@ -167,7 +221,9 @@ class Faz24AiGateIngestTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(result["sourceInvoked"])
-        self.assertTrue(any("no pilot-meeting WER row" in item for item in result["findings"]))
+        self.assertTrue(
+            any("no pilot-meeting WER row" in item for item in result["findings"])
+        )
 
     def test_raw_content_rejected_before_source_dispatch_without_echo(self) -> None:
         envelope = _gint_envelope()
@@ -207,7 +263,19 @@ class Faz24AiGateIngestTests(unittest.TestCase):
         self.assertFalse(result["sourceInvoked"])
         self.assertTrue(any("unsupported gate" in item for item in result["findings"]))
 
-    def test_cli_writes_redacted_result_file_and_returns_nonzero_for_blocked(self) -> None:
+    def test_diar_decision_synthetic_evidence_stays_blocked(self) -> None:
+        result = ingest.evaluate_envelope(
+            _diar_decision_envelope(dataset_kind="synthetic-smoke")
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(
+            any("synthetic/lab evidence" in item for item in result["findings"])
+        )
+
+    def test_cli_writes_redacted_result_file_and_returns_nonzero_for_blocked(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             evidence_path = temp_path / "evidence.json"
@@ -236,13 +304,15 @@ class Faz24AiGateIngestTests(unittest.TestCase):
             self.assertEqual(saved["status"], "blocked")
 
     def test_workflow_upload_is_guarded_by_secret_scan_success(self) -> None:
-        workflow = (ROOT / ".github/workflows/faz24-ai-gate-evidence-ingest.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (
+            ROOT / ".github/workflows/faz24-ai-gate-evidence-ingest.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("evidence_json_base64", workflow)
         self.assertIn("steps.secret_scan.outcome == 'success'", workflow)
-        self.assertIn("path: ${{ steps.decode.outputs.artifact_dir }}/result.json", workflow)
+        self.assertIn(
+            "path: ${{ steps.decode.outputs.artifact_dir }}/result.json", workflow
+        )
         self.assertIn("-e 'Bearer[[:space:]]+", workflow)
         self.assertIn("-- \\", workflow)
         self.assertNotIn("path: ${{ steps.decode.outputs.input_dir }}", workflow)
