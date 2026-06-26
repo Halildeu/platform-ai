@@ -70,6 +70,7 @@ _DISALLOWED_KEY_FRAGMENTS = (
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _TC_OR_PHONE_RE = re.compile(r"\b(?:\+90|0)?5\d{9}\b|\b\d{11}\b")
 _TR_IBAN_RE = re.compile(r"\bTR\d{2}(?:[ -]?\d){22}\b", re.IGNORECASE)
+_SHA256_RE = re.compile(r"^sha256:[a-f0-9]{64}$", re.IGNORECASE)
 
 _MIN_METRICS = {
     "grounding_rate": "minGroundingRate",
@@ -118,7 +119,9 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _kind(row: dict[str, Any]) -> str:
-    explicit = row.get("dataset_kind") or row.get("fixture_kind") or row.get("benchmark_kind")
+    explicit = (
+        row.get("dataset_kind") or row.get("fixture_kind") or row.get("benchmark_kind")
+    )
     if explicit:
         return str(explicit)
     if str(row.get("backend", "")).lower() == "mock":
@@ -152,13 +155,19 @@ def _privacy_value_findings(value: Any, *, location: str) -> list[str]:
         for key, nested in value.items():
             nested_location = f"{location}.{key}"
             if _is_disallowed_content_key(key) and nested not in (None, "", [], {}):
-                findings.append(f"{nested_location} uses disallowed content field `{key}`")
+                findings.append(
+                    f"{nested_location} uses disallowed content field `{key}`"
+                )
             findings.extend(_privacy_value_findings(nested, location=nested_location))
     elif isinstance(value, list):
         for index, nested in enumerate(value):
-            findings.extend(_privacy_value_findings(nested, location=f"{location}[{index}]"))
+            findings.extend(
+                _privacy_value_findings(nested, location=f"{location}[{index}]")
+            )
     elif isinstance(value, str) and (
-        _EMAIL_RE.search(value) or _TC_OR_PHONE_RE.search(value) or _TR_IBAN_RE.search(value)
+        _EMAIL_RE.search(value)
+        or _TC_OR_PHONE_RE.search(value)
+        or _TR_IBAN_RE.search(value)
     ):
         findings.append(f"{location} contains PII-shaped value")
     return findings
@@ -170,7 +179,9 @@ def _privacy_findings(rows: list[dict[str, Any]]) -> list[str]:
         for key, value in row.items():
             location = f"gint[{index}].{key}"
             if _is_disallowed_content_key(key) and value not in (None, "", [], {}):
-                findings.append(f"gint[{index}] contains disallowed content field `{key}`")
+                findings.append(
+                    f"gint[{index}] contains disallowed content field `{key}`"
+                )
             findings.extend(_privacy_value_findings(value, location=location))
     return findings
 
@@ -219,6 +230,15 @@ def _missing_row_metrics(row: dict[str, Any]) -> list[str]:
     return missing
 
 
+def _hash_format_findings(row: dict[str, Any], *, index: int) -> list[str]:
+    findings: list[str] = []
+    for key in ("eval_set_hash", "prompt_hash"):
+        value = row.get(key)
+        if isinstance(value, str) and value and not _SHA256_RE.fullmatch(value):
+            findings.append(f"pilot row {index} {key} must be sha256:<64 hex>")
+    return findings
+
+
 def _pilot_integrity_findings(row: dict[str, Any], *, index: int) -> list[str]:
     """Catch accidental pilot spoofing before threshold checks.
 
@@ -244,6 +264,7 @@ def _pilot_integrity_findings(row: dict[str, Any], *, index: int) -> list[str]:
         findings.append(
             f"pilot row {index} points at tests/fixtures; fixture rows cannot satisfy G-INT"
         )
+    findings.extend(_hash_format_findings(row, index=index))
     return findings
 
 
@@ -253,20 +274,38 @@ def _row_quality_findings(
     findings: list[str] = []
     n_samples = _metric_value(row, "n_samples")
     min_samples = thresholds["minSamples"]
-    if isinstance(min_samples, int) and n_samples is not None and n_samples < min_samples:
-        findings.append(f"pilot n_samples {int(n_samples)} is below minimum {min_samples}")
+    if (
+        isinstance(min_samples, int)
+        and n_samples is not None
+        and n_samples < min_samples
+    ):
+        findings.append(
+            f"pilot n_samples {int(n_samples)} is below minimum {min_samples}"
+        )
 
     for row_key, threshold_key in _MIN_METRICS.items():
         value = _metric_value(row, row_key)
         threshold = thresholds[threshold_key]
-        if isinstance(threshold, int | float) and value is not None and value < threshold:
-            findings.append(f"pilot {row_key} {value:.4f} is below threshold {threshold:.4f}")
+        if (
+            isinstance(threshold, int | float)
+            and value is not None
+            and value < threshold
+        ):
+            findings.append(
+                f"pilot {row_key} {value:.4f} is below threshold {threshold:.4f}"
+            )
 
     for row_key, threshold_key in _MAX_METRICS.items():
         value = _metric_value(row, row_key)
         threshold = thresholds[threshold_key]
-        if isinstance(threshold, int | float) and value is not None and value > threshold:
-            findings.append(f"pilot {row_key} {value:.4f} exceeds threshold {threshold:.4f}")
+        if (
+            isinstance(threshold, int | float)
+            and value is not None
+            and value > threshold
+        ):
+            findings.append(
+                f"pilot {row_key} {value:.4f} exceeds threshold {threshold:.4f}"
+            )
 
     return findings
 
@@ -346,7 +385,9 @@ def evaluate_gate(
     missing_thresholds = [key for key, value in thresholds.items() if value is None]
     metric_rows = _candidate_rows(rows)
     if missing_thresholds:
-        findings.append("explicit G-INT thresholds are required: " + ", ".join(missing_thresholds))
+        findings.append(
+            "explicit G-INT thresholds are required: " + ", ".join(missing_thresholds)
+        )
     if not rows:
         findings.append("no G-INT evidence rows supplied")
     if rows and not metric_rows:
@@ -355,7 +396,9 @@ def evaluate_gate(
     pilot_rows = [row for row in metric_rows if _kind(row) in PILOT_KINDS]
     kinds = sorted({_kind(row) for row in rows})
     if metric_rows and not pilot_rows:
-        findings.append("no pilot-meeting G-INT row; synthetic/mock evidence cannot satisfy G-INT")
+        findings.append(
+            "no pilot-meeting G-INT row; synthetic/mock evidence cannot satisfy G-INT"
+        )
 
     complete_pilot_rows: list[dict[str, Any]] = []
     for index, row in enumerate(pilot_rows, 1):
@@ -363,12 +406,16 @@ def evaluate_gate(
         findings.extend(integrity_findings)
         missing = _missing_row_metrics(row)
         if missing:
-            findings.append(f"pilot row {index} is missing required metadata: {', '.join(missing)}")
+            findings.append(
+                f"pilot row {index} is missing required metadata: {', '.join(missing)}"
+            )
         if not integrity_findings and not missing:
             complete_pilot_rows.append(row)
 
     if pilot_rows and not complete_pilot_rows:
-        findings.append("no complete pilot G-INT row with all required metrics and hashes")
+        findings.append(
+            "no complete pilot G-INT row with all required metrics and hashes"
+        )
 
     if findings:
         return {
@@ -379,12 +426,16 @@ def evaluate_gate(
             "kinds": kinds,
             "thresholds": thresholds,
             "selectedGint": _summarize_row(
-                max(complete_pilot_rows, key=_quality_score) if complete_pilot_rows else None
+                max(complete_pilot_rows, key=_quality_score)
+                if complete_pilot_rows
+                else None
             ),
         }
 
     passing_rows = [
-        row for row in complete_pilot_rows if not _row_quality_findings(row, thresholds=thresholds)
+        row
+        for row in complete_pilot_rows
+        if not _row_quality_findings(row, thresholds=thresholds)
     ]
     selected = max(passing_rows or complete_pilot_rows, key=_quality_score)
     quality_findings = _row_quality_findings(selected, thresholds=thresholds)

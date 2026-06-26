@@ -36,7 +36,9 @@ from typing import Any
 
 import httpx
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # service root → app importable
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1])
+)  # service root → app importable
 
 from app.core.config import Settings, get_settings
 from app.services.analyze import (
@@ -68,8 +70,8 @@ _METRIC_KEYS = (
 _CHARS_PER_TOKEN = 3.0
 
 
-def _sha12(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+def _sha256_ref(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _ollama_fingerprint(settings: Settings) -> dict[str, object]:
@@ -81,14 +83,18 @@ def _ollama_fingerprint(settings: Settings) -> dict[str, object]:
         return fp
     try:
         fp["ollama_version"] = (
-            httpx.get(f"{settings.ollama_host}/api/version", timeout=3).json().get("version")
+            httpx.get(f"{settings.ollama_host}/api/version", timeout=3)
+            .json()
+            .get("version")
         )
         show = httpx.post(
             f"{settings.ollama_host}/api/show",
             json={"name": settings.ollama_model},
             timeout=5,
         ).json()
-        fp["model_digest"] = (show.get("details") or {}).get("digest") or show.get("digest")
+        fp["model_digest"] = (show.get("details") or {}).get("digest") or show.get(
+            "digest"
+        )
     except (httpx.HTTPError, ValueError, KeyError, AttributeError):
         pass  # unreachable host → leave nulls; the row still records the tag
     return fp
@@ -138,21 +144,30 @@ def _score_run(
             schema_invalid += 1
             latencies.append((time.perf_counter() - t0) * 1000)
             _zero_credit()
-            print(f"    [{i}/{len(samples)}] SCHEMA_INVALID (wrong-shape JSON)", file=sys.stderr)
+            print(
+                f"    [{i}/{len(samples)}] SCHEMA_INVALID (wrong-shape JSON)",
+                file=sys.stderr,
+            )
             continue
         except OllamaUnparseableOutputError:
             # not even valid JSON → also a model output-contract failure, NOT infra
             format_invalid += 1
             latencies.append((time.perf_counter() - t0) * 1000)
             _zero_credit()
-            print(f"    [{i}/{len(samples)}] FORMAT_INVALID (unparseable output)", file=sys.stderr)
+            print(
+                f"    [{i}/{len(samples)}] FORMAT_INVALID (unparseable output)",
+                file=sys.stderr,
+            )
             continue
         except BackendUnavailableError:
             # infra only: host down / HTTP / timeout — NOT a model-quality signal
             backend_error += 1
             latencies.append((time.perf_counter() - t0) * 1000)
             _zero_credit()
-            print(f"    [{i}/{len(samples)}] BACKEND_ERROR (infra, not model)", file=sys.stderr)
+            print(
+                f"    [{i}/{len(samples)}] BACKEND_ERROR (infra, not model)",
+                file=sys.stderr,
+            )
             continue
         latencies.append((time.perf_counter() - t0) * 1000)
         claims = list(r.decisions) + [a.text for a in r.action_items]
@@ -288,8 +303,8 @@ def main() -> None:
     seeds: list[int | None] = [int(x) for x in args.seeds.split(",") if x.strip()] or [
         base.ollama_seed
     ]
-    eval_set_hash = _sha12(raw)
-    prompt_hash = _sha12(_OLLAMA_PROMPT)
+    eval_set_hash = _sha256_ref(raw)
+    prompt_hash = _sha256_ref(_OLLAMA_PROMPT)
     # Pin + announce the comparison surface up front so cells are auditably
     # identical (Codex: an env re-read could otherwise make cells incomparable).
     print(
@@ -306,7 +321,9 @@ def main() -> None:
             settings = _settings_for(base, model, seed, args.num_ctx, args.keep_alive)
             effective_num_ctx = settings.ollama_num_ctx if is_ollama else 0
             svc = MeetingAnalysisService(settings)
-            run = _score_run(svc, samples, args.match_threshold, effective_num_ctx, is_ollama)
+            run = _score_run(
+                svc, samples, args.match_threshold, effective_num_ctx, is_ollama
+            )
             row = {
                 "tag": args.tag or settings.backend,
                 "backend": settings.backend,
