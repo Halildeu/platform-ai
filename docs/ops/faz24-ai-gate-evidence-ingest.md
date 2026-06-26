@@ -1,7 +1,8 @@
 # Faz 24 AI Gate Evidence Ingest
 
 This runbook describes the source-side, no-mutation ingest path for redacted Faz
-24 AI product-gate evidence. It covers G-WER/DER, G-LAT/COST, and G-INT only.
+24 AI product-gate evidence. It covers G-WER/DER, G-LAT/COST, G-INT, and the
+diarization backend decision gate only.
 
 ## Boundary
 
@@ -13,7 +14,8 @@ This runbook describes the source-side, no-mutation ingest path for redacted Faz
 - A `status=pass` result proves only that the selected source verifier accepted
   the submitted redacted evidence under explicit thresholds. It does not enable
   direct-STT, mutate Kubernetes/Vault/firewall state, select a permanent
-  model/GPU/LLM provider, or make Faz 24 production-ready.
+  model/GPU/LLM provider, choose a permanent diarization backend, or make Faz
+  24 production-ready.
 
 ## Envelope
 
@@ -23,6 +25,12 @@ Use schema `faz24.ai-gate-ingest.v1` and one of these gate names:
   `thresholds.maxWer`, and `thresholds.maxDer`.
 - `glat-cost`: requires `evidence.rows` and explicit G-LAT/COST thresholds.
 - `gint`: requires `evidence.rows` and explicit G-INT thresholds.
+- `diar-decision`: requires `evidence.rows` and explicit diarization decision
+  thresholds: `maxDer`, `maxRtf`, `maxLatencyMs`,
+  `maxPeakVramDeltaMb`, and `minSamples`. Passing rows also need approved pilot
+  evidence, approved license/deployment metadata, `sha256:<64 hex>` evidence
+  hash, and explicit `voiceprint_enabled=false`,
+  `biometric_processing=false`, and `speaker_identity_mapping=false`.
 
 Example G-WER envelope:
 
@@ -59,6 +67,48 @@ Example G-WER envelope:
         "collar": 0.25,
         "rtf": 0.04,
         "p50_ms": 1200
+      }
+    ]
+  }
+}
+```
+
+Example diarization decision envelope:
+
+```json
+{
+  "schema": "faz24.ai-gate-ingest.v1",
+  "gate": "diar-decision",
+  "thresholds": {
+    "maxDer": 0.3,
+    "maxRtf": 0.15,
+    "maxLatencyMs": 2500,
+    "maxPeakVramDeltaMb": 4096,
+    "minSamples": 8
+  },
+  "evidence": {
+    "rows": [
+      {
+        "tag": "pilot-pyannote",
+        "dataset_kind": "pilot-meeting",
+        "backend": "pyannote",
+        "model": "pyannote/speaker-diarization-3.1",
+        "revision": "abc123",
+        "device": "cuda",
+        "deployment_mode": "self-host",
+        "license_status": "commercial-approved",
+        "n_samples": 12,
+        "der_corpus": 0.21,
+        "der": 0.23,
+        "collar": 0.25,
+        "skip_overlap": false,
+        "lat_max_ms": 1900,
+        "rtf": 0.05,
+        "peak_vram_delta_mb": 2300,
+        "evidence_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "biometric_processing": false,
+        "speaker_identity_mapping": false,
+        "voiceprint_enabled": false
       }
     ]
   }

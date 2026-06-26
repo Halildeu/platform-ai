@@ -1,10 +1,11 @@
 """Faz 24 AI product gate evidence ingest wrapper.
 
 The wrapper accepts one redacted JSON envelope and dispatches it to the existing
-source-side gate verifiers for G-WER/DER, G-LAT/COST, or G-INT. It performs a
-fail-closed pre-scan before invoking verifier code so raw audio, transcripts,
-prompts, model responses, secret-shaped values, or PII-shaped values cannot
-enter the reusable ingest path.
+source-side gate verifiers for G-WER/DER, G-LAT/COST, G-INT, or the
+diarization backend decision gate. It performs a fail-closed pre-scan before
+invoking verifier code so raw audio, transcripts, prompts, model responses,
+secret-shaped values, or PII-shaped values cannot enter the reusable ingest
+path.
 """
 
 from __future__ import annotations
@@ -22,13 +23,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 WRAPPER_SCHEMA = "faz24.ai-gate-ingest.result.v1"
 ENVELOPE_SCHEMA = "faz24.ai-gate-ingest.v1"
-SUPPORTED_GATES = {"gwer", "glat-cost", "gint"}
+SUPPORTED_GATES = {"diar-decision", "glat-cost", "gint", "gwer"}
 
-_AUDIO_FILE_RE = re.compile(r"\.(?:wav|rttm|mp3|flac|opus|m4a|webm|ogg)\b", re.IGNORECASE)
+_AUDIO_FILE_RE = re.compile(
+    r"\.(?:wav|rttm|mp3|flac|opus|m4a|webm|ogg)\b", re.IGNORECASE
+)
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _TC_OR_PHONE_RE = re.compile(r"\b(?:\+90|0)?5\d{9}\b|\b\d{11}\b")
 _TR_IBAN_RE = re.compile(r"\bTR\d{2}(?:[ -]?\d){22}\b", re.IGNORECASE)
-_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
+_JWT_RE = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
+)
 _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/\-=]+", re.IGNORECASE)
 _AUTH_HEADER_RE = re.compile(r"\bAuthorization\s*:", re.IGNORECASE)
 _PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
@@ -122,6 +127,11 @@ def _canonical_gate(value: Any) -> str:
         "g-lat-cost": "glat-cost",
         "gwer-der": "gwer",
         "g-wer": "gwer",
+        "diar": "diar-decision",
+        "diarization": "diar-decision",
+        "diarization-decision": "diar-decision",
+        "diar-decision": "diar-decision",
+        "g-diar": "diar-decision",
         "g-int": "gint",
     }
     return aliases.get(gate, gate)
@@ -131,7 +141,9 @@ def _is_raw_content_key(key: str) -> bool:
     lowered = key.lower()
     if lowered.endswith("_hash"):
         return False
-    return lowered in _RAW_CONTENT_KEYS or any(fragment in lowered for fragment in _RAW_KEY_FRAGMENTS)
+    return lowered in _RAW_CONTENT_KEYS or any(
+        fragment in lowered for fragment in _RAW_KEY_FRAGMENTS
+    )
 
 
 def _is_secret_key(key: str) -> bool:
@@ -147,9 +159,13 @@ def _scan_value(value: Any, *, location: str) -> list[str]:
         for key, nested in value.items():
             nested_location = f"{location}.{key}"
             if _is_raw_content_key(key) and nested not in (None, "", [], {}):
-                findings.append(f"{nested_location} uses disallowed raw content field `{key}`")
+                findings.append(
+                    f"{nested_location} uses disallowed raw content field `{key}`"
+                )
             if _is_secret_key(key) and nested not in (None, "", [], {}):
-                findings.append(f"{nested_location} uses disallowed secret-bearing field `{key}`")
+                findings.append(
+                    f"{nested_location} uses disallowed secret-bearing field `{key}`"
+                )
             findings.extend(_scan_value(nested, location=nested_location))
     elif isinstance(value, list):
         for index, nested in enumerate(value):
@@ -157,7 +173,11 @@ def _scan_value(value: Any, *, location: str) -> list[str]:
     elif isinstance(value, str):
         if _AUDIO_FILE_RE.search(value):
             findings.append(f"{location} contains audio/file-path-shaped value")
-        if _EMAIL_RE.search(value) or _TC_OR_PHONE_RE.search(value) or _TR_IBAN_RE.search(value):
+        if (
+            _EMAIL_RE.search(value)
+            or _TC_OR_PHONE_RE.search(value)
+            or _TR_IBAN_RE.search(value)
+        ):
             findings.append(f"{location} contains PII-shaped value")
         if (
             _JWT_RE.search(value)
@@ -179,7 +199,9 @@ def pre_scan_envelope(envelope: dict[str, Any]) -> list[str]:
 
     gate = _canonical_gate(envelope.get("gate"))
     if gate not in SUPPORTED_GATES:
-        findings.append("unsupported gate; expected one of glat-cost, gint, gwer")
+        findings.append(
+            "unsupported gate; expected one of diar-decision, glat-cost, gint, gwer"
+        )
 
     findings.extend(_scan_value(envelope, location="envelope"))
     return findings
@@ -279,7 +301,9 @@ def _dispatch_glat_cost(envelope: dict[str, Any]) -> dict[str, Any]:
             thresholds, "maxRealtimeFactor", "max_realtime_factor"
         ),
         max_error_rate=_float_threshold(thresholds, "maxErrorRate", "max_error_rate"),
-        min_audio_minutes=_float_threshold(thresholds, "minAudioMinutes", "min_audio_minutes"),
+        min_audio_minutes=_float_threshold(
+            thresholds, "minAudioMinutes", "min_audio_minutes"
+        ),
         min_audio_minutes_per_wall_hour=_float_threshold(
             thresholds,
             "minAudioMinutesPerWallHour",
@@ -297,11 +321,15 @@ def _dispatch_gint(envelope: dict[str, Any]) -> dict[str, Any]:
     )
     return module.evaluate_gate(
         rows=_rows(evidence, "rows", "gintRows", "gint_rows"),
-        min_grounding_rate=_float_threshold(thresholds, "minGroundingRate", "min_grounding_rate"),
+        min_grounding_rate=_float_threshold(
+            thresholds, "minGroundingRate", "min_grounding_rate"
+        ),
         min_action_precision=_float_threshold(
             thresholds, "minActionPrecision", "min_action_precision"
         ),
-        min_action_recall=_float_threshold(thresholds, "minActionRecall", "min_action_recall"),
+        min_action_recall=_float_threshold(
+            thresholds, "minActionRecall", "min_action_recall"
+        ),
         min_decision_precision=_float_threshold(
             thresholds, "minDecisionPrecision", "min_decision_precision"
         ),
@@ -319,6 +347,27 @@ def _dispatch_gint(envelope: dict[str, Any]) -> dict[str, Any]:
         ),
         max_truncation_risk_rate=_float_threshold(
             thresholds, "maxTruncationRiskRate", "max_truncation_risk_rate"
+        ),
+        min_samples=_int_threshold(thresholds, "minSamples", "min_samples"),
+    )
+
+
+def _dispatch_diar_decision(envelope: dict[str, Any]) -> dict[str, Any]:
+    evidence = _section(envelope, "evidence")
+    thresholds = _section(envelope, "thresholds")
+    module = _load_module(
+        "faz24_diar_decision_gate",
+        "services/diarization-service/scripts/diar_decision_gate.py",
+    )
+    return module.evaluate_gate(
+        rows=_rows(evidence, "rows", "diarRows", "diar_rows", "diarizationRows"),
+        max_der=_float_threshold(thresholds, "maxDer", "max_der"),
+        max_rtf=_float_threshold(thresholds, "maxRtf", "max_rtf"),
+        max_latency_ms=_float_threshold(thresholds, "maxLatencyMs", "max_latency_ms"),
+        max_peak_vram_delta_mb=_float_threshold(
+            thresholds,
+            "maxPeakVramDeltaMb",
+            "max_peak_vram_delta_mb",
         ),
         min_samples=_int_threshold(thresholds, "minSamples", "min_samples"),
     )
@@ -347,7 +396,9 @@ def _wrap_source_result(gate: str, source_result: dict[str, Any]) -> dict[str, A
     }
 
 
-def _error_result(*, gate: str | None, status: str, findings: list[str]) -> dict[str, Any]:
+def _error_result(
+    *, gate: str | None, status: str, findings: list[str]
+) -> dict[str, Any]:
     return {
         "schema": WRAPPER_SCHEMA,
         "gate": gate,
@@ -375,11 +426,15 @@ def evaluate_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
             source_result = _dispatch_glat_cost(envelope)
         elif gate == "gint":
             source_result = _dispatch_gint(envelope)
+        elif gate == "diar-decision":
+            source_result = _dispatch_diar_decision(envelope)
         else:
             return _error_result(
                 gate=gate or None,
                 status="fail",
-                findings=["unsupported gate; expected one of glat-cost, gint, gwer"],
+                findings=[
+                    "unsupported gate; expected one of diar-decision, glat-cost, gint, gwer"
+                ],
             )
     except EnvelopeError as exc:
         return _error_result(gate=gate or None, status="fail", findings=[str(exc)])
@@ -404,7 +459,9 @@ def write_result(result: dict[str, Any], output_file: Path | None) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ingest redacted Faz 24 AI gate evidence")
+    parser = argparse.ArgumentParser(
+        description="Ingest redacted Faz 24 AI gate evidence"
+    )
     parser.add_argument("--evidence-file", type=Path, required=True)
     parser.add_argument("--output-file", type=Path, default=None)
     args = parser.parse_args()
