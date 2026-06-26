@@ -14,6 +14,10 @@ sys.path.insert(0, str(_SCRIPTS))
 import gint_gate  # noqa: E402
 
 
+def _sha(char: str) -> str:
+    return "sha256:" + (char * 64)
+
+
 def _pilot_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "tag": "ollama-pilot",
@@ -21,8 +25,8 @@ def _pilot_row(**overrides: object) -> dict[str, object]:
         "model": "llama3.1:8b",
         "dataset_kind": "pilot-meeting",
         "eval_set": "C:/faz24-pilot/intel-pilot-2026-06-25.json",
-        "eval_set_hash": "abc123def456",
-        "prompt_hash": "fed654cba321",
+        "eval_set_hash": _sha("a"),
+        "prompt_hash": _sha("b"),
         "n_samples": 8,
         "grounding_rate": 1.0,
         "action_precision": 0.86,
@@ -71,6 +75,8 @@ def test_gate_passes_with_pilot_gint_under_thresholds() -> None:
     assert result["findingCount"] == 0
     assert result["selectedGint"]["kind"] == "pilot-meeting"
     assert result["selectedGint"]["grounding_rate"] == 1.0
+    assert result["selectedGint"]["eval_set_hash"] == _sha("a")
+    assert result["selectedGint"]["prompt_hash"] == _sha("b")
 
 
 def test_synthetic_rows_do_not_satisfy_pilot_gate() -> None:
@@ -99,7 +105,9 @@ def test_synthetic_rows_do_not_satisfy_pilot_gate() -> None:
 
     assert result["status"] == "blocked"
     assert "synthetic-neutral" in result["kinds"]
-    assert any("no pilot-meeting G-INT row" in finding for finding in result["findings"])
+    assert any(
+        "no pilot-meeting G-INT row" in finding for finding in result["findings"]
+    )
 
 
 def test_pilot_tag_without_explicit_dataset_kind_is_not_enough() -> None:
@@ -132,6 +140,28 @@ def test_missing_backend_cannot_be_spoofed_as_pilot() -> None:
     assert result["selectedGint"] is None
 
 
+def test_pilot_hashes_must_be_full_sha256_values() -> None:
+    result = _evaluate(
+        [
+            _pilot_row(
+                eval_set_hash="abc123def456",
+                prompt_hash="sha256:not-a-real-digest",
+            )
+        ]
+    )
+
+    assert result["status"] == "blocked"
+    assert any(
+        "pilot row 1 eval_set_hash must be sha256:<64 hex>" in finding
+        for finding in result["findings"]
+    )
+    assert any(
+        "pilot row 1 prompt_hash must be sha256:<64 hex>" in finding
+        for finding in result["findings"]
+    )
+    assert result["selectedGint"] is None
+
+
 def test_fixture_path_cannot_be_spoofed_as_pilot() -> None:
     result = _evaluate([_pilot_row(eval_set="tests/fixtures/intel-pilot.json")])
 
@@ -144,7 +174,9 @@ def test_thresholds_are_required() -> None:
     result = _evaluate([_pilot_row()], min_grounding_rate=None)
 
     assert result["status"] == "blocked"
-    assert any("explicit G-INT thresholds are required" in f for f in result["findings"])
+    assert any(
+        "explicit G-INT thresholds are required" in f for f in result["findings"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -162,7 +194,9 @@ def test_thresholds_are_required() -> None:
         ("n_samples", 1),
     ],
 )
-def test_gate_fails_when_pilot_metric_misses_threshold(metric: str, value: float) -> None:
+def test_gate_fails_when_pilot_metric_misses_threshold(
+    metric: str, value: float
+) -> None:
     result = _evaluate([_pilot_row(**{metric: value})])
 
     assert result["status"] == "fail"
@@ -213,7 +247,9 @@ def test_gate_rejects_nested_iban_without_echoing_value() -> None:
 
     assert result["status"] == "fail"
     assert any("PII-shaped" in finding for finding in result["findings"])
-    assert all("TR330006100519786457841326" not in finding for finding in result["findings"])
+    assert all(
+        "TR330006100519786457841326" not in finding for finding in result["findings"]
+    )
 
 
 def test_gate_ignores_multiseed_aggregate_rows_when_pilot_row_passes() -> None:
