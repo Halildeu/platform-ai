@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -18,6 +19,11 @@ import faz24_ai_gate_ingest as ingest  # noqa: E402
 
 def _sha(char: str) -> str:
     return "sha256:" + (char * 64)
+
+
+def _sample_count_hash(eval_set_hash: str, n_samples: int) -> str:
+    raw = f"{eval_set_hash}\n{n_samples}\n"
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _gwer_envelope(*, dataset_kind: str = "pilot-meeting") -> dict[str, object]:
@@ -124,6 +130,8 @@ def _gint_envelope() -> dict[str, object]:
                     "eval_set": "C:/faz24-pilot/intel-pilot-2026-06-25.json",
                     "eval_set_hash": _sha("c"),
                     "prompt_hash": _sha("d"),
+                    "sample_manifest_hash": _sha("e"),
+                    "sample_count_hash": _sample_count_hash(_sha("c"), 8),
                     "n_samples": 8,
                     "grounding_rate": 1.0,
                     "action_precision": 0.86,
