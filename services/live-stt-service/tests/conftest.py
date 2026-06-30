@@ -44,11 +44,12 @@ class _FakeWhisperModel:
     def transcribe(self, _audio: object, **_kwargs: object) -> tuple[list[_FakeSeg], _FakeInfo]:
         self.calls += 1
         self.__class__.last_kwargs = dict(_kwargs)
+        language = _kwargs.get("language") or "tr"
         segments = [
             _FakeSeg(0, 0.0, 1.2, "Merhaba dünya."),
             _FakeSeg(1, 1.2, 2.5, "Toplantı başlıyor."),
         ]
-        return segments, _FakeInfo()
+        return segments, _FakeInfo(language=str(language))
 
 
 @pytest.fixture(autouse=True)
