@@ -4,9 +4,12 @@ Ported from the working GPU demo (commit d79e905). Flow per connection:
 
 1. Client streams float32 PCM16k chunks over `/ws/stream`.
 2. An RMS gate skips silence; every `STT_LIVE_INFER_INTERVAL_MS` the *live*
-   model transcribes the last `STT_LIVE_WINDOW_SEC` seconds -> `partial` event.
+   model transcribes the last `STT_LIVE_WINDOW_SEC` seconds -> same-seq
+   `partial` event. Defaults favor word-progressive UX while keeping the final
+   pass authoritative.
 3. On forced-commit age (`STT_FORCED_COMMIT_SEC`) the *final* model
-   re-transcribes the whole buffer -> `final` event; a tail overlap is kept so
+   re-transcribes the whole buffer -> `final` event; speech-ending silence can
+   also commit early via `STT_SILENCE_COMMIT_SEC`. A tail overlap is kept so
    words on the boundary are not lost.
 4. Hallucination filter suppresses classic Whisper artefacts.
 
@@ -23,7 +26,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import time
 
 import numpy as np
@@ -38,25 +40,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
-
-
-def _env_float(name: str, default: float) -> float:
-    return float(os.getenv(name, str(default)))
-
-
-def _env_int(name: str, default: int) -> int:
-    return int(os.getenv(name, str(default)))
-
-
-LIVE_INFER_INTERVAL_MS = _env_int("STT_LIVE_INFER_INTERVAL_MS", 700)
-LIVE_WINDOW_SEC = _env_float("STT_LIVE_WINDOW_SEC", 3.0)
-FINAL_WINDOW_SEC = _env_float("STT_FINAL_WINDOW_SEC", 10.0)
-FORCED_COMMIT_SEC = _env_float("STT_FORCED_COMMIT_SEC", 8.0)
-TAIL_OVERLAP_SEC = _env_float("STT_TAIL_OVERLAP_SEC", 1.0)
-SILENCE_RMS = _env_float("STT_SILENCE_RMS", 0.025)
-MIN_SPEECH_RMS = _env_float("STT_MIN_SPEECH_RMS", 0.03)
-MIN_INFER_SAMPLES = int(_env_float("STT_MIN_INFER_SEC", 0.5) * SAMPLE_RATE)
-DEBUG_EVERY_SEC = _env_float("STT_DEBUG_EVERY_SEC", 1.0)
 
 
 def _audio_rms(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> float:
@@ -75,6 +58,7 @@ async def stream_endpoint(
     live_service = get_live_service(settings)
     final_service = get_final_service(settings)
     debug_enabled = settings.stream_debug
+    min_infer_samples = int(settings.min_infer_sec * SAMPLE_RATE)
 
     try:
         await websocket.send_json({"type": "loading", "stage": "live_model"})
@@ -113,6 +97,7 @@ async def stream_endpoint(
     sent_draft = ""
     pcm_chunks = 0
     speech_seen = False
+    last_speech_t: float | None = None
 
     async def send_debug(event: str, **payload: object) -> None:
         # Transcript-free diagnostics; opt-in only (KVKK log discipline, #30).
@@ -123,15 +108,16 @@ async def stream_endpoint(
 
     async def commit_current(reason: str) -> None:
         nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
+        nonlocal last_speech_t
 
         buffer_sec = round(buffer.size / SAMPLE_RATE, 2)
-        if buffer.size < MIN_INFER_SAMPLES:
+        if buffer.size < min_infer_samples:
             await send_debug("final_skip_short_buffer", buffer_sec=buffer_sec)
             return
 
         audio = buffer.copy()
         rms = _audio_rms(audio)
-        if rms < MIN_SPEECH_RMS:
+        if rms < settings.min_speech_rms:
             await send_debug("final_skip_low_rms", rms=round(rms, 5), buffer_sec=buffer_sec)
             return
 
@@ -172,11 +158,12 @@ async def stream_endpoint(
         last_draft = ""
         sent_draft = ""
         speech_seen = False
+        last_speech_t = None
 
-        tail_samples = int(TAIL_OVERLAP_SEC * SAMPLE_RATE)
+        tail_samples = int(settings.tail_overlap_sec * SAMPLE_RATE)
         buffer = (
             buffer[-tail_samples:]
-            if buffer.shape[0] > tail_samples
+            if tail_samples > 0 and buffer.shape[0] > tail_samples
             else np.zeros(0, dtype=np.float32)
         )
         buffer_start_t = time.time() if buffer.size else None
@@ -197,14 +184,14 @@ async def stream_endpoint(
                 buffer_start_t = now
 
             buffer = np.concatenate([buffer, samples])
-            max_samples = int(FINAL_WINDOW_SEC * SAMPLE_RATE)
+            max_samples = int(settings.final_window_sec * SAMPLE_RATE)
             if buffer.shape[0] > max_samples:
                 buffer = buffer[-max_samples:]
 
             sample_rms = _audio_rms(samples)
             buffer_age = now - buffer_start_t
 
-            if now - last_debug_t >= DEBUG_EVERY_SEC:
+            if now - last_debug_t >= settings.debug_every_sec:
                 await send_debug(
                     "audio_tick",
                     chunks=pcm_chunks,
@@ -215,30 +202,37 @@ async def stream_endpoint(
                 )
                 last_debug_t = now
 
-            if buffer_age >= FORCED_COMMIT_SEC and speech_seen:
+            if buffer_age >= settings.forced_commit_sec and speech_seen:
                 await commit_current("forced")
                 continue
 
-            if sample_rms >= SILENCE_RMS:
+            if sample_rms >= settings.silence_rms:
                 speech_seen = True
+                last_speech_t = now
             else:
+                if (
+                    speech_seen
+                    and last_speech_t is not None
+                    and now - last_speech_t >= settings.silence_commit_sec
+                ):
+                    await commit_current("silence")
                 continue
 
-            if (now - last_live_infer_t) * 1000 < LIVE_INFER_INTERVAL_MS:
+            if (now - last_live_infer_t) * 1000 < settings.live_infer_interval_ms:
                 continue
             last_live_infer_t = now
 
-            live_samples = int(LIVE_WINDOW_SEC * SAMPLE_RATE)
+            live_samples = int(settings.live_window_sec * SAMPLE_RATE)
             live_audio = (
                 buffer[-live_samples:].copy() if buffer.shape[0] > live_samples else buffer.copy()
             )
 
-            if live_audio.size < MIN_INFER_SAMPLES:
+            if live_audio.size < min_infer_samples:
                 await send_debug("draft_skip_short_buffer")
                 continue
 
             live_rms = _audio_rms(live_audio)
-            if live_rms < MIN_SPEECH_RMS:
+            if live_rms < settings.min_speech_rms:
                 await send_debug("draft_skip_low_rms", rms=round(live_rms, 5))
                 continue
 
@@ -248,9 +242,7 @@ async def stream_endpoint(
                 draft = await run_in_threadpool(live_service.transcribe_array, live_audio, False)
             except Exception as exc:  # noqa: BLE001 - skip this tick, keep stream alive
                 # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
-                logger.warning(
-                    "Draft pass error err_class=%s", type(exc).__name__, exc_info=True
-                )
+                logger.warning("Draft pass error err_class=%s", type(exc).__name__, exc_info=True)
                 await send_debug("draft_error", error=type(exc).__name__)
                 continue
 

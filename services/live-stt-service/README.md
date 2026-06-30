@@ -8,11 +8,11 @@ Kısa ses chunk'larını (2-10 sn) hızlı geçici (draft) transcript'e çevirir
 
 PoC scope:
 - Senkron HTTP `POST /transcribe` (multipart audio file)
+- WebSocket `/ws/stream` düşük gecikmeli canlı draft/final event akışı
 - faster-whisper `medium int8` CPU
 - Türkçe (`STT_LANGUAGE=tr` default)
 
 Sonraki sliceler:
-- WebSocket streaming (chunk-by-chunk, draft → final state machine)
 - GPU variant (`large-v3-turbo` int8/float16)
 - Live segment merge + revize
 - Redis queue tarafına push (audio-gateway-service ile entegre)
@@ -23,9 +23,11 @@ Sonraki sliceler:
 app/
 ├── core/config.py            # Pydantic Settings (env STT_*)
 ├── models/schemas.py         # request/response Pydantic
-├── services/transcribe.py    # Whisper wrapper (lazy-load + lock)
+├── services/transcribe.py    # HTTP Whisper wrapper (lazy-load + lock)
+├── services/streaming_models.py # WS live/final Whisper wrappers
 └── api/
     ├── health.py             # GET /health
+    ├── stream.py             # WS /ws/stream live partial/final events
     └── transcribe.py         # POST /transcribe
 tests/
 ├── conftest.py               # mock faster_whisper (no model download in CI)
@@ -62,6 +64,33 @@ uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload
 curl -F "audio=@sample-tr.wav" http://localhost:8200/transcribe | jq
 curl http://localhost:8200/health | jq
 ```
+
+## WebSocket `/ws/stream` canlı transkript davranışı
+
+`/ws/stream` float32 PCM 16 kHz frame kabul eder ve client-facing event
+kontratı `docs/contracts/ws-stream-events.schema.json` ile CI'da pinlenir.
+
+Varsayılan canlı UX ayarları:
+
+| Env | Default | Amaç |
+|---|---:|---|
+| `STT_LIVE_INFER_INTERVAL_MS` | `350` | Konuşma aktifken gerçek partial event cadence'i |
+| `STT_LIVE_WINDOW_SEC` | `2.0` | Kısa rolling context; kelime-progressive hissi |
+| `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
+| `STT_SILENCE_COMMIT_SEC` | `0.9` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
+| `STT_FORCED_COMMIT_SEC` | `8.0` | Uzun konuşmada bounded finalization safety |
+| `STT_SILENCE_RMS` / `STT_MIN_SPEECH_RMS` | `0.025` / `0.03` | Sessizlik/konuşma hysteresis bandı |
+
+Partial event'ler aynı `seq` ile gelir; client aynı transcript satırını
+günceller. `confirmed`/`tentative` alanları consumer tarafında ayrı
+stil vermek için ayrılmıştır. Final event doğru/kalıcı metni üretir ve draft
+satırını netleştirir. Sunucu logları transcript içeriği yazmaz; debug event'ler
+`STT_STREAM_DEBUG=true` olmadıkça kapalıdır ve açıkken de transcript-free kalır.
+Bu ayarlar `app.core.config.Settings` içinde bounded Pydantic alanlarıdır:
+`STT_MIN_SPEECH_RMS >= STT_SILENCE_RMS`,
+`STT_MIN_INFER_SEC <= STT_LIVE_WINDOW_SEC` ve
+`STT_TAIL_OVERLAP_SEC < STT_FINAL_WINDOW_SEC` guard'ları boot sırasında
+geçersiz rollout'u durdurur.
 
 ## Docker
 
