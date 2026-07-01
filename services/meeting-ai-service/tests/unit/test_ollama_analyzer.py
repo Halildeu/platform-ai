@@ -10,6 +10,7 @@ import pytest
 from app.core.config import Settings
 from app.services.analyze import (
     BackendUnavailableError,
+    MeetingAnalysisService,
     OllamaAnalyzer,
     OllamaSchemaInvalidError,
     OllamaUnparseableOutputError,
@@ -120,6 +121,58 @@ def test_ollama_options_omit_seed_when_unset(monkeypatch: pytest.MonkeyPatch) ->
     opts = captured["options"]
     assert isinstance(opts, dict)
     assert "seed" not in opts
+
+
+def test_ollama_prompt_requires_extractive_summary_and_independent_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(captured))
+    transcript = (
+        "Raporun cuma gününe kadar tamamlanmasına karar verdik ve "
+        "bu görevi birinci ekip üstlenecek."
+    )
+
+    OllamaAnalyzer(_settings()).analyze(transcript)
+
+    prompt = captured["prompt"]
+    assert isinstance(prompt, str)
+    assert '"summary" İÇİN: cümleleri metinden AYNEN kopyala' in prompt
+    assert '"decisions" ve "action_items" BİRBİRİNDEN BAĞIMSIZ' in prompt
+    assert "HER İKİ listeye de ekle" in prompt
+    assert transcript in prompt
+
+
+def test_overlapping_decision_action_and_summary_survive_grounding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transcript = (
+        "Raporun cuma gününe kadar tamamlanmasına karar verdik ve "
+        "bu görevi birinci ekip üstlenecek."
+    )
+    payload = {
+        "summary": transcript,
+        "decisions": [transcript],
+        "action_items": [
+            {
+                "text": transcript,
+                "owner": "birinci ekip",
+                "due_date": "cuma gününe kadar",
+            }
+        ],
+    }
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
+
+    result = MeetingAnalysisService(_settings(redact_pii=True)).analyze(transcript)
+
+    assert result.summary == transcript
+    assert result.summary_grounding_status == "verified"
+    assert result.decisions == [transcript]
+    assert len(result.action_items) == 1
+    assert result.action_items[0].text == transcript
+    assert result.action_items[0].owner == "birinci ekip"
+    assert result.action_items[0].due_date == "cuma gününe kadar"
+    assert result.rejected_claims == []
 
 
 def test_ollama_missing_field_is_schema_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
