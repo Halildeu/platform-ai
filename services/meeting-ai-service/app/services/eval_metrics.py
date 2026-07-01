@@ -21,12 +21,25 @@ overlap, NOT semantic-truth metrics.
 
 from __future__ import annotations
 
-from app.services.citation import _similarity, _tokens, ground_claims
+from app.services.citation import _tokens, ground_claims
 
 
 def _claims_match(a: str, b: str, threshold: float) -> bool:
-    """Two claims match if their normalized token overlap clears the threshold."""
-    return _similarity(_tokens(a), _tokens(b)) >= threshold
+    """Match concise and extractive claims with symmetric lexical overlap.
+
+    Citation grounding deliberately measures how much of a generated claim is
+    covered by one source sentence. Eval references have a different shape:
+    they are often concise labels while the safe model output is a longer,
+    verbatim transcript sentence. Sørensen-Dice overlap treats either form
+    consistently without allowing a single shared token to match a much longer
+    unrelated claim.
+    """
+    a_tokens = _tokens(a)
+    b_tokens = _tokens(b)
+    if not a_tokens or not b_tokens:
+        return False
+    similarity = 2 * len(a_tokens & b_tokens) / (len(a_tokens) + len(b_tokens))
+    return similarity >= threshold
 
 
 def claim_metrics(
