@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import multiprocessing as mp
 import queue
 import threading
@@ -94,6 +95,26 @@ def _audio_from_payload(payload: dict[str, bytes | str | None]) -> BytesIO | str
     return BytesIO(raw)
 
 
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, float | int):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
+
+
+def _is_usable_segment(seg: object, cfg: _WorkerConfig) -> bool:
+    text = str(getattr(seg, "text", "")).strip()
+    if is_hallucination(text):
+        return False
+
+    no_speech_prob = _finite_float(getattr(seg, "no_speech_prob", None))
+    if no_speech_prob is not None and no_speech_prob > cfg.no_speech_threshold:
+        return False
+
+    avg_logprob = _finite_float(getattr(seg, "avg_logprob", None))
+    return avg_logprob is None or avg_logprob >= cfg.log_prob_threshold
+
+
 def _transcribe_with_model(
     model: object, cfg: _WorkerConfig, audio_payload: dict[str, bytes | str | None]
 ) -> dict[str, Any]:
@@ -109,18 +130,20 @@ def _transcribe_with_model(
         log_prob_threshold=cfg.log_prob_threshold,
         compression_ratio_threshold=cfg.compression_ratio_threshold,
     )
-    segments = [
-        {
-            "id": idx,
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text.strip(),
-            "avg_logprob": getattr(seg, "avg_logprob", None),
-            "no_speech_prob": getattr(seg, "no_speech_prob", None),
-        }
-        for idx, seg in enumerate(segments_iter)
-        if not is_hallucination(seg.text)
-    ]
+    segments = []
+    for idx, seg in enumerate(segments_iter):
+        if not _is_usable_segment(seg, cfg):
+            continue
+        segments.append(
+            {
+                "id": idx,
+                "start": seg.start,
+                "end": seg.end,
+                "text": seg.text.strip(),
+                "avg_logprob": getattr(seg, "avg_logprob", None),
+                "no_speech_prob": getattr(seg, "no_speech_prob", None),
+            }
+        )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     full_text = " ".join(str(s["text"]) for s in segments).strip()
     if is_hallucination(full_text):

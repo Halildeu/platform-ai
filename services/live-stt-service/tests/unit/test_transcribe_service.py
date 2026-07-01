@@ -111,6 +111,66 @@ def test_sync_transcribe_suppresses_all_hallucination_text(
     assert result.segments == []
 
 
+def test_sync_transcribe_filters_no_speech_segments(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.conftest import _FakeInfo, _FakeSeg
+
+    class MostlySilenceWhisperModel:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def transcribe(self, _audio: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+            return [
+                _FakeSeg(
+                    0,
+                    0.0,
+                    1.0,
+                    "Kendinize iyi geceler geçin.",
+                    no_speech_prob=settings.no_speech_threshold + 0.01,
+                ),
+                _FakeSeg(1, 1.0, 2.0, "Toplantı kaydı başladı."),
+            ], _FakeInfo()
+
+    monkeypatch.setattr(sys.modules["faster_whisper"], "WhisperModel", MostlySilenceWhisperModel)
+
+    svc = TranscribeService(settings)
+    result = svc.transcribe(BytesIO(b"\x00\x00"))
+
+    assert result.text == "Toplantı kaydı başladı."
+    assert [segment.text for segment in result.segments] == ["Toplantı kaydı başladı."]
+
+
+def test_sync_transcribe_filters_low_confidence_segments(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.conftest import _FakeInfo, _FakeSeg
+
+    class LowConfidenceWhisperModel:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def transcribe(self, _audio: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+            return [
+                _FakeSeg(
+                    0,
+                    0.0,
+                    1.0,
+                    "Fena ya bizim bu şankeye damar.",
+                    avg_logprob=settings.log_prob_threshold - 0.01,
+                ),
+                _FakeSeg(1, 1.0, 2.0, "Söylediklerimi doğru yazıyor."),
+            ], _FakeInfo()
+
+    monkeypatch.setattr(sys.modules["faster_whisper"], "WhisperModel", LowConfidenceWhisperModel)
+
+    svc = TranscribeService(settings)
+    result = svc.transcribe(BytesIO(b"\x00\x00"))
+
+    assert result.text == "Söylediklerimi doğru yazıyor."
+    assert [segment.text for segment in result.segments] == ["Söylediklerimi doğru yazıyor."]
+
+
 def test_auto_language(settings: Settings) -> None:
     settings_auto = settings.model_copy(update={"language": "auto"})
     svc = TranscribeService(settings_auto)
