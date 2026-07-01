@@ -23,6 +23,7 @@ from typing import Any, BinaryIO, Protocol
 
 from app.core.config import Settings, resolve_worker_count
 from app.models.schemas import TranscribeResponse
+from app.services.hallucination import is_hallucination
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,10 @@ class _WorkerConfig:
     language: str
     beam_size: int
     vad_filter: bool
+    condition_on_previous_text: bool
+    no_speech_threshold: float
+    log_prob_threshold: float
+    compression_ratio_threshold: float
 
     @classmethod
     def from_settings(cls, settings: Settings) -> _WorkerConfig:
@@ -66,6 +71,10 @@ class _WorkerConfig:
             language=settings.language,
             beam_size=settings.beam_size,
             vad_filter=settings.vad_filter,
+            condition_on_previous_text=settings.condition_on_previous_text,
+            no_speech_threshold=settings.no_speech_threshold,
+            log_prob_threshold=settings.log_prob_threshold,
+            compression_ratio_threshold=settings.compression_ratio_threshold,
         )
 
 
@@ -95,6 +104,10 @@ def _transcribe_with_model(
         language=language,
         beam_size=cfg.beam_size,
         vad_filter=cfg.vad_filter,
+        condition_on_previous_text=cfg.condition_on_previous_text,
+        no_speech_threshold=cfg.no_speech_threshold,
+        log_prob_threshold=cfg.log_prob_threshold,
+        compression_ratio_threshold=cfg.compression_ratio_threshold,
     )
     segments = [
         {
@@ -106,9 +119,13 @@ def _transcribe_with_model(
             "no_speech_prob": getattr(seg, "no_speech_prob", None),
         }
         for idx, seg in enumerate(segments_iter)
+        if not is_hallucination(seg.text)
     ]
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     full_text = " ".join(str(s["text"]) for s in segments).strip()
+    if is_hallucination(full_text):
+        full_text = ""
+        segments = []
     return {
         "text": full_text,
         "language": info.language,

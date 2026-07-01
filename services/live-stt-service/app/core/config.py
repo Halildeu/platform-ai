@@ -25,6 +25,10 @@ class Settings(BaseSettings):
       STT_LANGUAGE         force language code (default: tr); "auto" = detect
       STT_BEAM_SIZE        5 (default — accuracy/speed trade-off)
       STT_VAD_FILTER       True (default — Whisper built-in VAD)
+      STT_CONDITION_ON_PREVIOUS_TEXT False (default — suppress cross-segment hallucination drift)
+      STT_NO_SPEECH_THRESHOLD 0.75 (default — align sync /transcribe with live stream)
+      STT_LOG_PROB_THRESHOLD -1.0 (default — reject low-confidence decode paths)
+      STT_COMPRESSION_RATIO_THRESHOLD 2.4 (default — reject repetitive decode paths)
       STT_MAX_AUDIO_MB     50 (default — DoS guard)
       STT_LOG_LEVEL        INFO (default)
       STT_WORKER_MAX_WORKERS 1 (default, subprocess worker pool size)
@@ -55,6 +59,13 @@ class Settings(BaseSettings):
     language: str = Field(default="tr", description="ISO 639-1 or 'auto'")
     beam_size: int = Field(default=5, ge=1, le=10)
     vad_filter: bool = Field(default=True)
+    # Sync /transcribe decode tuning. Defaults intentionally match the live
+    # WebSocket path so gateway-mediated recorder output does not regress into
+    # classic Whisper silence/repetition artefacts.
+    condition_on_previous_text: bool = Field(default=False)
+    no_speech_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    log_prob_threshold: float = Field(default=-1.0, ge=-10.0, le=10.0)
+    compression_ratio_threshold: float = Field(default=2.4, ge=0.1, le=10.0)
     max_audio_mb: int = Field(default=50, ge=1, le=500)
     log_level: str = Field(default="INFO")
     # Lower bound 1s allows test-suite to assert timeout behaviour without slow sleeps;
