@@ -35,6 +35,25 @@ def test_claim_metrics_duplicate_prediction_not_double_counted() -> None:
     assert m["recall"] == 1.0
 
 
+def test_claim_metrics_matches_concise_reference_to_extractive_sentence() -> None:
+    m = claim_metrics(
+        expected=["raporlama görevini birinci ekip üstlenecek"],
+        predicted=[
+            "Raporlama bu haftanın cumasına kadar tamamlanacak "
+            "ve bu görevi birinci ekip üstlenecek."
+        ],
+    )
+    assert m == {"precision": 1.0, "recall": 1.0, "f1": 1.0}
+
+
+def test_claim_metrics_rejects_single_token_overlap_with_long_claim() -> None:
+    m = claim_metrics(
+        expected=["raporlama görevini birinci ekip üstlenecek"],
+        predicted=["İkinci ekip test ortamını hazırlayacak"],
+    )
+    assert m == {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+
+
 def test_claim_metrics_empty_sets() -> None:
     assert claim_metrics([], []) == {"precision": 1.0, "recall": 1.0, "f1": 1.0}
     assert claim_metrics(["x görevi"], [])["recall"] == 0.0

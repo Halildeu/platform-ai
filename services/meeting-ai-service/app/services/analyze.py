@@ -170,6 +170,13 @@ metnini incele ve JSON formatında yanıt ver.
 - Yanıt dili Türkçe olsun; ama metinde geçen özel adları, ürün/proje adlarını, \
 teknik terimleri ve İngilizce code-switch ifadelerini (ör. "deadline", "sprint") \
 aynen koru.
+- "summary" İÇİN: cümleleri metinden AYNEN kopyala (extractive). Kendi \
+kelimelerinle özetleme, birden fazla cümleyi tek cümlede birleştirme veya \
+yeniden ifade etme (paraphrase) YAPMA; metindeki en önemli cümleleri, metindeki \
+haliyle birebir seç (en fazla 3 cümle).
+- "decisions" ve "action_items" BİRBİRİNDEN BAĞIMSIZ değerlendirilir: bir cümle \
+hem karar hem aksiyon bildiriyorsa, o cümleyi DEĞİŞTİRMEDEN, AYNEN, HER İKİ \
+listeye de ekle. Sadece birine koyup diğerini atlama.
 - Karar ve aksiyonları metinde GEÇEN ifadelere sadık kal; metinde olmayan bilgi \
 ekleme, uydurma.
 - Tek karar/aksiyon/özet cümlesinde farklı transcript cümlelerinden ayrı olguları \
@@ -181,12 +188,22 @@ döndür.
 - "due_date" alanını normalize etme; metinde nasıl geçiyorsa öyle yaz. Örneğin \
 metinde sadece "cuma" varsa "cuma" yaz, takvim tarihi uydurma.
 
+ÖRNEK (aynı cümle hem karar hem aksiyon bildiriyor — cümleyi AYNEN iki listeye \
+de yaz, parçalama/yeniden yazma):
+Metindeki cümle: "Raporun cuma gününe kadar tamamlanmasına karar verdik ve bu \
+görevi birinci ekip üstlenecek."
+-> "decisions": ["Raporun cuma gününe kadar tamamlanmasına karar verdik ve bu \
+görevi birinci ekip üstlenecek."]
+-> "action_items": [{{"text": "Raporun cuma gününe kadar tamamlanmasına karar \
+verdik ve bu görevi birinci ekip üstlenecek.", "owner": "birinci ekip", \
+"due_date": "cuma gününe kadar"}}]
+
 Metin:
 {transcript}
 
 Lütfen sadece geçerli JSON döndür, başka bir şey ekleme:
 {{
-  "summary": "<maksimum 3 cümle toplantı özeti>",
+  "summary": "<metinden AYNEN alınmış, en fazla 3 cümlelik özet>",
   "decisions": ["<karar 1>", "<karar 2>"],
   "action_items": [
     {{
