@@ -88,3 +88,41 @@ pip install -r requirements.txt -r requirements-speechbrain.txt
 ```
 
 Her koşu sonucu `docs/evidence/diar-results-<tarih>.jsonl`'e eklenir.
+
+## 2026-07-02 pilot and overlap decision update
+
+The synthetic-smoke rows above remain harness evidence only. Backend selection
+uses the following metadata-only measurements from consented Turkish pilot
+speech and a controlled real-voice overlap set. Raw audio, transcript, RTTM,
+participant names, and speaker identities are not committed.
+The comparison rows are recorded in
+`docs/evidence/diar-overlap-results-2026-07-02.jsonl`.
+
+### Pilot set
+
+| Backend | n | Corpus DER | RTF | p50 ms | Peak VRAM delta |
+|---|---:|---:|---:|---:|---:|
+| pyannote 3.1 | 3 | **17.88%** | 0.026 | 1743 | 2154 MB |
+| SpeechBrain ECAPA | 3 | 20.95% | **0.006** | **332** | **366 MB** |
+
+### Controlled real-voice overlap set
+
+| Backend | n | Audio | Corpus DER | Mean DER | Max DER | RTF | p50 ms | Peak VRAM delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pyannote 3.1 | 3 | 81.0 s | **20.30%** | **19.20%** | 31.31% | 0.025 | 635 | 2235 MB |
+| SpeechBrain ECAPA | 3 | 81.0 s | 32.15% | 32.64% | 35.53% | **0.006** | **103** | **411 MB** |
+
+Decision reading:
+
+- Both candidates pass the 30% corpus DER ceiling on the pilot set.
+- Only pyannote passes the same ceiling on the overlap set.
+- SpeechBrain is substantially faster and lighter, so it remains a measured
+  resource-constrained fallback.
+- Accuracy is the #161 product wedge; therefore pyannote is the proposed
+  primary self-hosted post-processing backend.
+
+The selected pilot row is stored at
+`docs/evidence/diar-decision-pilot-2026-07-02.jsonl` and is verified by
+`diar_decision_gate.py`. The canonical G-WER/DER quality gate independently
+passed with WER 6.47% (`n=6`, 1004 reference words) and pyannote corpus DER
+17.88% (`n=3`).
