@@ -23,9 +23,30 @@ def test_hallucination_filter_blocks_known_artifacts() -> None:
     assert is_hallucination("Thank you for watching") is True
 
 
+def test_hallucination_filter_blocks_repeated_decode_loops() -> None:
+    assert (
+        is_hallucination(
+            "Akşama aktif diyorsun Akşam aktif diyorsun ya "
+            "Akşama aktif diyorsun yani Akışa aktif diyorsun yani."
+        )
+        is True
+    )
+    assert (
+        is_hallucination(
+            "Söylediklerimin yarısını ne söylediklerimin yarısını neden "
+            "söylediklerimin yarısını neden yok?"
+        )
+        is True
+    )
+
+
 def test_hallucination_filter_passes_real_speech() -> None:
     assert is_hallucination("Toplantı yarın saat onda başlayacak.") is False
     assert is_hallucination("Bütçe raporunu cuma günü teslim edelim.") is False
+    assert (
+        is_hallucination("Bugün toplantı kaydında canlı transkript gecikmesini test ediyoruz.")
+        is False
+    )
 
 
 def test_streaming_defaults_follow_adr_0031() -> None:
