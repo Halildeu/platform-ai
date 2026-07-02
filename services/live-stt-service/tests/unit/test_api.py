@@ -86,7 +86,7 @@ def _force_service_error(client, exc_to_raise: BaseException, sleep_for: float =
 
     svc = get_service(get_settings())
 
-    def boom(_audio):  # type: ignore[no-untyped-def]
+    def boom(_audio, *_args, **_kwargs):  # type: ignore[no-untyped-def]
         if sleep_for > 0:
             time.sleep(sleep_for)
         if exc_to_raise is not None:
@@ -377,5 +377,13 @@ def test_transcribe_language_iso639_required_field(client) -> None:  # type: ign
         files={"audio": ("c.wav", audio, "audio/wav")},
         params={"language": "en"},
     )
-    # In test env (fake whisper) language in response = language param or default
     assert r2.status_code == 200
+    assert r2.json()["language"] == "en"
+
+    r3 = client.post(
+        "/transcribe",
+        files={"audio": ("c.wav", audio, "audio/wav")},
+        params={"language": "tr-TR"},
+    )
+    assert r3.status_code == 400
+    assert "ISO 639-1" in r3.json()["detail"]

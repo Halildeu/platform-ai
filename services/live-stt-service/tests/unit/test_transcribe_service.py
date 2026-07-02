@@ -55,6 +55,13 @@ def test_auto_language(settings: Settings) -> None:
     assert result.language == "tr"
 
 
+def test_request_language_override(settings: Settings) -> None:
+    svc = TranscribeService(settings)
+    result = svc.transcribe(BytesIO(b"\x00"), language="en")
+
+    assert result.language == "en"
+
+
 def test_get_service_singleton(settings: Settings) -> None:
     s1 = get_service(settings)
     s2 = get_service(settings)

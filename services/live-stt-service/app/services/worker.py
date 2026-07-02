@@ -39,7 +39,10 @@ class WorkerPool(Protocol):
     """Minimal interface used by TranscribeService."""
 
     def transcribe(
-        self, audio: BinaryIO | str, timeout_sec: float | None = None
+        self,
+        audio: BinaryIO | str,
+        timeout_sec: float | None = None,
+        language: str | None = None,
     ) -> TranscribeResponse:
         """Run one transcription."""
 
@@ -86,9 +89,13 @@ def _audio_from_payload(payload: dict[str, bytes | str | None]) -> BytesIO | str
 
 
 def _transcribe_with_model(
-    model: object, cfg: _WorkerConfig, audio_payload: dict[str, bytes | str | None]
+    model: object,
+    cfg: _WorkerConfig,
+    audio_payload: dict[str, bytes | str | None],
+    language_override: str | None = None,
 ) -> dict[str, Any]:
-    language = None if cfg.language == "auto" else cfg.language
+    requested_language = language_override or cfg.language
+    language = None if requested_language == "auto" else requested_language
     start = time.perf_counter()
     segments_iter, info = model.transcribe(  # type: ignore[attr-defined]
         _audio_from_payload(audio_payload),
@@ -163,11 +170,17 @@ def _worker_main(
                 )
             payload = task["audio"]
             assert isinstance(payload, dict)
+            language = task.get("language")
             result_queue.put(
                 {
                     "job_id": job_id,
                     "ok": True,
-                    "result": _transcribe_with_model(model, cfg, payload),
+                    "result": _transcribe_with_model(
+                        model,
+                        cfg,
+                        payload,
+                        language if isinstance(language, str) else None,
+                    ),
                 }
             )
         except BaseException as exc:  # noqa: BLE001 - child must report sanitized class
@@ -199,11 +212,14 @@ class InlineWorkerPool:
         return self._model
 
     def transcribe(
-        self, audio: BinaryIO | str, timeout_sec: float | None = None
+        self,
+        audio: BinaryIO | str,
+        timeout_sec: float | None = None,
+        language: str | None = None,
     ) -> TranscribeResponse:
         model = self._ensure_model()
         payload = _audio_payload(audio)
-        return TranscribeResponse(**_transcribe_with_model(model, self._cfg, payload))
+        return TranscribeResponse(**_transcribe_with_model(model, self._cfg, payload, language))
 
     @property
     def model_loaded(self) -> bool:
@@ -320,14 +336,22 @@ class ProcessWorkerPool:
         self._available.release()
 
     def transcribe(
-        self, audio: BinaryIO | str, timeout_sec: float | None = None
+        self,
+        audio: BinaryIO | str,
+        timeout_sec: float | None = None,
+        language: str | None = None,
     ) -> TranscribeResponse:
         slot = self._acquire_slot()
         try:
             job_id = str(uuid.uuid4())
             deadline = time.monotonic() + timeout_sec if timeout_sec is not None else None
             slot.task_queue.put(
-                {"type": "transcribe", "job_id": job_id, "audio": _audio_payload(audio)}
+                {
+                    "type": "transcribe",
+                    "job_id": job_id,
+                    "audio": _audio_payload(audio),
+                    "language": language,
+                }
             )
             while True:
                 if not slot.is_alive():
@@ -393,10 +417,14 @@ def _supervisor_main(
     model: object | None = None
     executor: ThreadPoolExecutor | None = None
 
-    def _run_job(job_id: str, payload: dict[str, bytes | str | None]) -> None:
+    def _run_job(
+        job_id: str,
+        payload: dict[str, bytes | str | None],
+        language: str | None,
+    ) -> None:
         assert model is not None
         try:
-            result = _transcribe_with_model(model, cfg, payload)
+            result = _transcribe_with_model(model, cfg, payload, language)
             result_queue.put({"job_id": job_id, "ok": True, "result": result})
         except BaseException as exc:  # noqa: BLE001 - report sanitized class only
             result_queue.put({"job_id": job_id, "ok": False, "error_class": type(exc).__name__})
@@ -432,7 +460,13 @@ def _supervisor_main(
         assert executor is not None
         payload = task["audio"]
         assert isinstance(payload, dict)
-        executor.submit(_run_job, str(task["job_id"]), payload)
+        language = task.get("language")
+        executor.submit(
+            _run_job,
+            str(task["job_id"]),
+            payload,
+            language if isinstance(language, str) else None,
+        )
 
 
 class SharedModelWorkerPool:
@@ -528,7 +562,10 @@ class SharedModelWorkerPool:
             self._start()
 
     def transcribe(
-        self, audio: BinaryIO | str, timeout_sec: float | None = None
+        self,
+        audio: BinaryIO | str,
+        timeout_sec: float | None = None,
+        language: str | None = None,
     ) -> TranscribeResponse:
         self._available.acquire()
         job_id = str(uuid.uuid4())
@@ -541,7 +578,14 @@ class SharedModelWorkerPool:
         try:
             if process is None or not process.is_alive():
                 raise WorkerCrashedError("STT shared supervisor not running")
-            task_queue.put({"type": "transcribe", "job_id": job_id, "audio": _audio_payload(audio)})
+            task_queue.put(
+                {
+                    "type": "transcribe",
+                    "job_id": job_id,
+                    "audio": _audio_payload(audio),
+                    "language": language,
+                }
+            )
             try:
                 response = jq.get(timeout=timeout_sec) if timeout_sec is not None else jq.get()
             except queue.Empty:

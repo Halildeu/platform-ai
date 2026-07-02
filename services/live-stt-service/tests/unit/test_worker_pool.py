@@ -41,9 +41,10 @@ def test_transcribe_service_delegates_to_worker_pool() -> None:
     class FakePool:
         model_loaded = False
 
-        def transcribe(self, audio, timeout_sec=None):  # type: ignore[no-untyped-def]
+        def transcribe(self, audio, timeout_sec=None, language=None):  # type: ignore[no-untyped-def]
             assert isinstance(audio, BytesIO)
             assert timeout_sec is None
+            assert language is None
             self.model_loaded = True
             return TranscribeResponse(
                 text="ok",
