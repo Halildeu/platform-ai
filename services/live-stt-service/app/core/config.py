@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import socket
 from dataclasses import dataclass
+from typing import Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +25,10 @@ class Settings(BaseSettings):
       STT_LANGUAGE         force language code (default: tr); "auto" = detect
       STT_BEAM_SIZE        5 (default — accuracy/speed trade-off)
       STT_VAD_FILTER       True (default — Whisper built-in VAD)
+      STT_CONDITION_ON_PREVIOUS_TEXT False (default — suppress cross-segment hallucination drift)
+      STT_NO_SPEECH_THRESHOLD 0.75 (default — align sync /transcribe with live stream)
+      STT_LOG_PROB_THRESHOLD -1.0 (default — reject low-confidence decode paths)
+      STT_COMPRESSION_RATIO_THRESHOLD 2.4 (default — reject repetitive decode paths)
       STT_MAX_AUDIO_MB     50 (default — DoS guard)
       STT_LOG_LEVEL        INFO (default)
       STT_WORKER_MAX_WORKERS 1 (default, subprocess worker pool size)
@@ -54,6 +59,13 @@ class Settings(BaseSettings):
     language: str = Field(default="tr", description="ISO 639-1 or 'auto'")
     beam_size: int = Field(default=5, ge=1, le=10)
     vad_filter: bool = Field(default=True)
+    # Sync /transcribe decode tuning. Defaults intentionally match the live
+    # WebSocket path so gateway-mediated recorder output does not regress into
+    # classic Whisper silence/repetition artefacts.
+    condition_on_previous_text: bool = Field(default=False)
+    no_speech_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    log_prob_threshold: float = Field(default=-1.0, ge=-10.0, le=10.0)
+    compression_ratio_threshold: float = Field(default=2.4, ge=0.1, le=10.0)
     max_audio_mb: int = Field(default=50, ge=1, le=500)
     log_level: str = Field(default="INFO")
     # Lower bound 1s allows test-suite to assert timeout behaviour without slow sleeps;
@@ -80,6 +92,18 @@ class Settings(BaseSettings):
     final_device: str = Field(default="cuda")
     # Transcript-free verbose debug events over WS (KVKK: default off, #30).
     stream_debug: bool = Field(default=False)
+    # #128 WebSocket streaming cadence/commit tuning. These env-backed values
+    # stay bounded so a bad rollout cannot turn partials off or flood finals.
+    live_infer_interval_ms: int = Field(default=350, ge=1, le=5000)
+    live_window_sec: float = Field(default=2.0, ge=0.1, le=10.0)
+    final_window_sec: float = Field(default=10.0, ge=1.0, le=60.0)
+    forced_commit_sec: float = Field(default=8.0, ge=0.1, le=60.0)
+    silence_commit_sec: float = Field(default=0.9, ge=0.1, le=5.0)
+    tail_overlap_sec: float = Field(default=1.0, ge=0.0, le=5.0)
+    silence_rms: float = Field(default=0.025, ge=0.0, le=1.0)
+    min_speech_rms: float = Field(default=0.03, gt=0.0, le=1.0)
+    min_infer_sec: float = Field(default=0.35, ge=0.01, le=5.0)
+    debug_every_sec: float = Field(default=1.0, ge=0.1, le=10.0)
     # Comma-separated allowed origins for the browser streaming demo; empty =
     # CORS middleware not installed (internal service default).
     cors_origins: str = Field(default="")
@@ -100,6 +124,17 @@ class Settings(BaseSettings):
     chunk_claim_idle_ms: int = Field(default=60_000, ge=1000, le=3_600_000)
     chunk_claim_every_loops: int = Field(default=30, ge=1, le=10_000)
     chunk_trim_maxlen: int = Field(default=10_000, ge=100, le=1_000_000)
+
+    @model_validator(mode="after")
+    def validate_stream_tuning(self) -> Self:
+        """Keep low-latency streaming knobs internally consistent."""
+        if self.min_speech_rms < self.silence_rms:
+            raise ValueError("min_speech_rms must be >= silence_rms")
+        if self.min_infer_sec > self.live_window_sec:
+            raise ValueError("min_infer_sec must be <= live_window_sec")
+        if self.tail_overlap_sec >= self.final_window_sec:
+            raise ValueError("tail_overlap_sec must be < final_window_sec")
+        return self
 
 
 _settings: Settings | None = None
