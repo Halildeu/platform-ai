@@ -48,6 +48,19 @@ def _audio_rms(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> floa
     return float(np.sqrt(np.mean(audio**2)))
 
 
+def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
+    """Choose a KVKK-safe final payload without letting hallucinations poison state."""
+    candidate = (final_text or "").strip()
+    if candidate and not is_hallucination(candidate):
+        return candidate
+
+    fallback = (fallback_draft or "").strip()
+    if fallback and not is_hallucination(fallback):
+        return fallback
+
+    return None
+
+
 @router.websocket("/ws/stream")
 async def stream_endpoint(
     websocket: WebSocket,
@@ -110,6 +123,24 @@ async def stream_endpoint(
         nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
         nonlocal last_speech_t
 
+        def advance_segment(*, retain_tail: bool) -> None:
+            nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
+            nonlocal last_speech_t
+
+            seg_index += 1
+            last_draft = ""
+            sent_draft = ""
+            speech_seen = False
+            last_speech_t = None
+
+            tail_samples = int(settings.tail_overlap_sec * SAMPLE_RATE) if retain_tail else 0
+            buffer = (
+                buffer[-tail_samples:]
+                if tail_samples > 0 and buffer.shape[0] > tail_samples
+                else np.zeros(0, dtype=np.float32)
+            )
+            buffer_start_t = time.time() if buffer.size else None
+
         buffer_sec = round(buffer.size / SAMPLE_RATE, 2)
         if buffer.size < min_infer_samples:
             await send_debug("final_skip_short_buffer", buffer_sec=buffer_sec)
@@ -132,9 +163,18 @@ async def stream_endpoint(
             text = last_draft
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+        selected_text = _select_commit_text(text, last_draft)
 
-        if not text or is_hallucination(text):
+        if selected_text is None:
             await send_debug("final_filtered", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
+            advance_segment(retain_tail=False)
+            return
+
+        if selected_text != text:
+            await send_debug("final_fallback_draft", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
+
+        text = selected_text
+        if not text:
             return
 
         await websocket.send_json(
@@ -154,19 +194,7 @@ async def stream_endpoint(
             extra={"seq": seg_index, "reason": reason, "elapsed_ms": elapsed_ms},
         )
 
-        seg_index += 1
-        last_draft = ""
-        sent_draft = ""
-        speech_seen = False
-        last_speech_t = None
-
-        tail_samples = int(settings.tail_overlap_sec * SAMPLE_RATE)
-        buffer = (
-            buffer[-tail_samples:]
-            if tail_samples > 0 and buffer.shape[0] > tail_samples
-            else np.zeros(0, dtype=np.float32)
-        )
-        buffer_start_t = time.time() if buffer.size else None
+        advance_segment(retain_tail=True)
 
     try:
         while True:

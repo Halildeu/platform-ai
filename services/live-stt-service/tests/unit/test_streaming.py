@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from app.api import stream as stream_api
+from app.api.stream import _select_commit_text
 from app.core.config import Settings
 from app.services.hallucination import is_hallucination
 from app.services.streaming_models import (
@@ -33,6 +34,19 @@ def test_hallucination_filter_blocks_repeated_decode_loops() -> None:
     )
     assert (
         is_hallucination(
+            "Benim akışa aktiftim. Benim akışa aktif diyorsun. " "Elime akışı aktif diyorsunuz."
+        )
+        is True
+    )
+    assert (
+        is_hallucination(
+            "Kendime Kendimi al. Kendime akışa. Kendime akış al. "
+            "Kendime akışa akışa Kendimi akışa aktif. Kelime akışı aktif."
+        )
+        is True
+    )
+    assert (
+        is_hallucination(
             "Söylediklerimin yarısını ne söylediklerimin yarısını neden "
             "söylediklerimin yarısını neden yok?"
         )
@@ -46,6 +60,27 @@ def test_hallucination_filter_passes_real_speech() -> None:
     assert (
         is_hallucination("Bugün toplantı kaydında canlı transkript gecikmesini test ediyoruz.")
         is False
+    )
+    assert is_hallucination("Kelime akışı aktif ve doğruluk oranı gayet iyi.") is False
+
+
+def test_commit_text_falls_back_to_clean_draft_when_final_is_repeated_loop() -> None:
+    assert (
+        _select_commit_text(
+            "Benim akışa aktiftim. Benim akışa aktif diyorsun. " "Elime akışı aktif diyorsunuz.",
+            "Kelime akışı aktif ve doğruluk oranı gayet iyi.",
+        )
+        == "Kelime akışı aktif ve doğruluk oranı gayet iyi."
+    )
+
+
+def test_commit_text_drops_segment_when_final_and_draft_are_unusable() -> None:
+    assert (
+        _select_commit_text(
+            "Benim akışa aktiftim. Benim akışa aktif diyorsun. " "Elime akışı aktif diyorsunuz.",
+            "Altyazı M.K.",
+        )
+        is None
     )
 
 
