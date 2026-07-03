@@ -95,6 +95,22 @@ Bu ayarlar `app.core.config.Settings` içinde bounded Pydantic alanlarıdır:
 `STT_TAIL_OVERLAP_SEC < STT_FINAL_WINDOW_SEC` guard'ları boot sırasında
 geçersiz rollout'u durdurur.
 
+Transcript-free canlı stream smoke:
+
+```bash
+python scripts/live_stream_smoke.py \
+  --url ws://127.0.0.1:18220/ws/stream \
+  --wav tests/fixtures/sample-tr-cv17-001.wav
+```
+
+Script raw audio veya transcript text basmaz; fixture/reference hash'i, event
+sayıları, first-partial/final latency, final kelime kapsaması ve transcript event
+gap metriği üretir. Default pass gate'i en az bir partial event, en az bir final
+event, final hallucination=0, error=0, reference TXT varsa en az %50 final word
+coverage ve transcript event gap <= 6000 ms ister. Bu gate, "stream ayakta ama
+konuşmanın büyük kısmı UI'a düşmüyor" sınıfını tek final event ile yanlış PASS
+saymamak için vardır.
+
 ## Docker
 
 ```bash

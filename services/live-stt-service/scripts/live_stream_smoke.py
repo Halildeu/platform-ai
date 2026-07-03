@@ -14,11 +14,13 @@ import json
 import sys
 import time
 import wave
+from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import websockets
+from numpy.typing import NDArray
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVICE_ROOT) not in sys.path:
@@ -28,6 +30,11 @@ TARGET_SAMPLE_RATE = 16_000
 DEFAULT_FRAME_MS = 200
 DEFAULT_TAIL_SILENCE_SEC = 1.2
 DEFAULT_TIMEOUT_SEC = 90.0
+DEFAULT_MIN_FINAL_WORD_COVERAGE = 0.5
+DEFAULT_MIN_PARTIAL_EVENTS = 1
+DEFAULT_MIN_FINAL_EVENTS = 1
+DEFAULT_MAX_TRANSCRIPT_GAP_MS = 6000
+AudioArray = NDArray[np.float32]
 
 
 class SmokeError(RuntimeError):
@@ -36,6 +43,19 @@ class SmokeError(RuntimeError):
 
 def _word_count(text: str) -> int:
     return len(text.split())
+
+
+def _safe_ratio(numerator: int, denominator: int | None) -> float | None:
+    if denominator is None or denominator <= 0:
+        return None
+    return round(numerator / denominator, 3)
+
+
+def _max_event_gap_ms(events: list[dict[str, Any]]) -> int | None:
+    ordered = sorted(int(event["received_at_ms"]) for event in events if "received_at_ms" in event)
+    if len(ordered) < 2:
+        return None
+    return max(current - previous for previous, current in pairwise(ordered))
 
 
 def _is_hallucination(text: str) -> bool:
@@ -52,7 +72,7 @@ def bytes_digest(content: bytes, *, length: int = 12) -> str:
     return hashlib.sha256(content).hexdigest()[:length]
 
 
-def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> np.ndarray:
+def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> AudioArray:
     """Load PCM16 WAV as mono float32 at the target sample rate."""
     with wave.open(str(path), "rb") as wav:
         channels = wav.getnchannels()
@@ -68,7 +88,7 @@ def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> np.nd
     pcm = np.frombuffer(frames, dtype="<i2").astype(np.float32)
     if channels > 1:
         pcm = pcm.reshape(-1, channels).mean(axis=1)
-    audio = np.clip(pcm / 32768.0, -1.0, 1.0).astype(np.float32)
+    audio = cast(AudioArray, np.clip(pcm / 32768.0, -1.0, 1.0).astype(np.float32))
 
     if source_rate == sample_rate:
         return audio
@@ -79,15 +99,35 @@ def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> np.nd
     target_len = max(1, int(round(duration * sample_rate)))
     source_x = np.linspace(0.0, duration, num=audio.shape[0], endpoint=False)
     target_x = np.linspace(0.0, duration, num=target_len, endpoint=False)
-    return np.interp(target_x, source_x, audio).astype(np.float32)
+    return cast(AudioArray, np.interp(target_x, source_x, audio).astype(np.float32))
 
 
-def audio_frames(audio: np.ndarray, *, frame_ms: int) -> list[np.ndarray]:
+def audio_frames(audio: AudioArray, *, frame_ms: int) -> list[AudioArray]:
     frame_samples = max(1, int(TARGET_SAMPLE_RATE * frame_ms / 1000))
     return [
-        audio[index : index + frame_samples]
-        for index in range(0, audio.shape[0], frame_samples)
+        audio[index : index + frame_samples] for index in range(0, audio.shape[0], frame_samples)
     ]
+
+
+def resolve_reference_text(wav_path: Path, value: str | None) -> Path | None:
+    if value:
+        path = Path(value).expanduser().resolve()
+        return path if path.exists() else None
+
+    candidate = wav_path.with_suffix(".txt")
+    return candidate if candidate.exists() else None
+
+
+def reference_metadata(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {"path": None, "text_sha256_12": None, "words": None}
+
+    text = path.read_text(encoding="utf-8").strip()
+    return {
+        "path": str(path),
+        "text_sha256_12": text_digest(text),
+        "words": _word_count(text),
+    }
 
 
 def redacted_transcript_event(event: dict[str, Any], received_at_ms: int) -> dict[str, Any]:
@@ -131,18 +171,48 @@ def build_summary(
     ready_at: float | None,
     transcript_events: list[dict[str, Any]],
     errors: list[str],
+    reference_text_path: Path | None = None,
+    min_final_word_coverage: float = DEFAULT_MIN_FINAL_WORD_COVERAGE,
+    min_partial_events: int = DEFAULT_MIN_PARTIAL_EVENTS,
+    min_final_events: int = DEFAULT_MIN_FINAL_EVENTS,
+    max_transcript_gap_ms: int | None = DEFAULT_MAX_TRANSCRIPT_GAP_MS,
 ) -> dict[str, Any]:
     final_events = [event for event in transcript_events if event["type"] == "final"]
     partial_events = [event for event in transcript_events if event["type"] == "partial"]
     final_hallucination_count = sum(1 for event in final_events if event.get("hallucination_flag"))
+    final_word_count = sum(int(event.get("text_words", 0)) for event in final_events)
+    reference = reference_metadata(reference_text_path)
+    reference_words = reference["words"] if isinstance(reference["words"], int) else None
+    final_word_coverage = _safe_ratio(final_word_count, reference_words)
+    max_gap_ms = _max_event_gap_ms(transcript_events)
     first_partial_at_ms = partial_events[0]["received_at_ms"] if partial_events else None
     first_final_at_ms = final_events[0]["received_at_ms"] if final_events else None
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     ready_at_ms = int((ready_at - started_at) * 1000) if ready_at is not None else None
 
+    failures: list[str] = []
+    if ready_at is None:
+        failures.append("ready_missing")
+    if errors:
+        failures.append("error_events_present")
+    if len(final_events) < min_final_events:
+        failures.append("final_event_count_below_min")
+    if len(partial_events) < min_partial_events:
+        failures.append("partial_event_count_below_min")
+    if final_hallucination_count:
+        failures.append("final_hallucination_detected")
+    if final_word_coverage is not None and final_word_coverage < min_final_word_coverage:
+        failures.append("final_word_coverage_below_min")
+    if (
+        max_transcript_gap_ms is not None
+        and max_gap_ms is not None
+        and max_gap_ms > max_transcript_gap_ms
+    ):
+        failures.append("transcript_event_gap_above_max")
+
     return {
         "schema": "platform-ai.live-stt.stream-smoke.v1",
-        "ok": bool(ready_at and final_events and final_hallucination_count == 0 and not errors),
+        "ok": not failures,
         "url": url,
         "fixture": {
             "path": str(wav_path),
@@ -150,6 +220,7 @@ def build_summary(
             "duration_ms": int(audio_samples / TARGET_SAMPLE_RATE * 1000),
             "sample_rate": TARGET_SAMPLE_RATE,
         },
+        "reference": reference,
         "latency": {
             "ready_ms": ready_at_ms,
             "first_partial_ms": first_partial_at_ms,
@@ -162,6 +233,19 @@ def build_summary(
             "final_count": len(final_events),
             "final_hallucination_count": final_hallucination_count,
             "error_count": len(errors),
+            "max_transcript_gap_ms": max_gap_ms,
+        },
+        "coverage": {
+            "final_words": final_word_count,
+            "reference_words": reference_words,
+            "final_word_coverage": final_word_coverage,
+        },
+        "quality_gate": {
+            "min_final_events": min_final_events,
+            "min_partial_events": min_partial_events,
+            "min_final_word_coverage": min_final_word_coverage,
+            "max_transcript_gap_ms": max_transcript_gap_ms,
+            "failures": failures,
         },
         "transcript_events_redacted": transcript_events,
         "errors": errors,
@@ -175,6 +259,7 @@ def build_summary(
 
 async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     wav_path = Path(args.wav).expanduser().resolve()
+    reference_text_path = resolve_reference_text(wav_path, args.reference_text)
     audio = load_wav_float32(wav_path)
     frames = audio_frames(audio, frame_ms=args.frame_ms)
     tail_silence = np.zeros(
@@ -203,6 +288,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                 break
 
         if ready_at is not None:
+
             async def receiver() -> None:
                 while True:
                     event = json.loads(await websocket.recv())
@@ -238,6 +324,13 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         ready_at=ready_at,
         transcript_events=transcript_events,
         errors=errors,
+        reference_text_path=reference_text_path,
+        min_final_word_coverage=args.min_final_word_coverage,
+        min_partial_events=args.min_partial_events,
+        min_final_events=args.min_final_events,
+        max_transcript_gap_ms=(
+            args.max_transcript_gap_ms if args.max_transcript_gap_ms > 0 else None
+        ),
     )
 
 
@@ -252,6 +345,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tail-silence-sec", type=float, default=DEFAULT_TAIL_SILENCE_SEC)
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
     parser.add_argument("--final-wait-sec", type=float, default=10.0)
+    parser.add_argument(
+        "--reference-text",
+        default=None,
+        help="Optional reference TXT; defaults to sibling .txt when present. Text is hashed only.",
+    )
+    parser.add_argument(
+        "--min-final-word-coverage",
+        type=float,
+        default=DEFAULT_MIN_FINAL_WORD_COVERAGE,
+    )
+    parser.add_argument("--min-partial-events", type=int, default=DEFAULT_MIN_PARTIAL_EVENTS)
+    parser.add_argument("--min-final-events", type=int, default=DEFAULT_MIN_FINAL_EVENTS)
+    parser.add_argument(
+        "--max-transcript-gap-ms",
+        type=int,
+        default=DEFAULT_MAX_TRANSCRIPT_GAP_MS,
+        help="Max allowed gap between transcript events; <=0 disables the check.",
+    )
     return parser.parse_args(argv)
 
 
