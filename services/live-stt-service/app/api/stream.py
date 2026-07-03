@@ -61,6 +61,29 @@ def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
     return None
 
 
+def _word_count(text: str) -> int:
+    return len((text or "").split())
+
+
+def _select_partial_text(draft: str, sent_draft: str) -> str | None:
+    """Keep live drafts word-progressive so the UI does not erase spoken words."""
+    candidate = (draft or "").strip()
+    previous = (sent_draft or "").strip()
+
+    if not candidate or candidate == previous:
+        return None
+    if not previous:
+        return candidate
+
+    if candidate.casefold().startswith(previous.casefold()):
+        return candidate
+
+    if _word_count(candidate) < _word_count(previous):
+        return None
+
+    return candidate
+
+
 @router.websocket("/ws/stream")
 async def stream_endpoint(
     websocket: WebSocket,
@@ -280,14 +303,24 @@ async def stream_endpoint(
                 await send_debug("draft_filtered", elapsed_ms=elapsed_ms)
                 continue
 
-            last_draft = draft
-            if draft != sent_draft:
+            selected_draft = _select_partial_text(draft, sent_draft)
+            if selected_draft is None:
+                await send_debug(
+                    "draft_regression_filtered",
+                    elapsed_ms=elapsed_ms,
+                    previous_words=_word_count(sent_draft),
+                    candidate_words=_word_count(draft),
+                )
+                continue
+
+            last_draft = selected_draft
+            if selected_draft != sent_draft:
                 await websocket.send_json(
                     {
                         "type": "partial",
                         "seq": seg_index,
                         "confirmed": "",
-                        "tentative": draft,
+                        "tentative": selected_draft,
                         "elapsed_ms": elapsed_ms,
                         "rms": round(live_rms, 5),
                         "source": settings.live_model_name,
@@ -296,7 +329,7 @@ async def stream_endpoint(
                 await send_debug(
                     "draft_sent", seq=seg_index, elapsed_ms=elapsed_ms, text_len=len(draft)
                 )
-                sent_draft = draft
+                sent_draft = selected_draft
 
     except WebSocketDisconnect:
         logger.info("WS disconnected")

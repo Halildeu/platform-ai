@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from app.api import stream as stream_api
-from app.api.stream import _select_commit_text
+from app.api.stream import _select_commit_text, _select_partial_text
 from app.core.config import Settings
 from app.services.hallucination import is_hallucination
 from app.services.streaming_models import (
@@ -92,6 +92,13 @@ def test_commit_text_drops_segment_when_final_and_draft_are_unusable() -> None:
         )
         is None
     )
+
+
+def test_partial_text_keeps_live_draft_word_progressive() -> None:
+    assert _select_partial_text("Merhaba", "") == "Merhaba"
+    assert _select_partial_text("Merhaba nasılsın", "Merhaba") == "Merhaba nasılsın"
+    assert _select_partial_text("Merhaba", "Merhaba nasılsın") is None
+    assert _select_partial_text("Merhaba iyi misin", "Merhaba nasılsın") == "Merhaba iyi misin"
 
 
 def test_streaming_defaults_follow_adr_0031() -> None:
