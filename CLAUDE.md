@@ -8,13 +8,13 @@
 
 ## Proje Bağlamı
 
-`platform-ai` Workcube ekosisteminde **Faz 24 Meeting Intelligence** kapsamında Python tabanlı STT (Speech-to-Text), diarization (konuşmacı ayrımı) ve meeting AI (özet/karar/aksiyon çıkarımı) mikroservislerini barındırır.
+`platform-ai` **Faz 24 ERP/CRM bağımsız Meeting Intelligence** kapsamında Python tabanlı STT (Speech-to-Text), diarization (konuşmacı ayrımı) ve meeting AI (özet/karar/aksiyon çıkarımı) mikroservislerini barındırır.
 
 Repo eşleştirmesi: [README.md](./README.md) "Repo Konumu" tablosu.
 
 ## Ekosistem Reuse
 
-Bu repo **standalone değil** — Workcube altyapısının doğal uzantısı:
+Bu repo **standalone değil** — Platform altyapısının doğal uzantısıdır. Workcube yalnız tarihsel kaynak kanıtı, ilk müşteri pilotu veya adapter örneği olarak anılabilir; core servis kontratı belirli ERP/CRM markasına bağlanmaz.
 
 - **Auth**: Keycloak SSO (`auth-service` realm) — JWT validation FastAPI middleware
 - **Routing**: api-gateway (Spring Cloud Gateway) — `/api/v1/ai/*` route
@@ -68,7 +68,9 @@ Bu repo **standalone değil** — Workcube altyapısının doğal uzantısı:
 
 6. **Cross-AI Codex review Python için**: Test runner = pytest, lint = ruff + mypy, format = black. Codex review thread her PR için zorunlu (provider OpenAI veya Gemini — Anthropic yazıyorsa Anthropic değil).
 
-7. **No standalone publish**: Bu repo Workcube ekosistemine entegre — bağımsız ürün/lansman pattern'i yok. Yayın disiplini ana platform release pipeline'a bağlı.
+7. **No standalone publish**: Bu repo Platform ekosistemine entegre — bağımsız ürün/lansman pattern'i yok. Yayın disiplini ana platform release pipeline'a bağlı.
+
+8. **ERP/CRM-agnostic product contract**: Servis adı, API/DTO, model prompt'u, observability etiketi, acceptance gate ve "done" dili vendor-specific olamaz. Yeni entegrasyon işi generic ERP/CRM adapter kontratı üzerinden yazılır.
 
 ## Pattern'ler
 

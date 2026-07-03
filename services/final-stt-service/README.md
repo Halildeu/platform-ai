@@ -45,7 +45,7 @@ sayısını belirtir.
 
 ## Geçici Model Kararı
 
-Workcube pilot WER ölçümü henüz yapılamadığı için ADR-0031 geçici kararı
+Approved pilot/customer-pilot WER ölçümü henüz yapılamadığı için ADR-0031 geçici kararı
 kullanılır:
 
 ```text

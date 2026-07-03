@@ -55,7 +55,7 @@ This evidence does not prove:
 - sustained throughput;
 - GPU container compatibility;
 - complete Turkish WER;
-- Workcube vocabulary accuracy;
+- pilot-domain vocabulary accuracy;
 - 24/7 operational cost;
 - production high availability;
 - KVKK production deployment compliance.
@@ -78,7 +78,7 @@ decision gate in issue #40.
 
 ## Why the Final Decision Is Blocked
 
-Issues #35 and #36 do not yet contain privacy-safe Workcube pilot WER evidence.
+Issues #35 and #36 do not yet contain privacy-safe approved pilot/customer-pilot WER evidence.
 The synthetic/Common Voice smoke result cannot be used to lock production
 hardware or model selection.
 
@@ -86,7 +86,7 @@ A defensible production decision also needs:
 
 | Missing evidence | Required output |
 |---|---|
-| Pilot WER | Workcube vocabulary and meeting-condition accuracy |
+| Pilot WER | pilot-domain vocabulary and meeting-condition accuracy |
 | GPU concurrency | Parallel stream count, VRAM peak and queue growth |
 | Cost comparison | Existing host electricity/operations vs cloud hourly cost |
 | Availability model | Single-host failure and recovery expectations |
