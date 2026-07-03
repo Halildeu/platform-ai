@@ -378,12 +378,12 @@ def main() -> None:
             "synthetic-neutral",
             "unit-fixture",
             "pilot-meeting",
-            "workcube-pilot",
+            "erp-pilot",
             "customer-pilot",
         ),
         help=(
             "Evidence class for downstream G-INT gate. Defaults to synthetic-neutral; "
-            "real pilot acceptance requires an explicit pilot/workcube/customer value."
+            "real pilot acceptance requires an explicit pilot/ERP/customer value."
         ),
     )
     args = ap.parse_args()

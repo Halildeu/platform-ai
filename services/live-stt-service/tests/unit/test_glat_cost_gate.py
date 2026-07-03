@@ -58,6 +58,16 @@ def test_gate_passes_with_complete_pilot_row_under_thresholds() -> None:
     assert result["selectedGlatCost"]["cost_per_audio_minute"] == 0.0012
 
 
+def test_gate_accepts_generic_erp_pilot_kind() -> None:
+    result = glat_cost_gate.evaluate_gate(
+        rows=[_pilot_row(dataset_kind="erp-pilot")],
+        **_thresholds(),
+    )
+
+    assert result["status"] == "pass"
+    assert result["selectedGlatCost"]["kind"] == "erp-pilot"
+
+
 def test_lab_or_synthetic_evidence_does_not_satisfy_pilot_gate() -> None:
     result = glat_cost_gate.evaluate_gate(
         rows=[

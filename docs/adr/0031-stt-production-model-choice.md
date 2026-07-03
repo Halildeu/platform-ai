@@ -3,7 +3,7 @@
 - Status: EVIDENCE-BACKED PROVISIONAL - PILOT CONFIRMATION PENDING
 - Date: 2026-06-08 (evidence update: 2026-06-10)
 - Issue: `#37 [PR-wer-01] ADR girdisi: medium int8 vs large-v3-turbo`
-- Decision scope: STT model roles before Workcube pilot WER evidence is available
+- Decision scope: STT model roles before ERP/CRM pilot WER evidence is available
 
 ## Evidence Update (2026-06-10 — #35/#36 measured on RTX 4070)
 
@@ -33,8 +33,8 @@ The target architecture has two transcription stages:
 2. a larger model revises the draft into a more accurate final transcript.
 
 The planned #35/#36 triangulation requires Common Voice, synthetic, and a
-privacy-safe Workcube pilot meeting. Common Voice data is ready, but the real
-Workcube pilot recording requires operator approval, participant consent,
+privacy-safe ERP/CRM pilot meeting. Common Voice data is ready, but the real
+pilot recording requires operator approval, participant consent,
 encrypted storage, and manual ground truth. That operator action is not
 currently available.
 
@@ -98,7 +98,7 @@ and hardware protocol.
 
 ## Decision
 
-Until the Workcube pilot dataset and #35/#36 measurements are available:
+Until the ERP/CRM pilot dataset and #35/#36 measurements are available:
 
 | Role | Provisional model |
 |---|---|
@@ -131,7 +131,7 @@ evidence is still required:
 
 - Common Voice WER/CER across all candidates;
 - synthetic pipeline smoke;
-- Workcube pilot WER/CER after explicit consent;
+- ERP/CRM pilot WER/CER after explicit consent;
 - Turkish normalization error counts;
 - special name/company/product recognition;
 - latency per audio minute;
@@ -146,8 +146,8 @@ evidence is still required:
 
 Reason:
 
-- a real Workcube meeting recording cannot currently be made;
-- #34 real Workcube pilot recording is operator-action;
+- a real pilot meeting recording cannot currently be made;
+- #34 real ERP/CRM pilot recording is operator-action;
 - participant consent is not yet collected;
 - encrypted storage target is not yet confirmed;
 - manual pilot ground truth does not exist.
@@ -155,7 +155,7 @@ Reason:
 For this reason, #35 and #36 were temporarily skipped so work could continue
 with the models already tested in the PoC. This is not a completion or
 acceptance claim. The project must return to #35 and #36 when an approved
-Workcube recording and reviewed ground truth become available.
+ERP/CRM pilot recording and reviewed ground truth become available.
 
 The Common Voice dataset prepared by #33 remains available. The pilot rows in
 the future #35 matrix must remain `PENDING` until operator evidence arrives.
@@ -199,7 +199,7 @@ required independent review and missing metric evidence are recorded.
 
 Positive:
 
-- development can continue without pretending the Workcube pilot exists;
+- development can continue without pretending the ERP/CRM pilot exists;
 - the approved two-stage GPU PoC is preserved;
 - CPU fallback remains reproducible;
 - future model comparison has explicit reopen criteria.

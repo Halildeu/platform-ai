@@ -65,6 +65,15 @@ class DiarDecisionGateTests(unittest.TestCase):
         self.assertEqual(result["selectedDiarization"]["backend"], "pyannote")
         self.assertEqual(result["selectedDiarization"]["evidence_hash"], _sha())
 
+    def test_gate_accepts_generic_erp_pilot_kind(self) -> None:
+        result = gate.evaluate_gate(
+            rows=[_pilot_row(dataset_kind="erp-pilot")],
+            **_threshold_kwargs(),
+        )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["selectedDiarization"]["kind"], "erp-pilot")
+
     def test_synthetic_snapshot_stays_blocked(self) -> None:
         result = gate.evaluate_gate(
             rows=[

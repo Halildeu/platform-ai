@@ -56,7 +56,7 @@ Bu fixture'lar Common Voice TR'den **2 short sample** — sadece pipeline smoke 
 
 Gerçek WER raporu için (PR-wer-01, M4 Accuracy):
 - Common Voice TR test split full (200+ clip)
-- Privacy-safe pilot meeting (Workcube içi consent + ADR-0030 ACCEPTED sonrası)
+- Privacy-safe pilot meeting (kurum içi consent + ADR-0030 ACCEPTED sonrası)
 - Triangulate: sentetik + Common Voice + pilot
 
 3-AI mutabakat: Codex `019e8a24` REVISE → Common Voice TR minimum 1-2 + license/source manifest + no WER claim + no pilot meeting audio.

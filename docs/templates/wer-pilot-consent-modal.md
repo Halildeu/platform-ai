@@ -4,7 +4,7 @@ Title: Pilot toplantı kaydı izni
 
 Body:
 
-Bu toplantı yalnızca Workcube içi STT doğruluk ölçümü için kaydedilecektir.
+Bu toplantı yalnızca kurum içi STT doğruluk ölçümü için kaydedilecektir.
 Kayıt, canlı ürün kullanımı veya müşteri verisi amacıyla kullanılmayacaktır.
 
 Kayıt ile:

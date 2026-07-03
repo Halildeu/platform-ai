@@ -7,7 +7,7 @@ pattern kaldır, tip uyumu netleşsin") — iter-2 her iki şartı karşılar.
 
 ## Bağlam
 
-Faz 24.1 MVP tek tenant çalışır; Workcube dışı müşteri girişinde retroactive
+Faz 24.1 MVP tek tenant çalışır; ikinci/başka müşteri girişinde retroactive
 multi-tenant ayrımı pahalıdır (#65). Transport katmanı bu riski **zaten
 kapattı** — kanıt:
 
@@ -25,7 +25,7 @@ DB şeması, meeting-ai çıktıları) tenant kimliği taşımıyor.
    alanını **NOT NULL** taşır ve değer **transport'tan gelen gerçek
    `tenantId`'dir** (#534 producer'ın JWT `companyId`'den yazdığı alan) —
    olduğu gibi persist edilir; **sentinel/sabit değer YASAK** (iter-1'deki
-   `workcube` sabiti kaldırıldı: transport↔persistence tutarsızlığı ve ileride
+   vendor-specific sabit kaldırıldı: transport↔persistence tutarsızlığı ve ileride
    sabit→gerçek migration'ı üretirdi — ADR'nin önlediği şeyin ta kendisi).
    MVP'de tek tenant olduğu için değer doğal olarak tekil olur.
 2. **Tip kuralı:** Kalıcı katmanda `tenant_id BIGINT NOT NULL` (JWT

@@ -119,7 +119,7 @@ not lexical-only.
 Acceptance evidence now has two files:
 
 1. `docs/evidence/intel-eval-<date>.jsonl` — metadata-only `intel_eval.py` rows
-   with explicit `dataset_kind=pilot-meeting|workcube-pilot|customer-pilot`,
+   with explicit `dataset_kind=pilot-meeting|erp-pilot|customer-pilot`,
    real backend, and non-fixture eval-set path.
 2. `docs/evidence/gint-gate-<date>.json` — `scripts/gint_gate.py` verifier output
    with `status=pass` against explicit G-INT thresholds.

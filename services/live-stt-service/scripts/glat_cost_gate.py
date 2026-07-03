@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PILOT_KINDS = {"pilot-meeting", "workcube-pilot", "customer-pilot"}
+PILOT_KINDS = {"pilot-meeting", "erp-pilot", "customer-pilot"}
 PILOT_BACKENDS = {
     "audio-gateway",
     "final-stt-service",

@@ -68,7 +68,7 @@ citations live in `citations`.
 
 `scripts/intel_eval.py` produces one metadata row per model/seed run. The row now
 includes explicit `dataset_kind`; default is `synthetic-neutral`. Real #162 acceptance
-requires an approved pilot class (`pilot-meeting`, `workcube-pilot`, or
+requires an approved pilot class (`pilot-meeting`, `erp-pilot`, or
 `customer-pilot`) plus explicit thresholds checked by `scripts/gint_gate.py`.
 Pilot rows must also use a real backend, a non-fixture eval-set path, and full
 `sha256:<64 hex>` `eval_set_hash`, `prompt_hash`, `sample_manifest_hash`, and

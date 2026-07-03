@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PILOT_KINDS = {"pilot-meeting", "workcube-pilot", "customer-pilot"}
+PILOT_KINDS = {"pilot-meeting", "erp-pilot", "customer-pilot"}
 LEGACY_CV_KIND = "legacy-common-voice"
 SYNTHETIC_KIND = "synthetic-degraded"
 

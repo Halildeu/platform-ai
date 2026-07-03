@@ -115,6 +115,19 @@ def test_gate_passes_with_pilot_wer_and_der_under_threshold() -> None:
     )
 
 
+def test_gate_accepts_generic_erp_pilot_kind() -> None:
+    wer = _pilot_wer(0.18)
+    der = _pilot_der(0.22)
+    wer["dataset_kind"] = "erp-pilot"
+    der["fixture_kind"] = "erp-pilot"
+
+    result = _evaluate(wer_rows=[wer], der_rows=[der])
+
+    assert result["status"] == "pass"
+    assert result["selectedWer"]["kind"] == "erp-pilot"
+    assert result["selectedDer"]["kind"] == "erp-pilot"
+
+
 def test_common_voice_and_synthetic_do_not_satisfy_pilot_gate() -> None:
     result = _evaluate(
         wer_rows=[

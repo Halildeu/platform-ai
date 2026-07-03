@@ -100,6 +100,13 @@ def test_gate_passes_with_pilot_gint_under_thresholds() -> None:
     )
 
 
+def test_gate_accepts_generic_erp_pilot_kind() -> None:
+    result = _evaluate([_pilot_row(dataset_kind="erp-pilot")])
+
+    assert result["status"] == "pass"
+    assert result["selectedGint"]["kind"] == "erp-pilot"
+
+
 def test_synthetic_rows_do_not_satisfy_pilot_gate() -> None:
     result = _evaluate(
         [
