@@ -162,6 +162,23 @@ def test_partial_text_merges_rolling_window_overlap_without_dropping_prefix() ->
     )
 
 
+def test_partial_text_appends_short_no_overlap_continuation_after_stable_draft() -> None:
+    assert (
+        _merge_rolling_partial(
+            "Konuşulanların çok büyük kısmı yazılmıyor",
+            "özellikle ara kelimeler düşüyor",
+        )
+        == "Konuşulanların çok büyük kısmı yazılmıyor özellikle ara kelimeler düşüyor"
+    )
+    assert (
+        _select_partial_text(
+            "özellikle ara kelimeler düşüyor",
+            "Konuşulanların çok büyük kısmı yazılmıyor",
+        )
+        == "Konuşulanların çok büyük kısmı yazılmıyor özellikle ara kelimeler düşüyor"
+    )
+
+
 def test_commit_text_applies_final_suffix_without_dropping_live_prefix() -> None:
     assert (
         _merge_final_transcript(

@@ -45,6 +45,8 @@ SAMPLE_RATE = 16000
 _WORD_RE = re.compile(r"[\wçğıöşüÇĞİÖŞÜ]+", re.UNICODE)
 MIN_FALLBACK_DRAFT_WORDS = 4
 MAX_RECENT_FINAL_WORDS = 24
+ROLLING_CONTINUATION_MIN_PREVIOUS_WORDS = 4
+ROLLING_CONTINUATION_MIN_NEXT_WORDS = 2
 _OVERLAP_SUFFIXES = (
     "lerinizden",
     "larınızdan",
@@ -125,6 +127,15 @@ def _normalized_words(text: str) -> list[str]:
     return [word.casefold() for word in _WORD_RE.findall(text or "")]
 
 
+def _shared_token_ratio(left: list[str], right: list[str]) -> float:
+    left_set = set(left)
+    right_set = set(right)
+    denominator = min(len(left_set), len(right_set))
+    if denominator == 0:
+        return 0.0
+    return len(left_set & right_set) / denominator
+
+
 def _has_same_prefix(previous_text: str, next_text: str) -> bool:
     return next_text.casefold().startswith(previous_text.casefold())
 
@@ -163,6 +174,19 @@ def _overlap_family(word: str) -> str:
 
 def _overlap_families(words: list[str]) -> list[str]:
     return [_overlap_family(word) for word in words]
+
+
+def _trim_to_active_audio(
+    samples: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+    threshold: float,
+) -> np.ndarray[tuple[int, ...], np.dtype[np.float32]]:
+    if samples.size == 0:
+        return samples
+
+    active_offsets = np.flatnonzero(np.abs(samples) >= threshold)
+    if active_offsets.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    return samples[int(active_offsets[0]) : int(active_offsets[-1]) + 1].copy()
 
 
 def _suffix_prefix_speech_overlap(previous_words: list[str], next_words: list[str]) -> int:
@@ -206,11 +230,22 @@ def _merge_rolling_partial(previous_text: str, next_text: str) -> str:
     if previous_words[0] == next_words[0]:
         return next_candidate
 
-    if (
+    shared_family_ratio = _shared_token_ratio(
+        _overlap_families(previous_words),
+        _overlap_families(next_words),
+    )
+    next_looks_like_continuation = (
+        len(previous_words) >= ROLLING_CONTINUATION_MIN_PREVIOUS_WORDS
+        and len(next_words) >= ROLLING_CONTINUATION_MIN_NEXT_WORDS
+        and shared_family_ratio < 0.5
+    )
+    next_looks_like_growing_window = (
         len(next_words) > len(previous_words)
         and len(next_words) >= 3
         and (len(previous_words) >= 2 or len(next_words) >= len(previous_words) + 2)
-    ):
+    )
+
+    if next_looks_like_continuation or next_looks_like_growing_window:
         return " ".join([*previous_raw_words, *next_raw_words])
 
     return next_candidate
@@ -402,13 +437,8 @@ async def stream_endpoint(
         def trim_leading_silence(
             samples: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         ) -> np.ndarray[tuple[int, ...], np.dtype[np.float32]]:
-            if samples.size == 0:
-                return samples
-
-            active_offsets = np.flatnonzero(np.abs(samples) >= settings.silence_rms)
-            if active_offsets.size == 0:
-                return np.zeros(0, dtype=np.float32)
-            return samples[int(active_offsets[0]) :].copy()
+            active = _trim_to_active_audio(samples, settings.silence_rms)
+            return active if active.size == 0 else active.copy()
 
         async def advance_segment(
             *,
@@ -565,6 +595,7 @@ async def stream_endpoint(
             )
             active_seq = seg_index
 
+        live_audio = _trim_to_active_audio(live_audio, settings.silence_rms)
         if live_audio.size < min_infer_samples:
             await send_debug("draft_skip_short_buffer")
             return

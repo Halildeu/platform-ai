@@ -333,6 +333,45 @@ def test_stream_appends_growing_no_overlap_live_windows(
     assert second["tentative"] == "Merhaba sesim geliyor mu bir sürü eksik var yine"
 
 
+def test_stream_appends_short_no_overlap_live_continuations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Short new live windows after a stable draft must not be filtered out."""
+    _patch_fast_stream_timing(monkeypatch)
+    live_drafts = [
+        "Konuşulanların çok büyük kısmı yazılmıyor",
+        "ara kelimeler düşüyor",
+    ]
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        if vad:
+            return "Konuşulanların çok büyük kısmı yazılmıyor ara kelimeler düşüyor."
+        return live_drafts.pop(0) if live_drafts else "ara kelimeler düşüyor"
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        first = ws.receive_json()
+        time.sleep(0.002)
+        ws.send_bytes(_speech_frame())
+        second = ws.receive_json()
+
+    for event in (first, second):
+        assert_valid(event)
+        assert event["type"] == "partial"
+        assert event["seq"] == 0
+    assert first["tentative"] == "Konuşulanların çok büyük kısmı yazılmıyor"
+    assert second["tentative"] == "Konuşulanların çok büyük kısmı yazılmıyor ara kelimeler düşüyor"
+
+
 def test_stream_keeps_short_stable_draft_over_unrelated_short_final(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
