@@ -239,6 +239,66 @@ def test_stream_keeps_receiving_audio_while_live_model_is_busy(
     assert final_sample_counts[0] >= 8 * 1024
 
 
+def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audio received during a slow final pass must become the next segment."""
+
+    settings = Settings(
+        live_infer_interval_ms=5_000,
+        live_window_sec=1.0,
+        final_window_sec=1.0,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.0,
+        silence_rms=0.001,
+        min_speech_rms=0.001,
+        min_infer_sec=0.01,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
+
+    final_sample_counts: list[int] = []
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        if vad:
+            final_sample_counts.append(int(audio.size))
+            if len(final_sample_counts) == 1:
+                time.sleep(0.12)
+            return f"Final {len(final_sample_counts)}."
+        return ""
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        for _ in range(20):
+            ws.send_bytes(_speech_frame())
+        time.sleep(0.12)
+        ws.send_bytes(_speech_frame())
+
+        for _ in range(8):
+            ws.send_bytes(_speech_frame())
+            time.sleep(0.005)
+
+        first_final = ws.receive_json()
+        ws.send_bytes(_speech_frame())
+        time.sleep(0.12)
+        second_final = ws.receive_json()
+
+    for event in (first_final, second_final):
+        assert_valid(event)
+        assert event["type"] == "final"
+    assert len(final_sample_counts) >= 2
+    assert final_sample_counts[1] >= 8 * 1024
+
+
 def test_stream_appends_growing_no_overlap_live_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

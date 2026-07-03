@@ -377,6 +377,8 @@ async def stream_endpoint(
     last_speech_t: float | None = None
     last_final_text = ""
     recent_final_text = ""
+    total_samples_received = 0
+    buffer_start_sample = 0
     buffer_lock = asyncio.Lock()
     send_lock = asyncio.Lock()
     stop_inference = asyncio.Event()
@@ -395,7 +397,7 @@ async def stream_endpoint(
 
     async def commit_current(reason: str) -> None:
         nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
-        nonlocal last_speech_t, last_final_text, recent_final_text
+        nonlocal last_speech_t, last_final_text, recent_final_text, buffer_start_sample
 
         def trim_leading_silence(
             samples: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
@@ -409,19 +411,27 @@ async def stream_endpoint(
             return samples[int(active_offsets[0]) :].copy()
 
         async def advance_segment(
-            *, retain_tail: bool, committed_samples: int, committed_audio: np.ndarray
+            *,
+            retain_tail: bool,
+            commit_end_sample: int,
+            committed_audio: np.ndarray,
         ) -> None:
             nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
-            nonlocal last_speech_t
+            nonlocal last_speech_t, buffer_start_sample
 
             async with buffer_lock:
                 seg_index += 1
                 last_draft = ""
                 sent_draft = ""
 
+                # The receive loop may trim the rolling buffer while the final
+                # model is still decoding. Use absolute sample coordinates so
+                # audio received during that slow final pass is not mistaken for
+                # already-committed audio and dropped.
+                appended_start = max(0, commit_end_sample - buffer_start_sample)
                 appended = (
-                    buffer[committed_samples:].copy()
-                    if buffer.shape[0] > committed_samples
+                    buffer[appended_start:].copy()
+                    if appended_start < buffer.shape[0]
                     else np.zeros(0, dtype=np.float32)
                 )
                 if not retain_tail:
@@ -443,6 +453,7 @@ async def stream_endpoint(
 
                 now = time.time()
                 buffer_start_t = now - (buffer.size / SAMPLE_RATE) if buffer.size else None
+                buffer_start_sample = max(0, total_samples_received - buffer.shape[0])
                 residual_rms = _audio_rms(buffer)
                 speech_seen = bool(buffer.size and residual_rms >= settings.silence_rms)
                 last_speech_t = now if speech_seen else None
@@ -450,7 +461,7 @@ async def stream_endpoint(
         async with buffer_lock:
             audio = buffer.copy()
             active_seq = seg_index
-            committed_samples = buffer.shape[0]
+            commit_end_sample = buffer_start_sample + buffer.shape[0]
 
         if reason == "silence":
             audio = trim_leading_silence(audio)
@@ -460,7 +471,7 @@ async def stream_endpoint(
             await send_debug("final_skip_short_buffer", buffer_sec=buffer_sec)
             await advance_segment(
                 retain_tail=False,
-                committed_samples=committed_samples,
+                commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
             return
@@ -470,7 +481,7 @@ async def stream_endpoint(
             await send_debug("final_skip_low_rms", rms=round(rms, 5), buffer_sec=buffer_sec)
             await advance_segment(
                 retain_tail=False,
-                committed_samples=committed_samples,
+                commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
             return
@@ -492,7 +503,7 @@ async def stream_endpoint(
             await send_debug("final_filtered", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
             await advance_segment(
                 retain_tail=False,
-                committed_samples=committed_samples,
+                commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
             return
@@ -510,7 +521,7 @@ async def stream_endpoint(
             await send_debug("final_dropped_tail_only", seq=active_seq, elapsed_ms=elapsed_ms)
             await advance_segment(
                 retain_tail=False,
-                committed_samples=committed_samples,
+                commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
             return
@@ -540,7 +551,7 @@ async def stream_endpoint(
         # the previous words and creates repeated alternatives in practice.
         await advance_segment(
             retain_tail=reason == "forced",
-            committed_samples=committed_samples,
+            commit_end_sample=commit_end_sample,
             committed_audio=audio,
         )
 
@@ -662,6 +673,7 @@ async def stream_endpoint(
             debug_payload: dict[str, object] | None = None
 
             async with buffer_lock:
+                total_samples_received += int(samples.size)
                 if buffer_start_t is None:
                     buffer_start_t = now
 
@@ -670,6 +682,7 @@ async def stream_endpoint(
                 if buffer.shape[0] > max_samples:
                     buffer = buffer[-max_samples:]
                     buffer_start_t = now - (buffer.size / SAMPLE_RATE)
+                buffer_start_sample = max(0, total_samples_received - buffer.shape[0])
 
                 buffer_age = now - buffer_start_t
                 if sample_rms >= settings.silence_rms:
