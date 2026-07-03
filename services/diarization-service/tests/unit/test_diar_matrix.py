@@ -138,12 +138,21 @@ class _FakeCacheInfo:
 
 
 def _install_fake_huggingface_hub(
-    monkeypatch: pytest.MonkeyPatch, cache_info: _FakeCacheInfo
+    monkeypatch: pytest.MonkeyPatch,
+    default_cache: _FakeCacheInfo,
+    by_cache_dir: dict[str, _FakeCacheInfo] | None = None,
 ) -> None:
     import types
 
+    by_cache_dir = by_cache_dir or {}
+
+    def _fake_scan_cache_dir(cache_dir: str | None = None) -> _FakeCacheInfo:
+        if cache_dir is None:
+            return default_cache
+        return by_cache_dir.get(cache_dir, _FakeCacheInfo([]))
+
     fake_module = types.ModuleType("huggingface_hub")
-    fake_module.scan_cache_dir = lambda: cache_info  # type: ignore[attr-defined]
+    fake_module.scan_cache_dir = _fake_scan_cache_dir  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_module)
 
 
@@ -193,4 +202,27 @@ def test_resolved_model_revision_returns_none_when_repo_not_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_huggingface_hub(monkeypatch, _FakeCacheInfo([]))
+    monkeypatch.setattr(diar_matrix, "_pyannote_cache_dir", lambda: "/fake/pyannote/cache")
     assert diar_matrix.resolved_model_revision("pyannote/speaker-diarization-3.1") is None
+
+
+def test_resolved_model_revision_falls_back_to_pyannote_cache_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #235 GPU-host verification: pyannote.audio caches under
+    # `<torch.hub dir>/pyannote`, NOT the standard `~/.cache/huggingface/hub`
+    # scan_cache_dir() reads by default -- SpeechBrain resolved correctly on
+    # the first pass, pyannote stayed null until this fallback was added.
+    pyannote_cache_path = "/fake/torch/pyannote"
+    monkeypatch.setattr(diar_matrix, "_pyannote_cache_dir", lambda: pyannote_cache_path)
+    default_cache = _FakeCacheInfo([])  # nothing in the standard HF hub cache
+    pyannote_cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [_FakeRevision("84fd259124", {"main"}, last_modified=1.0)],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, default_cache, {pyannote_cache_path: pyannote_cache})
+    assert diar_matrix.resolved_model_revision("pyannote/speaker-diarization-3.1") == "84fd259124"

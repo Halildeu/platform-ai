@@ -165,6 +165,24 @@ def _trusted_torch_load() -> Iterator[None]:
 # --------------------------------------------------------------------------- #
 # pyannote backend (end-to-end pipeline)
 # --------------------------------------------------------------------------- #
+def _pyannote_cache_dir() -> str:
+    """pyannote.audio's own model cache root — NOT the standard HF hub cache.
+
+    `Pipeline.from_pretrained` (and the models it composes, e.g.
+    `pyannote/segmentation-3.0`, `pyannote/wespeaker-voxceleb-resnet34-LM`)
+    defaults its `cache_dir` to `<torch.hub cache>/pyannote`, so
+    `scan_cache_dir()` against the default `~/.cache/huggingface/hub` never
+    sees pyannote models even after a successful load (#235 follow-up: GPU
+    host verification showed SpeechBrain resolved correctly but pyannote
+    stayed null because of exactly this second cache root). The directory
+    layout under this root is the same `models--org--repo/snapshots/<hash>`
+    shape `scan_cache_dir(cache_dir=...)` already understands.
+    """
+    import torch  # type: ignore[import-not-found]
+
+    return os.path.join(torch.hub.get_dir(), "pyannote")
+
+
 def resolved_model_revision(model_id: str) -> str | None:
     """The actual HF commit hash backing `model_id` in the local cache.
 
@@ -175,19 +193,32 @@ def resolved_model_revision(model_id: str) -> str | None:
     local `huggingface_hub` cache (already populated by `from_pretrained`
     above) rather than hitting the network again. Prefers the revision whose
     refs include the requested pin or "main"; falls back to the most recently
-    used cached revision. Returns None only if the model was never cached
-    locally (should not happen right after a successful load).
+    used cached revision. Tries the standard HF hub cache first, then
+    pyannote's separate `torch.hub`-rooted cache (see `_pyannote_cache_dir`).
+    Returns None only if the model was never cached in either location
+    (should not happen right after a successful load).
     """
     try:
         from huggingface_hub import scan_cache_dir
     except ImportError:
         return None
 
-    try:
-        cache_info = scan_cache_dir()
-    except Exception:  # noqa: BLE001 - best-effort provenance, never fatal
-        return None
+    cache_dirs: list[str | None] = [None]  # None = huggingface_hub's own default
+    with contextlib.suppress(Exception):
+        cache_dirs.append(_pyannote_cache_dir())
 
+    for cache_dir in cache_dirs:
+        try:
+            cache_info = scan_cache_dir(cache_dir) if cache_dir else scan_cache_dir()
+        except Exception:  # noqa: BLE001, S112 - best-effort provenance, never fatal
+            continue
+        found = _revision_from_cache_info(cache_info, model_id)
+        if found is not None:
+            return found
+    return None
+
+
+def _revision_from_cache_info(cache_info: Any, model_id: str) -> str | None:
     for repo in cache_info.repos:
         if repo.repo_id != model_id:
             continue
