@@ -2,7 +2,7 @@
 
 - Status: **PROPOSED - OWNER REVIEW**
 - Date: 2026-06-17
-- Decision evidence updated: 2026-07-02
+- Decision evidence updated: 2026-07-03 (revision-pinned re-measurement, #235)
 - Issue: `#161 [Faz24 T-B] STT quality evidence - Turkish WER + diarization`
 - Amended by: ADR-0035 (voiceprint remains legal-gated)
 
@@ -86,17 +86,23 @@ overlay. Anonymous labels remain the canonical reversible representation.
 
 The metadata-only selected-backend row is:
 
-`docs/evidence/diar-decision-pilot-2026-07-02.jsonl`
+`docs/evidence/diar-decision-pilot-2026-07-03.jsonl`
 
 The metadata-only overlap comparison is:
 
-`docs/evidence/diar-overlap-results-2026-07-02.jsonl`
+`docs/evidence/diar-overlap-results-2026-07-03.jsonl`
+
+Both carry a real `resolved_revision` (the HF commit hash actually backing the
+cached model at measurement time), addressing Halil's #235 finding that the
+prior 2026-07-02 rows had `revision=null` with no gate enforcement. The
+superseded 2026-07-02 files remain in git history for audit but are no longer
+the evidence this gate is evaluated against.
 
 It is evaluated with:
 
 ```powershell
 python services/diarization-service/scripts/diar_decision_gate.py `
-  --evidence docs/evidence/diar-decision-pilot-2026-07-02.jsonl `
+  --evidence docs/evidence/diar-decision-pilot-2026-07-03.jsonl `
   --max-der 0.30 `
   --max-rtf 0.05 `
   --max-latency-ms 3000 `
@@ -108,7 +114,7 @@ Linux/macOS (bash) equivalent:
 
 ```bash
 python services/diarization-service/scripts/diar_decision_gate.py \
-  --evidence docs/evidence/diar-decision-pilot-2026-07-02.jsonl \
+  --evidence docs/evidence/diar-decision-pilot-2026-07-03.jsonl \
   --max-der 0.30 \
   --max-rtf 0.05 \
   --max-latency-ms 3000 \
@@ -134,10 +140,11 @@ Negative:
 
 - Pyannote uses more VRAM and is slower than SpeechBrain.
 - Its gated Hugging Face model requires controlled token provisioning.
-- The measured rows used the cached model snapshot with `revision=null`.
-  Production packaging must pin the resolved model revision/hash under the
-  repository model-versioning rule; this does not change the measured backend
-  choice.
+- The measured rows now carry a real `resolved_revision` captured from the
+  local cache at measurement time, but no explicit `--revision` was pinned
+  during the run itself. Production packaging must still pin the model
+  revision/hash under the repository model-versioning rule; this does not
+  change the measured backend choice.
 
 ## Acceptance
 
@@ -159,5 +166,11 @@ Halildeu (Cross-AI review, PR #235, 2026-07-03): CHANGES_REQUESTED — evidence
 model revision was null and the gate did not enforce it (both addressed in
 this revision via `diar_matrix.py`'s `resolved_revision` capture and
 `diar_decision_gate.py`'s revision-or-resolved-revision requirement), plus the
-corpus-vs-per-fixture DER ceiling wording above. Re-review pending a fresh
-pilot + overlap measurement carrying a real `resolved_revision` value.
+corpus-vs-per-fixture DER ceiling wording above.
+
+Update (2026-07-03): fresh pilot + overlap measurement completed on the real
+GPU host with the fixed `diar_matrix.py`. `resolved_revision` now populates
+for both backends (pyannote resolved via the `~/.cache/torch/pyannote`
+fallback added for this fix). `diar_decision_gate.py` re-run against
+`docs/evidence/diar-decision-pilot-2026-07-03.jsonl` returns `status=pass`,
+`findingCount=0`, selected backend `pyannote`. Awaiting Halil's re-review.
