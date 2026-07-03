@@ -77,6 +77,7 @@ def test_hallucination_filter_blocks_repeated_alternative_chains() -> None:
         )
         is True
     )
+    assert is_hallucination("Merhabalar. sesim... gel... Merhabalar sesim geliyor mu?") is True
 
 
 def test_hallucination_filter_passes_real_speech() -> None:
@@ -87,6 +88,14 @@ def test_hallucination_filter_passes_real_speech() -> None:
         is False
     )
     assert is_hallucination("Kelime akışı aktif ve doğruluk oranı gayet iyi.") is False
+    assert is_hallucination("Merhaba burada hava çok.") is False
+    assert (
+        is_hallucination(
+            "Enteresan her kelimenin başına merhaba atıyorsun. "
+            "Çok değişik şeyler yapabiliyor musun sen de?"
+        )
+        is False
+    )
 
 
 def test_commit_text_falls_back_to_clean_draft_when_final_is_repeated_loop() -> None:
@@ -231,6 +240,7 @@ def test_streaming_defaults_follow_adr_0031() -> None:
     assert s.live_infer_interval_ms <= 400
     assert s.live_window_sec <= 2.5
     assert s.silence_commit_sec <= 1.0
+    assert s.tail_overlap_sec <= 0.35
     assert int(0.5 * stream_api.SAMPLE_RATE) >= int(s.min_infer_sec * stream_api.SAMPLE_RATE)
 
 

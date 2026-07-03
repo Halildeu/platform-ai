@@ -85,9 +85,7 @@ def _repeated_family_count(families: list[str]) -> int:
     return max(families.count(family) for family in set(families))
 
 
-def _dominant_family_count_by_fragment(
-    fragments: list[list[str]], dominant_family: str
-) -> int:
+def _dominant_family_count_by_fragment(fragments: list[list[str]], dominant_family: str) -> int:
     return sum(1 for fragment in fragments if dominant_family in fragment)
 
 
@@ -137,6 +135,19 @@ def _is_low_information_repetition(text: str) -> bool:
     return False
 
 
+def _is_short_repeated_decode_chain(text: str) -> bool:
+    """Catch compact rolling-window alternatives before they reach 8 words."""
+    families = _normalized_families(text)
+    if len(families) < 6 or len(families) >= 8:
+        return False
+
+    if len(set(families)) / len(families) > 0.75:
+        return False
+
+    bigrams = [tuple(families[index : index + 2]) for index in range(len(families) - 1)]
+    return any(bigrams.count(ngram) >= 2 for ngram in set(bigrams))
+
+
 def _is_repeated_alternative_chain(text: str) -> bool:
     """Reject sequences of near-duplicate ASR alternatives in one final payload."""
     families = _normalized_families(text)
@@ -174,6 +185,8 @@ def is_hallucination(text: str) -> bool:
     if len(normalized) < 3:
         return True
     if _is_low_information_repetition(normalized):
+        return True
+    if _is_short_repeated_decode_chain(normalized):
         return True
     if _is_repeated_alternative_chain(normalized):
         return True

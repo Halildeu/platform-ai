@@ -79,6 +79,7 @@ Varsayılan canlı UX ayarları:
 | `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
 | `STT_SILENCE_COMMIT_SEC` | `0.9` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
 | `STT_FORCED_COMMIT_SEC` | `8.0` | Uzun konuşmada bounded finalization safety |
+| `STT_TAIL_OVERLAP_SEC` | `0.25` | Forced commit sınırında kelime kaybını azaltan kısa ses kuyruğu |
 | `STT_SILENCE_RMS` / `STT_MIN_SPEECH_RMS` | `0.025` / `0.03` | Sessizlik/konuşma hysteresis bandı |
 
 Partial event'ler aynı `seq` ile gelir; client aynı transcript satırını
