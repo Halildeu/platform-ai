@@ -207,6 +207,29 @@ def test_drop_leading_tail_overlap_can_remove_single_word_carry_over() -> None:
     assert _drop_leading_tail_overlap(previous, "Merhaba", allow_single_word=True) == "Merhaba"
 
 
+def test_drop_leading_tail_overlap_handles_turkish_inflected_carry_over() -> None:
+    previous = "Beni anlıyor musun? Söylediklerimin yarısı."
+    assert (
+        _drop_leading_tail_overlap(
+            previous,
+            "Söylediklerimin yarısını neden yok?",
+            allow_single_word=True,
+        )
+        == "neden yok?"
+    )
+
+
+def test_drop_leading_tail_overlap_does_not_fuzzy_drop_single_word_repeats() -> None:
+    assert (
+        _drop_leading_tail_overlap(
+            "Ben bir kelime merhaba dedim.",
+            "Merhabayı başa tekrar yazma.",
+            allow_single_word=True,
+        )
+        == "Merhabayı başa tekrar yazma."
+    )
+
+
 def test_recent_final_tail_catches_cumulative_cross_segment_carry_over() -> None:
     recent = _append_recent_final_text("", "Merhaba.")
     assert recent == "Merhaba."

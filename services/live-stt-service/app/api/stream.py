@@ -44,6 +44,70 @@ SAMPLE_RATE = 16000
 _WORD_RE = re.compile(r"[\wçğıöşüÇĞİÖŞÜ]+", re.UNICODE)
 MIN_FALLBACK_DRAFT_WORDS = 4
 MAX_RECENT_FINAL_WORDS = 24
+_OVERLAP_SUFFIXES = (
+    "lerinizden",
+    "larınızdan",
+    "lerinizde",
+    "larınızda",
+    "lerinizin",
+    "larınızın",
+    "leriniz",
+    "larınız",
+    "lerimin",
+    "larımın",
+    "lerimi",
+    "larımı",
+    "lerim",
+    "larım",
+    "sının",
+    "sinin",
+    "sunun",
+    "sünün",
+    "ının",
+    "inin",
+    "unun",
+    "ünün",
+    "sını",
+    "sini",
+    "sunu",
+    "sünü",
+    "ımız",
+    "imiz",
+    "umuz",
+    "ümüz",
+    "imin",
+    "ımın",
+    "umun",
+    "ümün",
+    "nın",
+    "nin",
+    "nun",
+    "nün",
+    "mın",
+    "min",
+    "mun",
+    "mün",
+    "ını",
+    "ini",
+    "unu",
+    "ünü",
+    "nı",
+    "ni",
+    "nu",
+    "nü",
+    "yı",
+    "yi",
+    "yu",
+    "yü",
+    "sı",
+    "si",
+    "su",
+    "sü",
+    "ı",
+    "i",
+    "u",
+    "ü",
+)
 
 
 def _audio_rms(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> float:
@@ -84,6 +148,37 @@ def _suffix_prefix_overlap(previous_words: list[str], next_words: list[str]) -> 
     return 0
 
 
+def _overlap_family(word: str) -> str:
+    family = word
+    for _ in range(2):
+        for suffix in _OVERLAP_SUFFIXES:
+            if len(family) > len(suffix) + 2 and family.endswith(suffix):
+                family = family[: -len(suffix)]
+                break
+        else:
+            break
+    return family
+
+
+def _overlap_families(words: list[str]) -> list[str]:
+    return [_overlap_family(word) for word in words]
+
+
+def _suffix_prefix_speech_overlap(previous_words: list[str], next_words: list[str]) -> int:
+    exact_overlap = _suffix_prefix_overlap(previous_words, next_words)
+    if exact_overlap > 0:
+        return exact_overlap
+
+    # Whisper often repeats the previous segment head with Turkish case or
+    # possessive suffixes changed. Only use the fuzzy form for multi-word
+    # overlap so intentional single-word repeats are not erased.
+    fuzzy_overlap = _suffix_prefix_overlap(
+        _overlap_families(previous_words),
+        _overlap_families(next_words),
+    )
+    return fuzzy_overlap if fuzzy_overlap >= 2 else 0
+
+
 def _merge_rolling_partial(previous_text: str, next_text: str) -> str:
     """Merge overlapping rolling-window drafts without losing earlier words."""
     previous = (previous_text or "").strip()
@@ -103,7 +198,7 @@ def _merge_rolling_partial(previous_text: str, next_text: str) -> str:
     if _contiguous_index(previous_words, next_words) >= 0:
         return previous
 
-    overlap = _suffix_prefix_overlap(previous_words, next_words)
+    overlap = _suffix_prefix_speech_overlap(previous_words, next_words)
     if overlap > 0:
         return " ".join([*previous_raw_words, *next_raw_words[overlap:]])
 
@@ -148,7 +243,7 @@ def _merge_final_transcript(previous_text: str, final_text: str) -> str:
     if _contiguous_index(final_words, previous_words) >= 0:
         return final
 
-    overlap = _suffix_prefix_overlap(previous_words, final_words)
+    overlap = _suffix_prefix_speech_overlap(previous_words, final_words)
     if overlap >= 2:
         return " ".join([*previous_raw_words, *final_raw_words[overlap:]])
 
@@ -170,7 +265,7 @@ def _drop_leading_tail_overlap(
     next_raw_words = next_candidate.split()
     previous_words = _normalized_words(previous)
     next_words = _normalized_words(next_candidate)
-    overlap = _suffix_prefix_overlap(previous_words, next_words)
+    overlap = _suffix_prefix_speech_overlap(previous_words, next_words)
     if overlap <= 0:
         return next_candidate
     if overlap == 1 and len(previous_words) > 1 and not allow_single_word:
