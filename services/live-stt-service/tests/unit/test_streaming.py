@@ -134,6 +134,17 @@ def test_commit_text_does_not_finalize_short_draft_when_final_is_repeated_loop()
     )
 
 
+def test_commit_text_uses_two_word_draft_when_final_is_repeated_loop() -> None:
+    assert (
+        _select_commit_text(
+            "Akşama aktif diyorsun Akşam aktif diyorsun ya "
+            "Akşama aktif diyorsun yani Akışa aktif diyorsun yani.",
+            "devam edelim",
+        )
+        == "devam edelim"
+    )
+
+
 def test_commit_text_uses_short_draft_when_final_is_single_word_artifact() -> None:
     assert _select_commit_text("Neroba", "Merhaba") == "Merhaba"
 
@@ -176,6 +187,23 @@ def test_partial_text_appends_short_no_overlap_continuation_after_stable_draft()
             "Konuşulanların çok büyük kısmı yazılmıyor",
         )
         == "Konuşulanların çok büyük kısmı yazılmıyor özellikle ara kelimeler düşüyor"
+    )
+
+
+def test_partial_text_appends_one_word_no_overlap_continuation_after_stable_draft() -> None:
+    assert (
+        _merge_rolling_partial(
+            "Konuşulanların çok büyük kısmı yazılmıyor",
+            "düşüyor",
+        )
+        == "Konuşulanların çok büyük kısmı yazılmıyor düşüyor"
+    )
+    assert (
+        _select_partial_text(
+            "düşüyor",
+            "Konuşulanların çok büyük kısmı yazılmıyor",
+        )
+        == "Konuşulanların çok büyük kısmı yazılmıyor düşüyor"
     )
 
 
