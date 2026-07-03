@@ -169,7 +169,7 @@ contract. The consuming MFE must be changed in its own repository and PR.
 ### No model decision
 
 The #38 provisional model configuration is not promoted to a production model
-decision. Workcube WER evidence in #35/#36 remains incomplete.
+decision. ERP/CRM pilot WER evidence in #35/#36 remains incomplete.
 
 ### No GPU image change
 
@@ -238,7 +238,7 @@ The Docker smoke used temporary container `final-stt-39-smoke` on host port
 `18212`. Both #39 temporary containers were removed after validation. The
 local `final-stt-service:issue-39` image remains available.
 
-No Workcube recording is used by these tests.
+No customer pilot recording is used by these tests.
 
 ## Review Findings Resolved
 
