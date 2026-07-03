@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from app.api import stream as stream_api
 from app.api.stream import (
+    _drop_leading_tail_overlap,
     _merge_final_transcript,
     _merge_rolling_partial,
     _select_commit_text,
@@ -157,6 +158,21 @@ def test_commit_text_applies_final_suffix_without_dropping_live_prefix() -> None
         )
         == "Bu cümle doğru şekilde yazılıyor."
     )
+
+
+def test_drop_leading_tail_overlap_removes_cross_segment_repeated_word() -> None:
+    assert _drop_leading_tail_overlap("Merhaba.", "Merhaba burada hava çok") == "burada hava çok"
+    assert (
+        _drop_leading_tail_overlap(
+            "Bugün canlı transkript gecikmesini test ediyoruz.",
+            "test ediyoruz ve doğruluk daha iyi görünüyor.",
+        )
+        == "ve doğruluk daha iyi görünüyor."
+    )
+    assert _drop_leading_tail_overlap("İlk konu tamam.", "İkinci konu başladı.") == (
+        "İkinci konu başladı."
+    )
+    assert _drop_leading_tail_overlap("Final 1.", "Final 2.") == "Final 2."
 
 
 def test_commit_text_blocks_repeated_final_and_bad_rolling_draft() -> None:

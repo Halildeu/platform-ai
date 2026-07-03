@@ -157,6 +157,26 @@ def _merge_final_transcript(previous_text: str, final_text: str) -> str:
     return final
 
 
+def _drop_leading_tail_overlap(previous_text: str, next_text: str) -> str:
+    """Remove cross-segment tail carry-over from the next final payload."""
+    previous = (previous_text or "").strip()
+    next_candidate = (next_text or "").strip()
+    if not previous or not next_candidate:
+        return next_candidate
+
+    next_raw_words = next_candidate.split()
+    previous_words = _normalized_words(previous)
+    next_words = _normalized_words(next_candidate)
+    overlap = _suffix_prefix_overlap(previous_words, next_words)
+    if overlap <= 0:
+        return next_candidate
+    if overlap == 1 and len(previous_words) > 1:
+        return next_candidate
+    if overlap >= len(next_raw_words):
+        return next_candidate
+    return " ".join(next_raw_words[overlap:]).strip()
+
+
 def _select_partial_text(draft: str, sent_draft: str) -> str | None:
     """Keep live drafts word-progressive so the UI does not erase spoken words."""
     candidate = (draft or "").strip()
@@ -247,6 +267,7 @@ async def stream_endpoint(
     pcm_chunks = 0
     speech_seen = False
     last_speech_t: float | None = None
+    last_final_text = ""
 
     async def send_debug(event: str, **payload: object) -> None:
         # Transcript-free diagnostics; opt-in only (KVKK log discipline, #30).
@@ -257,7 +278,7 @@ async def stream_endpoint(
 
     async def commit_current(reason: str) -> None:
         nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
-        nonlocal last_speech_t
+        nonlocal last_speech_t, last_final_text
 
         def advance_segment(*, retain_tail: bool) -> None:
             nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
@@ -310,7 +331,10 @@ async def stream_endpoint(
             await send_debug("final_fallback_draft", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
 
         text = selected_text
+        text = _drop_leading_tail_overlap(last_final_text, text)
         if not text:
+            await send_debug("final_dropped_tail_only", seq=seg_index, elapsed_ms=elapsed_ms)
+            advance_segment(retain_tail=False)
             return
 
         await websocket.send_json(
@@ -329,6 +353,7 @@ async def stream_endpoint(
             "Final segment sent",
             extra={"seq": seg_index, "reason": reason, "elapsed_ms": elapsed_ms},
         )
+        last_final_text = text
 
         # A forced commit happens while speech is still continuous, so a small
         # tail helps avoid boundary loss. A silence commit already has an
