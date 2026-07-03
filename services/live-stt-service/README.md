@@ -74,14 +74,15 @@ Varsayılan canlı UX ayarları:
 
 | Env | Default | Amaç |
 |---|---:|---|
-| `STT_LIVE_INFER_INTERVAL_MS` | `350` | Konuşma aktifken gerçek partial event cadence'i |
+| `STT_LIVE_INFER_INTERVAL_MS` | `700` | Konuşma aktifken gerçek partial event cadence'i; CPU dev smoke'ta final pass'i aç bırakmayacak aralık |
 | `STT_LIVE_WINDOW_SEC` | `2.0` | Kısa rolling context; kelime-progressive hissi |
 | `STT_LIVE_BEAM_SIZE` | `1` | Live draft decode genişliği; düşük gecikme için ADR-0031 default |
 | `STT_FINAL_BEAM_SIZE` | `1` | Final revision decode genişliği; ölçümlü A/B için env ile artırılabilir |
 | `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct stream final pass'te Whisper VAD; default kapalı çünkü RMS gate zaten aktif sesi seçer |
 | `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
-| `STT_SILENCE_COMMIT_SEC` | `0.9` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
-| `STT_FORCED_COMMIT_SEC` | `8.0` | Uzun konuşmada bounded finalization safety |
+| `STT_SILENCE_COMMIT_SEC` | `0.7` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
+| `STT_FORCED_COMMIT_SEC` | `5.0` | Uzun konuşmada bounded finalization safety |
+| `STT_FINAL_WINDOW_SEC` | `6.0` | Final pass için tutulan aktif konuşma penceresi; uzun desktop konuşmada coverage/cadence dengesi |
 | `STT_TAIL_OVERLAP_SEC` | `0.25` | Forced commit sınırında kelime kaybını azaltan kısa ses kuyruğu |
 | `STT_SILENCE_RMS` / `STT_MIN_SPEECH_RMS` | `0.0005` / `0.0005` | Sessizlik/konuşma hysteresis bandı; WebAudio mikrofon RMS seviyesiyle uyumlu |
 

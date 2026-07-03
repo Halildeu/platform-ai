@@ -103,11 +103,11 @@ class Settings(BaseSettings):
     stream_final_vad_filter: bool = Field(default=False)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.
-    live_infer_interval_ms: int = Field(default=350, ge=1, le=5000)
+    live_infer_interval_ms: int = Field(default=700, ge=1, le=5000)
     live_window_sec: float = Field(default=2.0, ge=0.1, le=10.0)
-    final_window_sec: float = Field(default=10.0, ge=1.0, le=60.0)
-    forced_commit_sec: float = Field(default=8.0, ge=0.1, le=60.0)
-    silence_commit_sec: float = Field(default=0.9, ge=0.1, le=5.0)
+    final_window_sec: float = Field(default=6.0, ge=1.0, le=60.0)
+    forced_commit_sec: float = Field(default=5.0, ge=0.1, le=60.0)
+    silence_commit_sec: float = Field(default=0.7, ge=0.1, le=5.0)
     tail_overlap_sec: float = Field(default=0.25, ge=0.0, le=5.0)
     # Electron/WebAudio microphone frames are much quieter than the original GPU
     # demo fixtures: real desktop speech commonly lands around RMS 0.002-0.005.

@@ -139,3 +139,17 @@ def test_summary_fails_when_final_word_coverage_is_too_low() -> None:
     }
     assert "final_word_coverage_below_min" in summary["quality_gate"]["failures"]
     assert raw_text not in payload
+
+
+def test_final_event_count_honors_requested_long_smoke_gate() -> None:
+    smoke = _load_smoke_module()
+
+    events = [
+        {"type": "partial"},
+        {"type": "final"},
+        {"type": "partial"},
+        {"type": "final"},
+    ]
+
+    assert smoke.final_event_count(events) == 2
+    assert smoke.final_event_count(events) < 3

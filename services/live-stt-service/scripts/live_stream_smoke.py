@@ -257,6 +257,10 @@ def build_summary(
     }
 
 
+def final_event_count(transcript_events: list[dict[str, Any]]) -> int:
+    return sum(1 for event in transcript_events if event.get("type") == "final")
+
+
 async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     wav_path = Path(args.wav).expanduser().resolve()
     reference_text_path = resolve_reference_text(wav_path, args.reference_text)
@@ -306,7 +310,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
 
             deadline = time.perf_counter() + args.final_wait_sec
             while time.perf_counter() < deadline:
-                if any(event["type"] == "final" for event in transcript_events):
+                if final_event_count(transcript_events) >= args.min_final_events:
                     break
                 await asyncio.sleep(0.05)
             receiver_task.cancel()

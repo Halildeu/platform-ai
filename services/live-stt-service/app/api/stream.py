@@ -690,6 +690,7 @@ async def stream_endpoint(
 
             if should_infer:
                 await infer_live_partial()
+                last_live_infer_t = time.time()
 
     inference_task = asyncio.create_task(inference_loop())
     try:

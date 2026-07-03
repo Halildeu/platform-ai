@@ -26,9 +26,11 @@ def test_defaults() -> None:
     assert s.worker_kill_grace_sec == 2.0
     assert s.live_beam_size == 1
     assert s.final_beam_size == 1
-    assert s.live_infer_interval_ms == 350
+    assert s.live_infer_interval_ms == 700
     assert s.live_window_sec == 2.0
-    assert s.silence_commit_sec == 0.9
+    assert s.final_window_sec == 6.0
+    assert s.forced_commit_sec == 5.0
+    assert s.silence_commit_sec == 0.7
     assert s.silence_rms == 0.0005
     assert s.min_speech_rms == 0.0005
     assert s.min_infer_sec == 0.35

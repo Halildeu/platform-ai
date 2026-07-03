@@ -317,8 +317,10 @@ def test_streaming_defaults_follow_adr_0031() -> None:
     assert s.stream_debug is False  # KVKK: verbose debug opt-in only
     assert s.stream_final_vad_filter is False
     assert s.cors_origins == ""  # CORS disabled unless configured
-    assert s.live_infer_interval_ms <= 400
+    assert s.live_infer_interval_ms <= 700
     assert s.live_window_sec <= 2.5
+    assert s.final_window_sec <= 6.0
+    assert s.forced_commit_sec <= 5.0
     assert s.silence_commit_sec <= 1.0
     assert s.tail_overlap_sec <= 0.35
     assert s.silence_rms <= 0.001
