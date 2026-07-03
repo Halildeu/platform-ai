@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
 _WORD_RE = re.compile(r"[\wçğıöşüÇĞİÖŞÜ]+", re.UNICODE)
+MIN_FALLBACK_DRAFT_WORDS = 4
 
 
 def _audio_rms(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> float:
@@ -177,7 +178,7 @@ def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
             return merged
         return candidate
 
-    if fallback_ok:
+    if fallback_ok and _word_count(fallback) >= MIN_FALLBACK_DRAFT_WORDS:
         return fallback
 
     return None

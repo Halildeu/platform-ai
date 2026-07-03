@@ -85,6 +85,12 @@ def _repeated_family_count(families: list[str]) -> int:
     return max(families.count(family) for family in set(families))
 
 
+def _dominant_family_count_by_fragment(
+    fragments: list[list[str]], dominant_family: str
+) -> int:
+    return sum(1 for fragment in fragments if dominant_family in fragment)
+
+
 def _sentence_fragments(text: str) -> list[list[str]]:
     fragments: list[list[str]] = []
     for fragment in re.split(r"[.!?…]+|\b(?:ya|yani)\b", text, flags=re.IGNORECASE):
@@ -134,11 +140,12 @@ def _is_low_information_repetition(text: str) -> bool:
 def _is_repeated_alternative_chain(text: str) -> bool:
     """Reject sequences of near-duplicate ASR alternatives in one final payload."""
     families = _normalized_families(text)
-    if len(families) < 8 or _repeated_family_count(families) < 4:
+    top_family_count = _repeated_family_count(families)
+    if len(families) < 8 or top_family_count < 3:
         return False
 
     fragments = _sentence_fragments(text)
-    if len(fragments) < 3:
+    if len(fragments) < 2:
         return False
 
     similar_pairs = 0
@@ -146,10 +153,17 @@ def _is_repeated_alternative_chain(text: str) -> bool:
         for right in fragments[left_index + 1 :]:
             if _shared_token_ratio(left, right) >= 0.6:
                 similar_pairs += 1
-            if similar_pairs >= 2:
+            if similar_pairs >= (2 if len(fragments) >= 3 else 1):
                 return True
 
-    return False
+    counts = {family: families.count(family) for family in set(families)}
+    dominant = max(counts, key=counts.get, default="")
+    return bool(
+        dominant
+        and top_family_count >= 4
+        and _dominant_family_count_by_fragment(fragments, dominant) >= 2
+        and any(len(fragment) <= 4 for fragment in fragments)
+    )
 
 
 def is_hallucination(text: str) -> bool:

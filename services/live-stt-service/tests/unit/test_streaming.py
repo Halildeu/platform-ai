@@ -67,6 +67,14 @@ def test_hallucination_filter_blocks_repeated_alternative_chains() -> None:
         )
         is True
     )
+    assert (
+        is_hallucination(
+            "Akşama aktif diyorsun Akşam aktif diyorsun ya "
+            "Akşama aktif diyorsun yani Akışa aktif diyorsun yani. "
+            "bakışı aktif diyorsun yani."
+        )
+        is True
+    )
 
 
 def test_hallucination_filter_passes_real_speech() -> None:
@@ -94,6 +102,17 @@ def test_commit_text_drops_segment_when_final_and_draft_are_unusable() -> None:
         _select_commit_text(
             "Benim akışa aktiftim. Benim akışa aktif diyorsun. " "Elime akışı aktif diyorsunuz.",
             "Altyazı M.K.",
+        )
+        is None
+    )
+
+
+def test_commit_text_does_not_finalize_short_draft_when_final_is_repeated_loop() -> None:
+    assert (
+        _select_commit_text(
+            "Akşama aktif diyorsun Akşam aktif diyorsun ya "
+            "Akşama aktif diyorsun yani Akışa aktif diyorsun yani.",
+            "Böyle...",
         )
         is None
     )
