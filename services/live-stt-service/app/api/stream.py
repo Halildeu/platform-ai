@@ -409,12 +409,14 @@ async def stream_endpoint(
         buffer_sec = round(buffer.size / SAMPLE_RATE, 2)
         if buffer.size < min_infer_samples:
             await send_debug("final_skip_short_buffer", buffer_sec=buffer_sec)
+            advance_segment(retain_tail=False)
             return
 
         audio = buffer.copy()
         rms = _audio_rms(audio)
         if rms < settings.min_speech_rms:
             await send_debug("final_skip_low_rms", rms=round(rms, 5), buffer_sec=buffer_sec)
+            advance_segment(retain_tail=False)
             return
 
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)

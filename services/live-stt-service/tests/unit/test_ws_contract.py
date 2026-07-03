@@ -156,6 +156,45 @@ def test_stream_emits_same_seq_word_progressive_partials(
     assert second["tentative"] == "Merhaba nasılsın"
 
 
+def test_stream_default_gate_accepts_quiet_desktop_microphone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Desktop/WebAudio speech around RMS 0.002 must not be treated as silence."""
+
+    settings = Settings(
+        live_infer_interval_ms=1,
+        final_window_sec=5.0,
+        forced_commit_sec=60.0,
+        silence_commit_sec=0.1,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        return "Sessiz olmayan masaüstü konuşması" if not vad else "Sessiz olmayan konuşma."
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        for _ in range(6):
+            ws.send_bytes(_speech_frame_with_level(0.002))
+            time.sleep(0.002)
+        partial = ws.receive_json()
+
+    assert_valid(partial)
+    assert partial["type"] == "partial"
+    assert partial["seq"] == 0
+    assert partial["tentative"] == "Sessiz olmayan masaüstü konuşması"
+    assert partial["rms"] == pytest.approx(0.002, abs=0.0001)
+
+
 def test_stream_appends_growing_no_overlap_live_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

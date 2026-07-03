@@ -104,8 +104,10 @@ class Settings(BaseSettings):
     forced_commit_sec: float = Field(default=8.0, ge=0.1, le=60.0)
     silence_commit_sec: float = Field(default=0.9, ge=0.1, le=5.0)
     tail_overlap_sec: float = Field(default=0.25, ge=0.0, le=5.0)
-    silence_rms: float = Field(default=0.025, ge=0.0, le=1.0)
-    min_speech_rms: float = Field(default=0.03, gt=0.0, le=1.0)
+    # Electron/WebAudio microphone frames are much quieter than the original GPU
+    # demo fixtures: real desktop speech commonly lands around RMS 0.002-0.005.
+    silence_rms: float = Field(default=0.001, ge=0.0, le=1.0)
+    min_speech_rms: float = Field(default=0.0015, gt=0.0, le=1.0)
     min_infer_sec: float = Field(default=0.35, ge=0.01, le=5.0)
     debug_every_sec: float = Field(default=1.0, ge=0.1, le=10.0)
     # Comma-separated allowed origins for the browser streaming demo; empty =

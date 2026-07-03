@@ -28,6 +28,8 @@ def test_defaults() -> None:
     assert s.live_infer_interval_ms == 350
     assert s.live_window_sec == 2.0
     assert s.silence_commit_sec == 0.9
+    assert s.silence_rms == 0.001
+    assert s.min_speech_rms == 0.0015
     assert s.min_infer_sec == 0.35
 
 

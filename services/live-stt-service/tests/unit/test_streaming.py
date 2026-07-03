@@ -275,6 +275,8 @@ def test_streaming_defaults_follow_adr_0031() -> None:
     assert s.live_window_sec <= 2.5
     assert s.silence_commit_sec <= 1.0
     assert s.tail_overlap_sec <= 0.35
+    assert s.silence_rms <= 0.001
+    assert s.min_speech_rms <= 0.0015
     assert int(0.5 * stream_api.SAMPLE_RATE) >= int(s.min_infer_sec * stream_api.SAMPLE_RATE)
 
 
