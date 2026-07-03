@@ -122,6 +122,10 @@ def _patch_fast_stream_timing(
     monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
 
 
+def _is_final_service(service: streaming_models.DirectWhisperService) -> bool:
+    return getattr(service, "role", "") == "final"
+
+
 def test_stream_emits_same_seq_word_progressive_partials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -134,7 +138,7 @@ def test_stream_emits_same_seq_word_progressive_partials(
         _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        return "Merhaba nasılsın." if vad else next(live_drafts)
+        return "Merhaba nasılsın." if _is_final_service(self) else next(live_drafts)
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
@@ -175,7 +179,11 @@ def test_stream_default_gate_accepts_quiet_desktop_microphone(
         _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        return "Sessiz olmayan masaüstü konuşması" if not vad else "Sessiz olmayan konuşma."
+        return (
+            "Sessiz olmayan konuşma."
+            if _is_final_service(self)
+            else "Sessiz olmayan masaüstü konuşması"
+        )
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
@@ -195,6 +203,52 @@ def test_stream_default_gate_accepts_quiet_desktop_microphone(
     assert partial["rms"] == pytest.approx(0.002, abs=0.0001)
 
 
+def test_stream_final_pass_bypasses_whisper_vad_after_rms_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct WS finalization must not let Whisper VAD cut quiet desktop speech."""
+    settings = Settings(
+        live_infer_interval_ms=5_000,
+        final_window_sec=5.0,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        silence_rms=0.0005,
+        min_speech_rms=0.0005,
+        min_infer_sec=0.01,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
+    final_vad_flags: list[bool] = []
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        if _is_final_service(self):
+            final_vad_flags.append(vad)
+            return "Sessiz konuşmanın tamamı korunuyor."
+        return ""
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        for _ in range(4):
+            ws.send_bytes(_speech_frame_with_level(0.002))
+            time.sleep(0.005)
+        time.sleep(0.11)
+        ws.send_bytes(_speech_frame_with_level(0.002))
+        final = ws.receive_json()
+
+    assert_valid(final)
+    assert final["type"] == "final"
+    assert final["text"] == "Sessiz konuşmanın tamamı korunuyor."
+    assert final_vad_flags == [False]
+
+
 def test_stream_keeps_receiving_audio_while_live_model_is_busy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -211,7 +265,7 @@ def test_stream_keeps_receiving_audio_while_live_model_is_busy(
         audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        if vad:
+        if _is_final_service(self):
             final_sample_counts.append(int(audio.size))
             return "Canlı final metin."
         time.sleep(0.08)
@@ -265,7 +319,7 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
         audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        if vad:
+        if _is_final_service(self):
             final_sample_counts.append(int(audio.size))
             if len(final_sample_counts) == 1:
                 time.sleep(0.12)
@@ -311,7 +365,11 @@ def test_stream_appends_growing_no_overlap_live_windows(
         _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        return "Merhaba sesim geliyor mu bir sürü eksik var yine." if vad else next(live_drafts)
+        return (
+            "Merhaba sesim geliyor mu bir sürü eksik var yine."
+            if _is_final_service(self)
+            else next(live_drafts)
+        )
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
@@ -348,7 +406,7 @@ def test_stream_appends_short_no_overlap_live_continuations(
         _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        if vad:
+        if _is_final_service(self):
             return "Konuşulanların çok büyük kısmı yazılmıyor ara kelimeler düşüyor."
         return live_drafts.pop(0) if live_drafts else "ara kelimeler düşüyor"
 
@@ -383,7 +441,7 @@ def test_stream_keeps_short_stable_draft_over_unrelated_short_final(
         _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        return "Neroba" if vad else "Merhaba"
+        return "Neroba" if _is_final_service(self) else "Merhaba"
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
@@ -417,7 +475,7 @@ def test_stream_commits_final_on_speech_ending_silence(
         _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        return "Merhaba nasılsın." if vad else "Merhaba nasılsın"
+        return "Merhaba nasılsın." if _is_final_service(self) else "Merhaba nasılsın"
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
@@ -458,7 +516,7 @@ def test_stream_forced_commit_still_emits_final(
         _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        return "Uzun konuşma final." if vad else "Uzun konuşma"
+        return "Uzun konuşma final." if _is_final_service(self) else "Uzun konuşma"
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
@@ -495,7 +553,7 @@ def test_stream_silence_commit_does_not_carry_tail_into_next_utterance(
         audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
-        if vad:
+        if _is_final_service(self):
             final_first_samples.append(float(audio[0]))
             return f"Final {len(final_first_samples)}."
         return "Taslak"

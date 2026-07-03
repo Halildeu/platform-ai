@@ -315,6 +315,7 @@ def test_streaming_defaults_follow_adr_0031() -> None:
     assert s.final_compute_type == "float16"
     assert s.final_beam_size == 1
     assert s.stream_debug is False  # KVKK: verbose debug opt-in only
+    assert s.stream_final_vad_filter is False
     assert s.cors_origins == ""  # CORS disabled unless configured
     assert s.live_infer_interval_ms <= 400
     assert s.live_window_sec <= 2.5

@@ -78,11 +78,12 @@ Varsayılan canlı UX ayarları:
 | `STT_LIVE_WINDOW_SEC` | `2.0` | Kısa rolling context; kelime-progressive hissi |
 | `STT_LIVE_BEAM_SIZE` | `1` | Live draft decode genişliği; düşük gecikme için ADR-0031 default |
 | `STT_FINAL_BEAM_SIZE` | `1` | Final revision decode genişliği; ölçümlü A/B için env ile artırılabilir |
+| `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct stream final pass'te Whisper VAD; default kapalı çünkü RMS gate zaten aktif sesi seçer |
 | `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
 | `STT_SILENCE_COMMIT_SEC` | `0.9` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
 | `STT_FORCED_COMMIT_SEC` | `8.0` | Uzun konuşmada bounded finalization safety |
 | `STT_TAIL_OVERLAP_SEC` | `0.25` | Forced commit sınırında kelime kaybını azaltan kısa ses kuyruğu |
-| `STT_SILENCE_RMS` / `STT_MIN_SPEECH_RMS` | `0.001` / `0.001` | Sessizlik/konuşma hysteresis bandı; WebAudio mikrofon RMS seviyesiyle uyumlu |
+| `STT_SILENCE_RMS` / `STT_MIN_SPEECH_RMS` | `0.0005` / `0.0005` | Sessizlik/konuşma hysteresis bandı; WebAudio mikrofon RMS seviyesiyle uyumlu |
 
 Partial event'ler aynı `seq` ile gelir; client aynı transcript satırını
 günceller. `confirmed`/`tentative` alanları consumer tarafında ayrı
@@ -329,6 +330,7 @@ Approved GPU live PoC note:
 | `STT_LIVE_BEAM_SIZE` | `1` | Direct stream live draft beam (1-10) |
 | `STT_FINAL_BEAM_SIZE` | `1` | Direct stream final revision beam (1-10); `>1` rollout'u latency/WER kanıtı ister |
 | `STT_VAD_FILTER` | `true` | Whisper built-in VAD |
+| `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct `/ws/stream` final pass VAD; quiet desktop speech kaybını önlemek için default kapalı |
 | `STT_MAX_AUDIO_MB` | `50` | DoS guard (1-500) |
 | `STT_LOG_LEVEL` | `INFO` | logging level |
 | `STT_REQUEST_TIMEOUT` | `60` | hard cap sec |

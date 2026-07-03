@@ -45,6 +45,7 @@ class Settings(BaseSettings):
       STT_CHUNK_CONSUMER_GROUP    live-stt-v1
       STT_LIVE_BEAM_SIZE          1 (default; low-latency draft)
       STT_FINAL_BEAM_SIZE         1 (default; ADR-0031 final revision)
+      STT_STREAM_FINAL_VAD_FILTER False (default; direct-stream final uses RMS gate)
     """
 
     model_config = SettingsConfigDict(
@@ -96,6 +97,10 @@ class Settings(BaseSettings):
     final_beam_size: int = Field(default=1, ge=1, le=10)
     # Transcript-free verbose debug events over WS (KVKK: default off, #30).
     stream_debug: bool = Field(default=False)
+    # Direct stream already has an RMS gate and active-audio trimming. Faster-
+    # whisper VAD can drop quiet desktop microphone speech, so the WS final pass
+    # keeps it off by default; sync /transcribe still uses `vad_filter`.
+    stream_final_vad_filter: bool = Field(default=False)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.
     live_infer_interval_ms: int = Field(default=350, ge=1, le=5000)

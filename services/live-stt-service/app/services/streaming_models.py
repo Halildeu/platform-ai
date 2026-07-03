@@ -34,12 +34,14 @@ class DirectWhisperService:
         compute_type: str,
         language: str,
         beam_size: int,
+        role: str = "stream",
     ) -> None:
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
         self.language = language
         self.beam_size = beam_size
+        self.role = role
         self._model: object | None = None
         self._lock = threading.Lock()
 
@@ -109,6 +111,7 @@ def _named(
                 compute_type,
                 language,
                 beam_size,
+                role=key,
             )
         return _services[service_key]
 

@@ -20,6 +20,7 @@ def test_defaults() -> None:
     assert s.language == "tr"
     assert s.beam_size == 5
     assert s.vad_filter is True
+    assert s.stream_final_vad_filter is False
     assert s.worker_backend == "process"
     assert s.worker_max_workers == 1
     assert s.worker_kill_grace_sec == 2.0
@@ -44,6 +45,7 @@ def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STT_WORKER_KILL_GRACE_SEC", "0.5")
     monkeypatch.setenv("STT_LIVE_BEAM_SIZE", "2")
     monkeypatch.setenv("STT_FINAL_BEAM_SIZE", "4")
+    monkeypatch.setenv("STT_STREAM_FINAL_VAD_FILTER", "true")
     monkeypatch.setenv("STT_LIVE_INFER_INTERVAL_MS", "250")
     monkeypatch.setenv("STT_LIVE_WINDOW_SEC", "1.5")
     monkeypatch.setenv("STT_SILENCE_COMMIT_SEC", "0.4")
@@ -58,6 +60,7 @@ def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.worker_kill_grace_sec == 0.5
     assert s.live_beam_size == 2
     assert s.final_beam_size == 4
+    assert s.stream_final_vad_filter is True
     assert s.live_infer_interval_ms == 250
     assert s.live_window_sec == 1.5
     assert s.silence_commit_sec == 0.4

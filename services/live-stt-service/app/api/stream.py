@@ -519,7 +519,11 @@ async def stream_endpoint(
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
         started = time.perf_counter()
         try:
-            text = await run_in_threadpool(final_service.transcribe_array, audio, True)
+            text = await run_in_threadpool(
+                final_service.transcribe_array,
+                audio,
+                settings.stream_final_vad_filter,
+            )
         except Exception as exc:  # noqa: BLE001 - keep stream alive, fall back to draft
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
             logger.warning("Final pass error err_class=%s", type(exc).__name__, exc_info=True)
