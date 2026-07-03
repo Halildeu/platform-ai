@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from app.api import stream as stream_api
 from app.api.stream import (
+    _append_recent_final_text,
     _drop_leading_tail_overlap,
     _merge_final_transcript,
     _merge_rolling_partial,
@@ -173,6 +174,41 @@ def test_drop_leading_tail_overlap_removes_cross_segment_repeated_word() -> None
         "İkinci konu başladı."
     )
     assert _drop_leading_tail_overlap("Final 1.", "Final 2.") == "Final 2."
+
+
+def test_drop_leading_tail_overlap_can_remove_single_word_carry_over() -> None:
+    previous = "Ben sana bir kelime merhaba dedim. Sen uc tane ayri merhaba."
+    assert (
+        _drop_leading_tail_overlap(
+            previous,
+            "Merhaba enteresan seyler yapabiliyor musun?",
+            allow_single_word=True,
+        )
+        == "enteresan seyler yapabiliyor musun?"
+    )
+    assert _drop_leading_tail_overlap(previous, "Merhaba", allow_single_word=True) == "Merhaba"
+
+
+def test_recent_final_tail_catches_cumulative_cross_segment_carry_over() -> None:
+    recent = _append_recent_final_text("", "Merhaba.")
+    assert recent == "Merhaba."
+
+    second = _drop_leading_tail_overlap(
+        recent,
+        "Merhaba burada hava cok.",
+        allow_single_word=True,
+    )
+    assert second == "burada hava cok."
+
+    recent = _append_recent_final_text(recent, second)
+    assert (
+        _drop_leading_tail_overlap(
+            recent,
+            "Merhaba burada hava cok degisik seyler oluyor.",
+            allow_single_word=True,
+        )
+        == "degisik seyler oluyor."
+    )
 
 
 def test_commit_text_blocks_repeated_final_and_bad_rolling_draft() -> None:
