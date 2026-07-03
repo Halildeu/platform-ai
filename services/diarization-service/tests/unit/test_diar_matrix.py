@@ -117,3 +117,80 @@ def test_agglomerative_labels_auto_threshold_splits_clear_groups() -> None:
 def test_agglomerative_labels_edge_cases() -> None:
     assert diar_matrix.agglomerative_labels(np.zeros((0, 2))) == []
     assert diar_matrix.agglomerative_labels(np.array([[1.0, 2.0]])) == [0]
+
+
+class _FakeRevision:
+    def __init__(self, commit_hash: str, refs: set[str], last_modified: float) -> None:
+        self.commit_hash = commit_hash
+        self.refs = refs
+        self.last_modified = last_modified
+
+
+class _FakeRepo:
+    def __init__(self, repo_id: str, revisions: list[_FakeRevision]) -> None:
+        self.repo_id = repo_id
+        self.revisions = revisions
+
+
+class _FakeCacheInfo:
+    def __init__(self, repos: list[_FakeRepo]) -> None:
+        self.repos = repos
+
+
+def _install_fake_huggingface_hub(
+    monkeypatch: pytest.MonkeyPatch, cache_info: _FakeCacheInfo
+) -> None:
+    import types
+
+    fake_module = types.ModuleType("huggingface_hub")
+    fake_module.scan_cache_dir = lambda: cache_info  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_module)
+
+
+def test_resolved_model_revision_prefers_main_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #235 (Codex review): decision evidence must carry an immutable snapshot
+    # id even when --revision was not explicitly passed. When several cached
+    # revisions exist for the same repo, "main" is the one actually resolved
+    # by a bare model-id load (no revision kwarg), so it must win regardless
+    # of last_modified ordering.
+    cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [
+                    _FakeRevision("older111", {"main"}, last_modified=1.0),
+                    _FakeRevision("newer222", set(), last_modified=2.0),
+                ],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, cache)
+    assert diar_matrix.resolved_model_revision("pyannote/speaker-diarization-3.1") == "older111"
+
+
+def test_resolved_model_revision_falls_back_to_most_recent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No revision has "main" in its refs (e.g. loaded by a pinned tag) — fall
+    # back to the most recently used cached revision rather than returning
+    # nothing.
+    cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "speechbrain/spkrec-ecapa-voxceleb",
+                [
+                    _FakeRevision("stale333", {"v1.0"}, last_modified=1.0),
+                    _FakeRevision("fresh444", {"v2.0"}, last_modified=5.0),
+                ],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, cache)
+    assert diar_matrix.resolved_model_revision("speechbrain/spkrec-ecapa-voxceleb") == "fresh444"
+
+
+def test_resolved_model_revision_returns_none_when_repo_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_huggingface_hub(monkeypatch, _FakeCacheInfo([]))
+    assert diar_matrix.resolved_model_revision("pyannote/speaker-diarization-3.1") is None

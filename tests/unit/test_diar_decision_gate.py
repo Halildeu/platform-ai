@@ -239,6 +239,31 @@ class DiarDecisionGateTests(unittest.TestCase):
             saved = json.loads(stdout.getvalue())
             self.assertEqual(saved["status"], "blocked")
 
+    def test_pilot_row_without_any_revision_is_blocked(self) -> None:
+        # #235 (Codex review): a bare model name with neither an operator
+        # `revision` pin nor a diar_matrix.py-resolved `resolved_revision` is
+        # not a reproducible decision — the gate must not let it through.
+        row = _pilot_row(revision=None)
+        row.pop("resolved_revision", None)
+        result = gate.evaluate_gate(rows=[row], **_threshold_kwargs())
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(
+            any("revision or resolved_revision" in f for f in result["findings"])
+        )
+
+    def test_pilot_row_with_only_resolved_revision_passes(self) -> None:
+        # An operator did not pass --revision, but diar_matrix.py still
+        # captured the actual cached commit hash — that satisfies the
+        # requirement on its own (no explicit pin needed).
+        row = _pilot_row(revision=None, resolved_revision="deadbeef1234")
+        result = gate.evaluate_gate(rows=[row], **_threshold_kwargs())
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(
+            result["selectedDiarization"]["resolved_revision"], "deadbeef1234"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

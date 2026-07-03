@@ -48,6 +48,15 @@ SpeechBrain is faster and lighter, but its overlap corpus DER exceeds the
 agreed 30% quality ceiling. Pyannote stays below that ceiling in both the pilot
 and overlap evaluations.
 
+**Ceiling scope (Codex review #235):** the accepted 30% ceiling is a
+**corpus-level** ceiling (`der_corpus`, duration-weighted across all fixtures
+in the set) — not a per-fixture ceiling. Pyannote's overlap `der_max` (the
+single worst fixture) is 31.31%, above 30%; its `der_corpus` (20.30%) is what
+the gate scores and what this decision is conditioned on. A per-fixture
+ceiling is not currently enforced by `diar_decision_gate.py` and is not
+proposed here — if one is wanted later, the gate needs an explicit
+`max-der-max`-style threshold added, not an implicit reading of this table.
+
 ## Decision
 
 1. **Placement:** run diarization as a post-processing batch step. It is not a
@@ -61,7 +70,9 @@ and overlap evaluations.
    DER is 32.15%.
 4. **Identity boundary:** keep anonymous speaker labels canonical. Human
    confirmation is required before applying a person label. This ADR does not
-   enable embeddings, voiceprints, or automatic biometric identification.
+   enable embeddings, voiceprints, or automatic biometric identification —
+   voiceprint/biometric processing (KVKK m.6, special-category data) stays
+   gated behind ADR-0035's legal track (#168) regardless of this decision.
 5. **Scheduling boundary:** do not co-load pyannote with the full STT and Ollama
    model set without an explicit GPU capacity check. The measured pyannote VRAM
    delta is about 2.2 GB.
@@ -90,6 +101,18 @@ python services/diarization-service/scripts/diar_decision_gate.py `
   --max-rtf 0.05 `
   --max-latency-ms 3000 `
   --max-peak-vram-delta-mb 2500 `
+  --min-samples 3
+```
+
+Linux/macOS (bash) equivalent:
+
+```bash
+python services/diarization-service/scripts/diar_decision_gate.py \
+  --evidence docs/evidence/diar-decision-pilot-2026-07-02.jsonl \
+  --max-der 0.30 \
+  --max-rtf 0.05 \
+  --max-latency-ms 3000 \
+  --max-peak-vram-delta-mb 2500 \
   --min-samples 3
 ```
 
@@ -129,3 +152,12 @@ The prior promotion triggers are now satisfied:
 
 Owner review is the final step before changing this ADR status from PROPOSED to
 ACCEPTED and closing #161.
+
+## Cross-AI Consensus
+
+Halildeu (Cross-AI review, PR #235, 2026-07-03): CHANGES_REQUESTED — evidence
+model revision was null and the gate did not enforce it (both addressed in
+this revision via `diar_matrix.py`'s `resolved_revision` capture and
+`diar_decision_gate.py`'s revision-or-resolved-revision requirement), plus the
+corpus-vs-per-fixture DER ceiling wording above. Re-review pending a fresh
+pilot + overlap measurement carrying a real `resolved_revision` value.
