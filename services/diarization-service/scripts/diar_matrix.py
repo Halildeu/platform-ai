@@ -170,17 +170,20 @@ def _pyannote_cache_dir() -> str:
 
     `Pipeline.from_pretrained` (and the models it composes, e.g.
     `pyannote/segmentation-3.0`, `pyannote/wespeaker-voxceleb-resnet34-LM`)
-    defaults its `cache_dir` to `<torch.hub cache>/pyannote`, so
-    `scan_cache_dir()` against the default `~/.cache/huggingface/hub` never
-    sees pyannote models even after a successful load (#235 follow-up: GPU
-    host verification showed SpeechBrain resolved correctly but pyannote
-    stayed null because of exactly this second cache root). The directory
-    layout under this root is the same `models--org--repo/snapshots/<hash>`
-    shape `scan_cache_dir(cache_dir=...)` already understands.
+    defaults its `cache_dir` to `<torch cache root>/pyannote` — a SIBLING of
+    `torch.hub.get_dir()` (which is `<torch cache root>/hub`, torch's own
+    model-zoo cache), not a child of it. GPU-host verification confirmed the
+    actual on-disk path is `~/.cache/torch/pyannote`, e.g.
+    `~/.cache/torch/pyannote/models--pyannote--speaker-diarization-3.1/
+    snapshots/<hash>` (first attempt at `~/.cache/torch/hub/pyannote` raised
+    `CacheNotFound` — one directory level too deep). The layout under this
+    root is the same `models--org--repo/snapshots/<hash>` shape
+    `scan_cache_dir(cache_dir=...)` already understands.
     """
     import torch  # type: ignore[import-not-found]
 
-    return os.path.join(torch.hub.get_dir(), "pyannote")
+    torch_cache_root = os.path.dirname(torch.hub.get_dir())  # strip the "hub" leaf
+    return os.path.join(torch_cache_root, "pyannote")
 
 
 def resolved_model_revision(model_id: str) -> str | None:
