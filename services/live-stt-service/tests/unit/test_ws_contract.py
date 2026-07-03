@@ -156,6 +156,74 @@ def test_stream_emits_same_seq_word_progressive_partials(
     assert second["tentative"] == "Merhaba nasılsın"
 
 
+def test_stream_appends_growing_no_overlap_live_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later rolling window must not erase already displayed words."""
+    _patch_fast_stream_timing(monkeypatch)
+    live_drafts = iter(["Merhaba sesim geliyor mu", "bir sürü eksik var yine"])
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        return "Merhaba sesim geliyor mu bir sürü eksik var yine." if vad else next(live_drafts)
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        first = ws.receive_json()
+        time.sleep(0.002)
+        ws.send_bytes(_speech_frame())
+        second = ws.receive_json()
+
+    for event in (first, second):
+        assert_valid(event)
+        assert event["type"] == "partial"
+        assert event["seq"] == 0
+    assert first["tentative"] == "Merhaba sesim geliyor mu"
+    assert second["tentative"] == "Merhaba sesim geliyor mu bir sürü eksik var yine"
+
+
+def test_stream_keeps_short_stable_draft_over_unrelated_short_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Short final corrections should not replace a stable draft with noise."""
+    _patch_fast_stream_timing(monkeypatch)
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        return "Neroba" if vad else "Merhaba"
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        partial = ws.receive_json()
+        time.sleep(0.11)
+        ws.send_bytes(_silence_frame())
+        final = ws.receive_json()
+
+    assert_valid(partial)
+    assert partial["type"] == "partial"
+    assert partial["tentative"] == "Merhaba"
+
+    assert_valid(final)
+    assert final["type"] == "final"
+    assert final["text"] == "Merhaba"
+
+
 def test_stream_commits_final_on_speech_ending_silence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

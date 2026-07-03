@@ -106,6 +106,16 @@ def _merge_rolling_partial(previous_text: str, next_text: str) -> str:
     if overlap > 0:
         return " ".join([*previous_raw_words, *next_raw_words[overlap:]])
 
+    if previous_words[0] == next_words[0]:
+        return next_candidate
+
+    if (
+        len(next_words) > len(previous_words)
+        and len(next_words) >= 3
+        and (len(previous_words) >= 2 or len(next_words) >= len(previous_words) + 2)
+    ):
+        return " ".join([*previous_raw_words, *next_raw_words])
+
     return next_candidate
 
 
@@ -140,6 +150,9 @@ def _merge_final_transcript(previous_text: str, final_text: str) -> str:
     overlap = _suffix_prefix_overlap(previous_words, final_words)
     if overlap >= 2:
         return " ".join([*previous_raw_words, *final_raw_words[overlap:]])
+
+    if len(final_words) <= len(previous_words) + 1 and len(final_words) <= 3:
+        return previous
 
     return final
 
