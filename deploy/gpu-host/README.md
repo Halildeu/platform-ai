@@ -26,6 +26,13 @@ Invoke-RestMethod http://127.0.0.1:8200/health   # live-stt  (model load ~30-60 
 Invoke-RestMethod http://127.0.0.1:8300/health   # meeting-ai
 Get-ScheduledTask platform-ai-*                   # ikisi de Running olmalı
 ```
+
+`/health` sadece senkron `/transcribe` modelinin lazy-load durumunu gosterir.
+Canli urun yuzeyi icin asil readiness `/ws/stream` handshake'idir:
+`loading/live_model -> loading/final_model -> ready`. `update.ps1` restart
+sonrasinda bu direct stream modellerini transcript-free websocket warmup ile
+yukler; bu adim basarisizsa ilk kullanici kaydi model yukleme gecikmesini oder.
+
 Loglar: `deploy\gpu-host\logs\` (günlük dosya; **transcript-free** — KVKK #30).
 
 ## Güncelleme (yeni kod deploy etme) — drift-proof

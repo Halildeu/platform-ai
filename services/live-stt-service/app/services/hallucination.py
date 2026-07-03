@@ -66,6 +66,34 @@ def _word_family(word: str) -> str:
     return family
 
 
+def _normalized_families(text: str) -> list[str]:
+    return [_word_family(word) for word in _normalized_words(text)]
+
+
+def _shared_token_ratio(left: list[str], right: list[str]) -> float:
+    left_set = set(left)
+    right_set = set(right)
+    denominator = min(len(left_set), len(right_set))
+    if denominator == 0:
+        return 0.0
+    return len(left_set & right_set) / denominator
+
+
+def _repeated_family_count(families: list[str]) -> int:
+    if not families:
+        return 0
+    return max(families.count(family) for family in set(families))
+
+
+def _sentence_fragments(text: str) -> list[list[str]]:
+    fragments: list[list[str]] = []
+    for fragment in re.split(r"[.!?…]+|\b(?:ya|yani)\b", text, flags=re.IGNORECASE):
+        words = _normalized_words(fragment)
+        if len(words) >= 2:
+            fragments.append([_word_family(word) for word in words])
+    return fragments
+
+
 def _is_low_information_repetition(text: str) -> bool:
     """Reject long repeated decode loops without logging transcript content.
 
@@ -103,6 +131,27 @@ def _is_low_information_repetition(text: str) -> bool:
     return False
 
 
+def _is_repeated_alternative_chain(text: str) -> bool:
+    """Reject sequences of near-duplicate ASR alternatives in one final payload."""
+    families = _normalized_families(text)
+    if len(families) < 8 or _repeated_family_count(families) < 4:
+        return False
+
+    fragments = _sentence_fragments(text)
+    if len(fragments) < 3:
+        return False
+
+    similar_pairs = 0
+    for left_index, left in enumerate(fragments[:-1]):
+        for right in fragments[left_index + 1 :]:
+            if _shared_token_ratio(left, right) >= 0.6:
+                similar_pairs += 1
+            if similar_pairs >= 2:
+                return True
+
+    return False
+
+
 def is_hallucination(text: str) -> bool:
     """True when the candidate transcript should be suppressed."""
     normalized = (text or "").strip()
@@ -111,5 +160,7 @@ def is_hallucination(text: str) -> bool:
     if len(normalized) < 3:
         return True
     if _is_low_information_repetition(normalized):
+        return True
+    if _is_repeated_alternative_chain(normalized):
         return True
     return any(p.fullmatch(normalized) for p in _HALLUCINATION_PATTERNS)

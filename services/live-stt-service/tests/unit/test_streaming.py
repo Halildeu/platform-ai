@@ -54,6 +54,16 @@ def test_hallucination_filter_blocks_repeated_decode_loops() -> None:
     )
 
 
+def test_hallucination_filter_blocks_repeated_alternative_chains() -> None:
+    assert (
+        is_hallucination(
+            "Kelime akışı aktif. Kelime akış aktif diyorsun ya "
+            "Kelime akışı aktif diyorsunuz yani kelime akışı aktif."
+        )
+        is True
+    )
+
+
 def test_hallucination_filter_passes_real_speech() -> None:
     assert is_hallucination("Toplantı yarın saat onda başlayacak.") is False
     assert is_hallucination("Bütçe raporunu cuma günü teslim edelim.") is False
