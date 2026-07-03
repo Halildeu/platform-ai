@@ -157,7 +157,7 @@ def _is_repeated_alternative_chain(text: str) -> bool:
                 return True
 
     counts = {family: families.count(family) for family in set(families)}
-    dominant = max(counts, key=counts.get, default="")
+    dominant = max(counts.items(), key=lambda item: item[1], default=("", 0))[0]
     return bool(
         dominant
         and top_family_count >= 4
