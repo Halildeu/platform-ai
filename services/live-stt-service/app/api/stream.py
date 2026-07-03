@@ -24,6 +24,7 @@ endpoint is the PoC/dev path pending maintainer decision (issue #128).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import re
@@ -376,47 +377,102 @@ async def stream_endpoint(
     last_speech_t: float | None = None
     last_final_text = ""
     recent_final_text = ""
+    buffer_lock = asyncio.Lock()
+    send_lock = asyncio.Lock()
+    stop_inference = asyncio.Event()
 
     async def send_debug(event: str, **payload: object) -> None:
         # Transcript-free diagnostics; opt-in only (KVKK log discipline, #30).
         if not debug_enabled:
             return
         with contextlib.suppress(Exception):
-            await websocket.send_json({"type": "debug", "event": event, **payload})
+            async with send_lock:
+                await websocket.send_json({"type": "debug", "event": event, **payload})
+
+    async def send_json(payload: dict[str, object]) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
 
     async def commit_current(reason: str) -> None:
         nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
         nonlocal last_speech_t, last_final_text, recent_final_text
 
-        def advance_segment(*, retain_tail: bool) -> None:
+        def trim_leading_silence(
+            samples: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        ) -> np.ndarray[tuple[int, ...], np.dtype[np.float32]]:
+            if samples.size == 0:
+                return samples
+
+            active_offsets = np.flatnonzero(np.abs(samples) >= settings.silence_rms)
+            if active_offsets.size == 0:
+                return np.zeros(0, dtype=np.float32)
+            return samples[int(active_offsets[0]) :].copy()
+
+        async def advance_segment(
+            *, retain_tail: bool, committed_samples: int, committed_audio: np.ndarray
+        ) -> None:
             nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
             nonlocal last_speech_t
 
-            seg_index += 1
-            last_draft = ""
-            sent_draft = ""
-            speech_seen = False
-            last_speech_t = None
+            async with buffer_lock:
+                seg_index += 1
+                last_draft = ""
+                sent_draft = ""
 
-            tail_samples = int(settings.tail_overlap_sec * SAMPLE_RATE) if retain_tail else 0
-            buffer = (
-                buffer[-tail_samples:]
-                if tail_samples > 0 and buffer.shape[0] > tail_samples
-                else np.zeros(0, dtype=np.float32)
-            )
-            buffer_start_t = time.time() if buffer.size else None
+                appended = (
+                    buffer[committed_samples:].copy()
+                    if buffer.shape[0] > committed_samples
+                    else np.zeros(0, dtype=np.float32)
+                )
+                if not retain_tail:
+                    appended = trim_leading_silence(appended)
+                tail_samples = int(settings.tail_overlap_sec * SAMPLE_RATE) if retain_tail else 0
+                tail = (
+                    committed_audio[-tail_samples:].copy()
+                    if tail_samples > 0 and committed_audio.shape[0] > tail_samples
+                    else np.zeros(0, dtype=np.float32)
+                )
+                buffer = (
+                    np.concatenate([tail, appended])
+                    if tail.size or appended.size
+                    else np.zeros(0, dtype=np.float32)
+                )
+                max_samples = int(settings.final_window_sec * SAMPLE_RATE)
+                if buffer.shape[0] > max_samples:
+                    buffer = buffer[-max_samples:]
 
-        buffer_sec = round(buffer.size / SAMPLE_RATE, 2)
-        if buffer.size < min_infer_samples:
+                now = time.time()
+                buffer_start_t = now - (buffer.size / SAMPLE_RATE) if buffer.size else None
+                residual_rms = _audio_rms(buffer)
+                speech_seen = bool(buffer.size and residual_rms >= settings.silence_rms)
+                last_speech_t = now if speech_seen else None
+
+        async with buffer_lock:
+            audio = buffer.copy()
+            active_seq = seg_index
+            committed_samples = buffer.shape[0]
+
+        if reason == "silence":
+            audio = trim_leading_silence(audio)
+
+        buffer_sec = round(audio.size / SAMPLE_RATE, 2)
+        if audio.size < min_infer_samples:
             await send_debug("final_skip_short_buffer", buffer_sec=buffer_sec)
-            advance_segment(retain_tail=False)
+            await advance_segment(
+                retain_tail=False,
+                committed_samples=committed_samples,
+                committed_audio=audio,
+            )
             return
 
-        audio = buffer.copy()
         rms = _audio_rms(audio)
         if rms < settings.min_speech_rms:
             await send_debug("final_skip_low_rms", rms=round(rms, 5), buffer_sec=buffer_sec)
-            advance_segment(retain_tail=False)
+            await advance_segment(
+                retain_tail=False,
+                committed_samples=committed_samples,
+                committed_audio=audio,
+            )
             return
 
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
@@ -434,7 +490,11 @@ async def stream_endpoint(
 
         if selected_text is None:
             await send_debug("final_filtered", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
-            advance_segment(retain_tail=False)
+            await advance_segment(
+                retain_tail=False,
+                committed_samples=committed_samples,
+                committed_audio=audio,
+            )
             return
 
         if selected_text != text:
@@ -447,25 +507,29 @@ async def stream_endpoint(
             allow_single_word=True,
         )
         if not text:
-            await send_debug("final_dropped_tail_only", seq=seg_index, elapsed_ms=elapsed_ms)
-            advance_segment(retain_tail=False)
+            await send_debug("final_dropped_tail_only", seq=active_seq, elapsed_ms=elapsed_ms)
+            await advance_segment(
+                retain_tail=False,
+                committed_samples=committed_samples,
+                committed_audio=audio,
+            )
             return
 
-        await websocket.send_json(
+        await send_json(
             {
                 "type": "final",
-                "seq": seg_index,
+                "seq": active_seq,
                 "text": text,
                 "reason": reason,
                 "elapsed_ms": elapsed_ms,
                 "rms": round(rms, 5),
             }
         )
-        await send_debug("final_sent", seq=seg_index, elapsed_ms=elapsed_ms, text_len=len(text))
+        await send_debug("final_sent", seq=active_seq, elapsed_ms=elapsed_ms, text_len=len(text))
         # KVKK: no transcript content in server logs.
         logger.info(
             "Final segment sent",
-            extra={"seq": seg_index, "reason": reason, "elapsed_ms": elapsed_ms},
+            extra={"seq": active_seq, "reason": reason, "elapsed_ms": elapsed_ms},
         )
         last_final_text = text
         recent_final_text = _append_recent_final_text(recent_final_text, text)
@@ -474,8 +538,114 @@ async def stream_endpoint(
         # tail helps avoid boundary loss. A silence commit already has an
         # utterance boundary; carrying tail there pollutes the next segment with
         # the previous words and creates repeated alternatives in practice.
-        advance_segment(retain_tail=reason == "forced")
+        await advance_segment(
+            retain_tail=reason == "forced",
+            committed_samples=committed_samples,
+            committed_audio=audio,
+        )
 
+    async def infer_live_partial() -> None:
+        nonlocal last_draft, sent_draft
+
+        async with buffer_lock:
+            live_samples = int(settings.live_window_sec * SAMPLE_RATE)
+            live_audio = (
+                buffer[-live_samples:].copy() if buffer.shape[0] > live_samples else buffer.copy()
+            )
+            active_seq = seg_index
+
+        if live_audio.size < min_infer_samples:
+            await send_debug("draft_skip_short_buffer")
+            return
+
+        live_rms = _audio_rms(live_audio)
+        if live_rms < settings.min_speech_rms:
+            await send_debug("draft_skip_low_rms", rms=round(live_rms, 5))
+            return
+
+        await send_debug("draft_start", rms=round(live_rms, 5))
+        started = time.perf_counter()
+        try:
+            draft = await run_in_threadpool(live_service.transcribe_array, live_audio, False)
+        except Exception as exc:  # noqa: BLE001 - skip this tick, keep stream alive
+            # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
+            logger.warning("Draft pass error err_class=%s", type(exc).__name__, exc_info=True)
+            await send_debug("draft_error", error=type(exc).__name__)
+            return
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        if not draft or is_hallucination(draft):
+            await send_debug("draft_filtered", elapsed_ms=elapsed_ms)
+            return
+
+        selected_draft = _select_partial_text(draft, sent_draft)
+        if selected_draft is None:
+            await send_debug(
+                "draft_regression_filtered",
+                elapsed_ms=elapsed_ms,
+                previous_words=_word_count(sent_draft),
+                candidate_words=_word_count(draft),
+            )
+            return
+
+        last_draft = selected_draft
+        if selected_draft != sent_draft:
+            await send_json(
+                {
+                    "type": "partial",
+                    "seq": active_seq,
+                    "confirmed": "",
+                    "tentative": selected_draft,
+                    "elapsed_ms": elapsed_ms,
+                    "rms": round(live_rms, 5),
+                    "source": settings.live_model_name,
+                }
+            )
+            await send_debug(
+                "draft_sent",
+                seq=active_seq,
+                elapsed_ms=elapsed_ms,
+                text_len=len(draft),
+            )
+            sent_draft = selected_draft
+
+    async def inference_loop() -> None:
+        nonlocal last_live_infer_t
+
+        while not stop_inference.is_set():
+            await asyncio.sleep(0.05)
+            now = time.time()
+            commit_reason: str | None = None
+
+            async with buffer_lock:
+                if not speech_seen or buffer_start_t is None:
+                    continue
+
+                buffer_age = now - buffer_start_t
+                if buffer_age >= settings.forced_commit_sec:
+                    commit_reason = "forced"
+                elif (
+                    last_speech_t is not None and now - last_speech_t >= settings.silence_commit_sec
+                ):
+                    commit_reason = "silence"
+
+                should_infer = (
+                    commit_reason is None
+                    and (now - last_live_infer_t) * 1000 >= settings.live_infer_interval_ms
+                )
+                if should_infer:
+                    last_live_infer_t = now
+
+            if commit_reason is not None:
+                await commit_current(commit_reason)
+                last_live_infer_t = time.time()
+                continue
+
+            if should_infer:
+                await infer_live_partial()
+
+    inference_task = asyncio.create_task(inference_loop())
     try:
         while True:
             data = await websocket.receive_bytes()
@@ -488,105 +658,36 @@ async def stream_endpoint(
 
             pcm_chunks += 1
             now = time.time()
-            if buffer_start_t is None:
-                buffer_start_t = now
-
-            buffer = np.concatenate([buffer, samples])
-            max_samples = int(settings.final_window_sec * SAMPLE_RATE)
-            if buffer.shape[0] > max_samples:
-                buffer = buffer[-max_samples:]
-
             sample_rms = _audio_rms(samples)
-            buffer_age = now - buffer_start_t
+            debug_payload: dict[str, object] | None = None
 
-            if now - last_debug_t >= settings.debug_every_sec:
-                await send_debug(
-                    "audio_tick",
-                    chunks=pcm_chunks,
-                    sample_rms=round(sample_rms, 5),
-                    buffer_sec=round(buffer.size / SAMPLE_RATE, 2),
-                    buffer_age=round(buffer_age, 2),
-                    has_draft=bool(last_draft),
-                )
-                last_debug_t = now
+            async with buffer_lock:
+                if buffer_start_t is None:
+                    buffer_start_t = now
 
-            if buffer_age >= settings.forced_commit_sec and speech_seen:
-                await commit_current("forced")
-                continue
+                buffer = np.concatenate([buffer, samples])
+                max_samples = int(settings.final_window_sec * SAMPLE_RATE)
+                if buffer.shape[0] > max_samples:
+                    buffer = buffer[-max_samples:]
+                    buffer_start_t = now - (buffer.size / SAMPLE_RATE)
 
-            if sample_rms >= settings.silence_rms:
-                speech_seen = True
-                last_speech_t = now
-            else:
-                if (
-                    speech_seen
-                    and last_speech_t is not None
-                    and now - last_speech_t >= settings.silence_commit_sec
-                ):
-                    await commit_current("silence")
-                continue
+                buffer_age = now - buffer_start_t
+                if sample_rms >= settings.silence_rms:
+                    speech_seen = True
+                    last_speech_t = now
 
-            if (now - last_live_infer_t) * 1000 < settings.live_infer_interval_ms:
-                continue
-            last_live_infer_t = now
-
-            live_samples = int(settings.live_window_sec * SAMPLE_RATE)
-            live_audio = (
-                buffer[-live_samples:].copy() if buffer.shape[0] > live_samples else buffer.copy()
-            )
-
-            if live_audio.size < min_infer_samples:
-                await send_debug("draft_skip_short_buffer")
-                continue
-
-            live_rms = _audio_rms(live_audio)
-            if live_rms < settings.min_speech_rms:
-                await send_debug("draft_skip_low_rms", rms=round(live_rms, 5))
-                continue
-
-            await send_debug("draft_start", rms=round(live_rms, 5))
-            started = time.perf_counter()
-            try:
-                draft = await run_in_threadpool(live_service.transcribe_array, live_audio, False)
-            except Exception as exc:  # noqa: BLE001 - skip this tick, keep stream alive
-                # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
-                logger.warning("Draft pass error err_class=%s", type(exc).__name__, exc_info=True)
-                await send_debug("draft_error", error=type(exc).__name__)
-                continue
-
-            elapsed_ms = int((time.perf_counter() - started) * 1000)
-
-            if not draft or is_hallucination(draft):
-                await send_debug("draft_filtered", elapsed_ms=elapsed_ms)
-                continue
-
-            selected_draft = _select_partial_text(draft, sent_draft)
-            if selected_draft is None:
-                await send_debug(
-                    "draft_regression_filtered",
-                    elapsed_ms=elapsed_ms,
-                    previous_words=_word_count(sent_draft),
-                    candidate_words=_word_count(draft),
-                )
-                continue
-
-            last_draft = selected_draft
-            if selected_draft != sent_draft:
-                await websocket.send_json(
-                    {
-                        "type": "partial",
-                        "seq": seg_index,
-                        "confirmed": "",
-                        "tentative": selected_draft,
-                        "elapsed_ms": elapsed_ms,
-                        "rms": round(live_rms, 5),
-                        "source": settings.live_model_name,
+                if now - last_debug_t >= settings.debug_every_sec:
+                    debug_payload = {
+                        "chunks": pcm_chunks,
+                        "sample_rms": round(sample_rms, 5),
+                        "buffer_sec": round(buffer.size / SAMPLE_RATE, 2),
+                        "buffer_age": round(buffer_age, 2),
+                        "has_draft": bool(last_draft),
                     }
-                )
-                await send_debug(
-                    "draft_sent", seq=seg_index, elapsed_ms=elapsed_ms, text_len=len(draft)
-                )
-                sent_draft = selected_draft
+                    last_debug_t = now
+
+            if debug_payload is not None:
+                await send_debug("audio_tick", **debug_payload)
 
     except WebSocketDisconnect:
         logger.info("WS disconnected")
@@ -594,3 +695,8 @@ async def stream_endpoint(
         logger.exception("WS stream error")
         with contextlib.suppress(Exception):
             await websocket.close()
+    finally:
+        stop_inference.set()
+        inference_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await inference_task
