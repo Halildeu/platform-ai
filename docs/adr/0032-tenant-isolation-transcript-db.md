@@ -25,7 +25,7 @@ DB şeması, meeting-ai çıktıları) tenant kimliği taşımıyor.
    alanını **NOT NULL** taşır ve değer **transport'tan gelen gerçek
    `tenantId`'dir** (#534 producer'ın JWT `companyId`'den yazdığı alan) —
    olduğu gibi persist edilir; **sentinel/sabit değer YASAK** (iter-1'deki
-   `workcube` sabiti kaldırıldı: transport↔persistence tutarsızlığı ve ileride
+   legacy vendor sentinel sabiti kaldırıldı: transport↔persistence tutarsızlığı ve ileride
    sabit→gerçek migration'ı üretirdi — ADR'nin önlediği şeyin ta kendisi).
    MVP'de tek tenant olduğu için değer doğal olarak tekil olur.
 2. **Tip kuralı:** Kalıcı katmanda `tenant_id BIGINT NOT NULL` (JWT

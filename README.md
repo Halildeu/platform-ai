@@ -14,7 +14,7 @@ Telefon, masaüstü ve ileride Teams/Zoom kaynaklarından gelen ses akışını 
 
 üretir. Faz 24 Meeting Intelligence kapsamında konumlanır.
 
-**ERP/CRM-agnostic ürün kuralı**: Workcube veya başka bir ERP/CRM adı core servis kontratına, API/DTO'ya, model prompt'una, observability etiketine veya acceptance gate'e gömülmez. Workcube yalnız tarihsel kaynak kanıtı, ilk müşteri pilotu veya adapter örneği olarak anılabilir; ürün hedefi tüm ERP/CRM'lerle adapter kontratı üzerinden çalışmaktır.
+**ERP/CRM-agnostic ürün kuralı**: Hiçbir ERP/CRM marka adı core servis kontratına, API/DTO'ya, model prompt'una, observability etiketine veya acceptance gate'e gömülmez. Pilot müşteri veya adapter örnekleri vendor-specific dokümanda kalır; ürün hedefi tüm ERP/CRM'lerle genel adapter kontratı üzerinden çalışmaktır.
 
 ## Repo Konumu (Platform ekosistem haritası)
 

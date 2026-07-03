@@ -371,7 +371,7 @@ Gerekirse sadece **redacted özet + evidence path/issue/PR linki** gönderilir.
 | **PII/KVKK no raw audio/transcript logging** | Structured log redaction filter zorunlu; `kvkk_pii_redaction_total` metric < threshold; audit event metadata-only (text/path payload'a YASAK) |
 | **STT model/version/hash pin** | Whisper model adı + version + content hash environment variable (`STT_MODEL_NAME`, `STT_MODEL_VERSION`, `STT_MODEL_SHA256`) ile pin'lenir; runtime drift YASAK |
 | **GPU CPU-first discipline** | PoC CPU-only önce → WER + latency + Gate B ölçüm → Codex consensus → GPU karar; donanım yatırımı data-driven |
-| **Platform ekosistem reuse** | Standalone publish YOK; auth/notification/audit/permission reuse zorunlu; cross-repo contract drift yasak; Workcube yalnız pilot/adapter örneği olabilir |
+| **Platform ekosistem reuse** | Standalone publish YOK; auth/notification/audit/permission reuse zorunlu; cross-repo contract drift yasak; pilot müşteri/adaptör örnekleri core kontrata gömülemez |
 
 **Tam liste**: `~/.claude/CLAUDE.md` (kullanıcının lokal global rule'ları — Claude Code session açtığında otomatik yüklenir).
 
