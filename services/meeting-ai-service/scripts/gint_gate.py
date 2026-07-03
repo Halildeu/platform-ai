@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PILOT_KINDS = {"pilot-meeting", "workcube-pilot", "customer-pilot"}
+PILOT_KINDS = {"pilot-meeting", "erp-crm-pilot", "customer-pilot"}
 PILOT_BACKENDS = {"ollama", "anthropic", "openai"}
 SYNTHETIC_NEUTRAL_KIND = "synthetic-neutral"
 UNIT_FIXTURE_KIND = "unit-fixture"

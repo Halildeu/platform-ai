@@ -4,14 +4,15 @@ Issue: `#34 [PR-wer-01] Privacy-safe pilot meeting recording protokolu`
 
 ## Purpose
 
-Define a safe protocol for collecting a 5-10 minute Workcube-internal pilot
-meeting recording that can later be used in WER/model evaluation.
+Define a safe protocol for collecting a 5-10 minute approved internal or
+customer ERP/CRM pilot meeting recording that can later be used in WER/model
+evaluation.
 
 ## Plan Requirement
 
 The issue asks for:
 
-- Workcube internal pilot meeting recording, 5-10 minutes
+- approved internal/customer ERP/CRM pilot meeting recording, 5-10 minutes
 - explicit consent flow with UI modal and email notification
 - KVKK ADR-0030 placeholder alignment
 - privacy-safe Vault-encrypted storage
@@ -45,7 +46,7 @@ unconsented recording would violate the purpose of the issue.
 
 | Requirement | Result | Status |
 |---|---|---|
-| 5-10 min Workcube internal pilot meeting | Protocol defines target and operator checklist | Ready for operator action |
+| 5-10 min approved internal/customer ERP/CRM pilot meeting | Protocol defines target and operator checklist | Ready for operator action |
 | Explicit consent flow | UI modal + consent metadata defined | Complete |
 | Email notification | Email template added | Complete |
 | ADR-0030 placeholder alignment | KVKK boundaries and no-log/no-git/no-customer-data rules written | Complete |
@@ -105,7 +106,7 @@ The protocol is ready, but the real pilot meeting still needs operator/human
 execution. The next operational actions are:
 
 1. Halil Bey or the assigned operator approves this protocol for pilot use.
-2. Operator selects 2-5 internal Workcube participants.
+2. Operator selects 2-5 approved internal/customer pilot participants.
 3. Operator confirms no customer/personal/secret data will be discussed.
 4. Operator chooses the 5-10 minute pilot meeting date/time.
 5. Operator defines the consent owner and withdrawal contact.

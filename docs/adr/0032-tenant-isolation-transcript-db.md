@@ -7,8 +7,8 @@ pattern kaldır, tip uyumu netleşsin") — iter-2 her iki şartı karşılar.
 
 ## Bağlam
 
-Faz 24.1 MVP tek tenant çalışır; Workcube dışı müşteri girişinde retroactive
-multi-tenant ayrımı pahalıdır (#65). Transport katmanı bu riski **zaten
+Faz 24.1 MVP tek tenant çalışır; ilk pilot dışı yeni ERP/CRM müşteri girişinde
+retroactive multi-tenant ayrımı pahalıdır (#65). Transport katmanı bu riski **zaten
 kapattı** — kanıt:
 
 - audio-gateway producer: `tenantId` stream alanlarında zorunlu; partition

@@ -50,8 +50,8 @@ paths are rejected.
 
 ## Model Decision
 
-The Workcube pilot recording cannot currently be performed. Therefore #35 and
-#36 are temporarily skipped, not completed.
+The approved ERP/CRM pilot recording cannot currently be performed. Therefore
+#35 and #36 are temporarily skipped, not completed.
 
 The models already tested in the approved PoC are used:
 
@@ -62,7 +62,7 @@ The models already tested in the approved PoC are used:
 | CPU fallback | `medium/cpu/int8` |
 
 No `large-v3-turbo` production lock was introduced. This service must be
-re-evaluated after Workcube pilot evidence and the #35/#36 matrix exist.
+re-evaluated after approved ERP/CRM pilot evidence and the #35/#36 matrix exist.
 
 ## Model Pinning
 
@@ -146,8 +146,8 @@ Executed under the isolated `services/final-stt-service/.venv`:
 | GPU service inference | PASS: 12.0 seconds processed in `767 ms` |
 
 Unit tests use fake audio/model/Redis objects. The separate GPU smoke used the
-real model and service transcriber. No model was downloaded and no Workcube
-recording was used.
+real model and service transcriber. No model was downloaded and no approved
+pilot recording was used.
 
 ## Docker Smoke Evidence
 
@@ -273,9 +273,9 @@ throughput and VRAM pressure remain #42 scope.
 
 ### Provisional model instead of completed WER winner
 
-Normal order requires #35 and #36 before #38. Workcube recording is currently
-unavailable, so ADR-0031 permits the already tested `large-v3` final role on a
-provisional basis. This does not close #35 or #36.
+Normal order requires #35 and #36 before #38. Approved ERP/CRM pilot recording
+is currently unavailable, so ADR-0031 permits the already tested `large-v3`
+final role on a provisional basis. This does not close #35 or #36.
 
 ### Secure local path instead of final MinIO adapter
 
@@ -294,7 +294,7 @@ propagation intentionally remain #39.
 
 | Risk | Impact | Required follow-up |
 |---|---|---|
-| Workcube WER unknown | Final model may be suboptimal for domain vocabulary | Return to #35/#36 |
+| Pilot WER unknown | Final model may be suboptimal for ERP/CRM domain vocabulary | Return to #35/#36 |
 | No staging Redis integration | Local Redis passed, staging topology remains unproven | Resolve AG-019 |
 | No GPU container validation | CUDA/cuDNN/runtime compatibility unproven | #41 |
 | Single consumer/inference path | Throughput and VRAM concurrency unknown | #42 |
