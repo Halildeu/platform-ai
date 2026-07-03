@@ -76,6 +76,8 @@ Varsayılan canlı UX ayarları:
 |---|---:|---|
 | `STT_LIVE_INFER_INTERVAL_MS` | `350` | Konuşma aktifken gerçek partial event cadence'i |
 | `STT_LIVE_WINDOW_SEC` | `2.0` | Kısa rolling context; kelime-progressive hissi |
+| `STT_LIVE_BEAM_SIZE` | `1` | Live draft decode genişliği; düşük gecikme için ADR-0031 default |
+| `STT_FINAL_BEAM_SIZE` | `1` | Final revision decode genişliği; ölçümlü A/B için env ile artırılabilir |
 | `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
 | `STT_SILENCE_COMMIT_SEC` | `0.9` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
 | `STT_FORCED_COMMIT_SEC` | `8.0` | Uzun konuşmada bounded finalization safety |
@@ -308,6 +310,8 @@ Approved GPU live PoC note:
 | `STT_DEVICE` | `cpu` | `cpu`/`cuda`/`auto` |
 | `STT_LANGUAGE` | `tr` | ISO 639-1 veya `auto` |
 | `STT_BEAM_SIZE` | `5` | Whisper beam (1-10) |
+| `STT_LIVE_BEAM_SIZE` | `1` | Direct stream live draft beam (1-10) |
+| `STT_FINAL_BEAM_SIZE` | `1` | Direct stream final revision beam (1-10); `>1` rollout'u latency/WER kanıtı ister |
 | `STT_VAD_FILTER` | `true` | Whisper built-in VAD |
 | `STT_MAX_AUDIO_MB` | `50` | DoS guard (1-500) |
 | `STT_LOG_LEVEL` | `INFO` | logging level |

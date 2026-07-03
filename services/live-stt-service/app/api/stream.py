@@ -213,6 +213,9 @@ def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
     candidate = (final_text or "").strip()
     fallback = (fallback_draft or "").strip()
     fallback_ok = bool(fallback and not is_hallucination(fallback))
+    short_final_artifact = bool(
+        candidate and is_hallucination(candidate) and _word_count(candidate) <= 1
+    )
 
     if candidate and not is_hallucination(candidate):
         merged = _merge_final_transcript(fallback, candidate) if fallback_ok else candidate
@@ -220,7 +223,7 @@ def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
             return merged
         return candidate
 
-    if fallback_ok and _word_count(fallback) >= MIN_FALLBACK_DRAFT_WORDS:
+    if fallback_ok and (short_final_artifact or _word_count(fallback) >= MIN_FALLBACK_DRAFT_WORDS):
         return fallback
 
     return None

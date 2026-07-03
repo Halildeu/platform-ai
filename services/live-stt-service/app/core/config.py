@@ -43,6 +43,8 @@ class Settings(BaseSettings):
       STT_REDIS_URL               redis://localhost:6379/0 (staging-sw Redis)
       STT_CHUNK_STREAM_PREFIX     audio:chunks:p (ADR-0031 D3, 32 partitions)
       STT_CHUNK_CONSUMER_GROUP    live-stt-v1
+      STT_LIVE_BEAM_SIZE          1 (default; low-latency draft)
+      STT_FINAL_BEAM_SIZE         1 (default; ADR-0031 final revision)
     """
 
     model_config = SettingsConfigDict(
@@ -84,12 +86,14 @@ class Settings(BaseSettings):
     live_model_name: str = Field(default="medium", description="fast draft model")
     live_compute_type: str = Field(default="int8")
     live_device: str = Field(default="cuda")
+    live_beam_size: int = Field(default=1, ge=1, le=10)
     final_model_name: str = Field(
         default="deepdml/faster-whisper-large-v3-turbo-ct2",
         description="accurate final model (ADR-0031)",
     )
     final_compute_type: str = Field(default="float16")
     final_device: str = Field(default="cuda")
+    final_beam_size: int = Field(default=1, ge=1, le=10)
     # Transcript-free verbose debug events over WS (KVKK: default off, #30).
     stream_debug: bool = Field(default=False)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values

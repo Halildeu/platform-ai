@@ -4,6 +4,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
+
 from app.api import stream as stream_api
 from app.api.stream import (
     _append_recent_final_text,
@@ -29,6 +33,7 @@ def test_hallucination_filter_blocks_known_artifacts() -> None:
     assert is_hallucination("İzlediğiniz için teşekkür ederim.") is True
     assert is_hallucination("Videoyu beğenmeyi unutmayın arkadaşlar") is True
     assert is_hallucination("Thank you for watching") is True
+    assert is_hallucination("Neroba") is True
 
 
 def test_hallucination_filter_blocks_repeated_decode_loops() -> None:
@@ -127,6 +132,10 @@ def test_commit_text_does_not_finalize_short_draft_when_final_is_repeated_loop()
         )
         is None
     )
+
+
+def test_commit_text_uses_short_draft_when_final_is_single_word_artifact() -> None:
+    assert _select_commit_text("Neroba", "Merhaba") == "Merhaba"
 
 
 def test_partial_text_keeps_live_draft_word_progressive() -> None:
@@ -233,8 +242,10 @@ def test_streaming_defaults_follow_adr_0031() -> None:
     s = Settings()
     assert s.live_model_name == "medium"
     assert s.live_compute_type == "int8"
+    assert s.live_beam_size == 1
     assert "large-v3-turbo" in s.final_model_name
     assert s.final_compute_type == "float16"
+    assert s.final_beam_size == 1
     assert s.stream_debug is False  # KVKK: verbose debug opt-in only
     assert s.cors_origins == ""  # CORS disabled unless configured
     assert s.live_infer_interval_ms <= 400
@@ -249,11 +260,41 @@ def test_live_and_final_services_are_distinct_singletons() -> None:
     live = get_live_service(s)
     final = get_final_service(s)
     assert isinstance(live, DirectWhisperService)
+    assert live.beam_size == 1
+    assert final.beam_size == 1
     assert live is get_live_service(s)  # cached
     assert final is get_final_service(s)
     assert live is not final
     assert live.model_loaded is False  # nothing loaded at construction
     assert final.model_loaded is False
+
+
+def test_direct_stream_service_passes_role_specific_beam_size() -> None:
+    service = DirectWhisperService(
+        model_name="test-model",
+        device="cpu",
+        compute_type="int8",
+        language="tr",
+        beam_size=5,
+    )
+
+    class FakeModel:
+        kwargs: dict[str, object] | None = None
+
+        def transcribe(self, _audio: object, **kwargs: object) -> tuple[list[object], object]:
+            self.kwargs = kwargs
+            return [SimpleNamespace(text="Merhaba")], object()
+
+    fake_model = FakeModel()
+    service._model = fake_model
+
+    result = service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
+
+    assert result == "Merhaba"
+    assert fake_model.kwargs is not None
+    assert fake_model.kwargs["beam_size"] == 5
+    assert fake_model.kwargs["language"] == "tr"
+    assert fake_model.kwargs["condition_on_previous_text"] is False
 
 
 def test_stream_router_importable_without_gpu() -> None:
