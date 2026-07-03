@@ -92,6 +92,10 @@ def _speech_frame() -> bytes:
     return (np.ones(1024, dtype=np.float32) * 0.05).tobytes()
 
 
+def _speech_frame_with_level(level: float) -> bytes:
+    return (np.ones(1024, dtype=np.float32) * level).tobytes()
+
+
 def _silence_frame() -> bytes:
     return np.zeros(1024, dtype=np.float32).tobytes()
 
@@ -101,6 +105,7 @@ def _patch_fast_stream_timing(
     *,
     forced_commit_sec: float = 60.0,
     silence_commit_sec: float = 0.1,
+    tail_overlap_sec: float = 0.0,
 ) -> None:
     settings = Settings(
         live_infer_interval_ms=1,
@@ -108,7 +113,7 @@ def _patch_fast_stream_timing(
         final_window_sec=5.0,
         forced_commit_sec=forced_commit_sec,
         silence_commit_sec=silence_commit_sec,
-        tail_overlap_sec=0.0,
+        tail_overlap_sec=tail_overlap_sec,
         silence_rms=0.001,
         min_speech_rms=0.001,
         min_infer_sec=0.01,
@@ -226,3 +231,45 @@ def test_stream_forced_commit_still_emits_final(
     assert final["seq"] == 0
     assert final["reason"] == "forced"
     assert final["text"] == "Uzun konuşma final."
+
+
+def test_stream_silence_commit_does_not_carry_tail_into_next_utterance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Speech-ending silence is a boundary; next utterance must not inherit old tail."""
+    _patch_fast_stream_timing(monkeypatch, tail_overlap_sec=0.01)
+    final_first_samples: list[float] = []
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        if vad:
+            final_first_samples.append(float(audio[0]))
+            return f"Final {len(final_first_samples)}."
+        return "Taslak"
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame_with_level(0.05))
+        first_partial = ws.receive_json()
+        time.sleep(0.11)
+        ws.send_bytes(_silence_frame())
+        first_final = ws.receive_json()
+
+        ws.send_bytes(_speech_frame_with_level(0.07))
+        second_partial = ws.receive_json()
+        time.sleep(0.11)
+        ws.send_bytes(_silence_frame())
+        second_final = ws.receive_json()
+
+    for event in (first_partial, first_final, second_partial, second_final):
+        assert_valid(event)
+    assert first_final["type"] == "final"
+    assert second_final["type"] == "final"
+    assert final_first_samples == pytest.approx([0.05, 0.07])

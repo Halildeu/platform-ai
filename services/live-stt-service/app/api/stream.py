@@ -9,8 +9,8 @@ Ported from the working GPU demo (commit d79e905). Flow per connection:
    pass authoritative.
 3. On forced-commit age (`STT_FORCED_COMMIT_SEC`) the *final* model
    re-transcribes the whole buffer -> `final` event; speech-ending silence can
-   also commit early via `STT_SILENCE_COMMIT_SEC`. A tail overlap is kept so
-   words on the boundary are not lost.
+   also commit early via `STT_SILENCE_COMMIT_SEC`. A tail overlap is kept only
+   for forced commits so words on continuous-speech boundaries are not lost.
 4. Hallucination filter suppresses classic Whisper artefacts.
 
 KVKK: server-side logs and debug events are transcript-free by default.
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import time
 
 import numpy as np
@@ -40,6 +41,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
+_WORD_RE = re.compile(r"[\wçğıöşüÇĞİÖŞÜ]+", re.UNICODE)
 
 
 def _audio_rms(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> float:
@@ -48,21 +50,97 @@ def _audio_rms(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> floa
     return float(np.sqrt(np.mean(audio**2)))
 
 
-def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
-    """Choose a KVKK-safe final payload without letting hallucinations poison state."""
-    candidate = (final_text or "").strip()
-    if candidate and not is_hallucination(candidate):
-        return candidate
-
-    fallback = (fallback_draft or "").strip()
-    if fallback and not is_hallucination(fallback):
-        return fallback
-
-    return None
-
-
 def _word_count(text: str) -> int:
     return len((text or "").split())
+
+
+def _normalized_words(text: str) -> list[str]:
+    return [word.casefold() for word in _WORD_RE.findall(text or "")]
+
+
+def _has_same_prefix(previous_text: str, next_text: str) -> bool:
+    return next_text.casefold().startswith(previous_text.casefold())
+
+
+def _contiguous_index(haystack: list[str], needle: list[str]) -> int:
+    if not needle or len(needle) > len(haystack):
+        return -1
+
+    for start in range(0, len(haystack) - len(needle) + 1):
+        if haystack[start : start + len(needle)] == needle:
+            return start
+
+    return -1
+
+
+def _suffix_prefix_overlap(previous_words: list[str], next_words: list[str]) -> int:
+    max_overlap = min(len(previous_words), len(next_words))
+    for size in range(max_overlap, 0, -1):
+        if previous_words[-size:] == next_words[:size]:
+            return size
+
+    return 0
+
+
+def _merge_rolling_partial(previous_text: str, next_text: str) -> str:
+    """Merge overlapping rolling-window drafts without losing earlier words."""
+    previous = (previous_text or "").strip()
+    next_candidate = (next_text or "").strip()
+    if not previous or not next_candidate:
+        return next_candidate or previous
+    if previous == next_candidate or _has_same_prefix(previous, next_candidate):
+        return next_candidate
+    if _has_same_prefix(next_candidate, previous):
+        return previous
+
+    previous_raw_words = previous.split()
+    next_raw_words = next_candidate.split()
+    previous_words = _normalized_words(previous)
+    next_words = _normalized_words(next_candidate)
+
+    if _contiguous_index(previous_words, next_words) >= 0:
+        return previous
+
+    overlap = _suffix_prefix_overlap(previous_words, next_words)
+    if overlap > 0:
+        return " ".join([*previous_raw_words, *next_raw_words[overlap:]])
+
+    return next_candidate
+
+
+def _merge_final_transcript(previous_text: str, final_text: str) -> str:
+    """Apply final revisions without dropping already displayed rolling context."""
+    previous = (previous_text or "").strip()
+    final = (final_text or "").strip()
+    if not previous or not final:
+        return final or previous
+    if previous == final or _has_same_prefix(previous, final):
+        return final
+    if _has_same_prefix(final, previous):
+        return previous
+
+    previous_raw_words = previous.split()
+    final_raw_words = final.split()
+    previous_words = _normalized_words(previous)
+    final_words = _normalized_words(final)
+
+    contained_at = _contiguous_index(previous_words, final_words)
+    if contained_at >= 0:
+        return " ".join(
+            [
+                *previous_raw_words[:contained_at],
+                *final_raw_words,
+                *previous_raw_words[contained_at + len(final_raw_words) :],
+            ]
+        )
+    if _contiguous_index(final_words, previous_words) >= 0:
+        return final
+
+    overlap = _suffix_prefix_overlap(previous_words, final_words)
+    if overlap >= 2:
+        return " ".join([*previous_raw_words, *final_raw_words[overlap:]])
+
+    return final
 
 
 def _select_partial_text(draft: str, sent_draft: str) -> str | None:
@@ -75,13 +153,34 @@ def _select_partial_text(draft: str, sent_draft: str) -> str | None:
     if not previous:
         return candidate
 
-    if candidate.casefold().startswith(previous.casefold()):
-        return candidate
+    candidate = _merge_rolling_partial(previous, candidate)
+    if candidate == previous:
+        return None
 
     if _word_count(candidate) < _word_count(previous):
         return None
+    if is_hallucination(candidate):
+        return None
 
     return candidate
+
+
+def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
+    """Choose a KVKK-safe final payload without letting hallucinations poison state."""
+    candidate = (final_text or "").strip()
+    fallback = (fallback_draft or "").strip()
+    fallback_ok = bool(fallback and not is_hallucination(fallback))
+
+    if candidate and not is_hallucination(candidate):
+        merged = _merge_final_transcript(fallback, candidate) if fallback_ok else candidate
+        if merged and not is_hallucination(merged):
+            return merged
+        return candidate
+
+    if fallback_ok:
+        return fallback
+
+    return None
 
 
 @router.websocket("/ws/stream")
@@ -217,7 +316,11 @@ async def stream_endpoint(
             extra={"seq": seg_index, "reason": reason, "elapsed_ms": elapsed_ms},
         )
 
-        advance_segment(retain_tail=True)
+        # A forced commit happens while speech is still continuous, so a small
+        # tail helps avoid boundary loss. A silence commit already has an
+        # utterance boundary; carrying tail there pollutes the next segment with
+        # the previous words and creates repeated alternatives in practice.
+        advance_segment(retain_tail=reason == "forced")
 
     try:
         while True:

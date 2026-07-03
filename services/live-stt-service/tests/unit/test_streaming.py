@@ -5,7 +5,12 @@
 from __future__ import annotations
 
 from app.api import stream as stream_api
-from app.api.stream import _select_commit_text, _select_partial_text
+from app.api.stream import (
+    _merge_final_transcript,
+    _merge_rolling_partial,
+    _select_commit_text,
+    _select_partial_text,
+)
 from app.core.config import Settings
 from app.services.hallucination import is_hallucination
 from app.services.streaming_models import (
@@ -99,6 +104,49 @@ def test_partial_text_keeps_live_draft_word_progressive() -> None:
     assert _select_partial_text("Merhaba nasılsın", "Merhaba") == "Merhaba nasılsın"
     assert _select_partial_text("Merhaba", "Merhaba nasılsın") is None
     assert _select_partial_text("Merhaba iyi misin", "Merhaba nasılsın") == "Merhaba iyi misin"
+
+
+def test_partial_text_merges_rolling_window_overlap_without_dropping_prefix() -> None:
+    assert (
+        _merge_rolling_partial(
+            "Bugün toplantıda hızlı şekilde",
+            "hızlı şekilde yazıya dönüşüyor",
+        )
+        == "Bugün toplantıda hızlı şekilde yazıya dönüşüyor"
+    )
+    assert (
+        _select_partial_text(
+            "hızlı şekilde yazıya dönüşüyor",
+            "Bugün toplantıda hızlı şekilde",
+        )
+        == "Bugün toplantıda hızlı şekilde yazıya dönüşüyor"
+    )
+
+
+def test_commit_text_applies_final_suffix_without_dropping_live_prefix() -> None:
+    assert (
+        _merge_final_transcript(
+            "Bu cümle doğru şekilde yazılıyor",
+            "doğru şekilde yazılıyor.",
+        )
+        == "Bu cümle doğru şekilde yazılıyor."
+    )
+    assert (
+        _select_commit_text(
+            "doğru şekilde yazılıyor.",
+            "Bu cümle doğru şekilde yazılıyor",
+        )
+        == "Bu cümle doğru şekilde yazılıyor."
+    )
+
+
+def test_commit_text_blocks_repeated_final_and_bad_rolling_draft() -> None:
+    repeated = (
+        "Akşama aktif diyorsun Akşam aktif diyorsun ya "
+        "Akşama aktif diyorsun yani Akışa aktif diyorsun yani. "
+        "bakışı aktif diyorsun yani."
+    )
+    assert _select_commit_text(repeated, repeated) is None
 
 
 def test_streaming_defaults_follow_adr_0031() -> None:
