@@ -41,7 +41,8 @@ Repo-spesifik öne çıkanlar:
 - **GPU disiplini**: PoC CPU-only önce → metrik ölç → Codex consensus → GPU karar.
 - **Cross-AI Peer Review**: Code yazan sağlayıcı review yapmaz. Python repo'da Codex review thread her PR için zorunlu.
 - **Test koşmadan "tests added" YASAK**: pytest output + coverage rapor olmadan PR yeşil sayılmaz.
-- **Workcube ekosistem reuse**: Standalone publish yok; auth/notification/audit/permission reuse zorunlu.
+- **ERP/CRM bağımsız ürün scope'u**: Meeting Intelligence belirli bir ERP markasına özel yazılmaz. Workcube yalnızca pilot/adapter hedefi veya mevcut entegrasyon örneği olarak anılabilir; ürün kontratı, runtime API, model paketleri ve kullanıcı metinleri vendor-neutral kalır.
+- **Platform entegrasyon reuse**: Standalone publish yok; auth/notification/audit/permission reuse zorunlu.
 - **Türkçe cevap default**: Kullanıcıya yönelen tüm cevaplar Türkçe.
 
 ## 4. Çalışma Disiplini

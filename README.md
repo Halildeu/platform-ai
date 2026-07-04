@@ -1,6 +1,6 @@
 # platform-ai
 
-Meeting Intelligence / Speech-to-Text mikroservisleri — Workcube ERP ekosistemine entegre Python servisleri.
+ERP/CRM bağımsız Meeting Intelligence / Speech-to-Text mikroservisleri — tüm ERP/CRM sistemleriyle adapter üzerinden çalışacak Python servisleri.
 
 ## Amaç
 
@@ -14,7 +14,11 @@ Telefon, masaüstü ve ileride Teams/Zoom kaynaklarından gelen ses akışını 
 
 üretir. Faz 24 Meeting Intelligence kapsamında konumlanır.
 
-## Repo Konumu (Workcube ekosistem haritası)
+## Ürün Scope Kuralı
+
+Meeting Intelligence belirli bir ERP markasına özel yazılmaz. Workcube yalnızca pilot/adapter hedefi olabilir; ürün kontratı, API isimleri, model paketleri, çıktı JSON'u, kullanıcı metinleri ve runtime davranışı vendor-neutral kalır. ERP/CRM'ye özel alan eşlemeleri backend adapter katmanında yapılır.
+
+## Repo Konumu (Platform entegrasyon haritası)
 
 | Repo | Rol |
 |---|---|
@@ -33,7 +37,7 @@ Telefon, masaüstü ve ileride Teams/Zoom kaynaklarından gelen ses akışını 
 | `diarization-service` | Konuşmacı ayrımı (Speaker 1/2/3...) | FastAPI + pyannote.audio |
 | `meeting-ai-service` | Özet + karar + aksiyon LLM çıkarımı | FastAPI + Anthropic/OpenAI API (ilk faz), Ollama (ileri faz) |
 
-## Reuse — Workcube Ekosisteminden
+## Reuse — Platform ERP/CRM Entegrasyon Altyapısından
 
 - **Keycloak SSO** → JWT validation (`auth-service` realm reuse)
 - **api-gateway** → routing + JWT propagation
@@ -100,7 +104,7 @@ Cross-AI consensus: Claude + Codex `019e879c` AGREE + Mavis `mvs_c922...` msg `7
 ### 3-AI 3 RED (yapılmayacak)
 
 1. ❌ Gateway contract kilitlenmeden mobile/Web veya STT WebSocket contract yazılması
-2. ❌ KVKK ADR olmadan gerçek Workcube meeting kaydı kullanılması
+2. ❌ KVKK ADR olmadan gerçek ERP/CRM pilot meeting kaydı kullanılması
 3. ❌ Synthetic WER ile model kararı kapatılması
 
 ### Tahmini MVP
@@ -126,4 +130,4 @@ uvicorn services.live-stt-service.app:app --port 8200
 
 ## Lisans
 
-Internal — Workcube ERP platform.
+Internal — Faz 24 Meeting Intelligence / platform ERP/CRM integrations.
