@@ -47,6 +47,9 @@ MIN_FALLBACK_DRAFT_WORDS = 2
 MAX_RECENT_FINAL_WORDS = 24
 ROLLING_CONTINUATION_MIN_PREVIOUS_WORDS = 4
 ROLLING_CONTINUATION_MIN_NEXT_WORDS = 1
+SHORT_FINAL_PRESERVE_MIN_PREVIOUS_WORDS = 5
+SHORT_FINAL_PRESERVE_MAX_RATIO = 0.65
+SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO = 0.45
 _OVERLAP_SUFFIXES = (
     "lerinizden",
     "larınızdan",
@@ -282,6 +285,19 @@ def _merge_final_transcript(previous_text: str, final_text: str) -> str:
     overlap = _suffix_prefix_speech_overlap(previous_words, final_words)
     if overlap >= 2:
         return " ".join([*previous_raw_words, *final_raw_words[overlap:]])
+
+    shared_family_ratio = _shared_token_ratio(
+        _overlap_families(previous_words),
+        _overlap_families(final_words),
+    )
+    final_looks_like_short_alternative = (
+        len(previous_words) >= SHORT_FINAL_PRESERVE_MIN_PREVIOUS_WORDS
+        and len(final_words) < len(previous_words)
+        and len(final_words) / len(previous_words) <= SHORT_FINAL_PRESERVE_MAX_RATIO
+        and shared_family_ratio <= SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO
+    )
+    if final_looks_like_short_alternative:
+        return previous
 
     if len(final_words) <= len(previous_words) + 1 and len(final_words) <= 3:
         return previous

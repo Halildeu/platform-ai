@@ -464,6 +464,41 @@ def test_stream_keeps_short_stable_draft_over_unrelated_short_final(
     assert final["text"] == "Merhaba"
 
 
+def test_stream_keeps_medium_draft_over_short_unrelated_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finalization must not erase already displayed medium-length speech."""
+    _patch_fast_stream_timing(monkeypatch)
+    draft_text = "Konuşulanların çok büyük kısmı yazılmıyor ara kelimeler düşüyor"
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        return "Görüşmek üzere canı çıkmak için" if _is_final_service(self) else draft_text
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        partial = ws.receive_json()
+        time.sleep(0.11)
+        ws.send_bytes(_silence_frame())
+        final = ws.receive_json()
+
+    assert_valid(partial)
+    assert partial["type"] == "partial"
+    assert partial["tentative"] == draft_text
+
+    assert_valid(final)
+    assert final["type"] == "final"
+    assert final["text"] == draft_text
+
+
 def test_stream_commits_final_on_speech_ending_silence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

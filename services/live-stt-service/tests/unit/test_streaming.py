@@ -224,6 +224,22 @@ def test_commit_text_applies_final_suffix_without_dropping_live_prefix() -> None
     )
 
 
+def test_commit_text_keeps_medium_draft_over_short_unrelated_final() -> None:
+    draft = "Konuşulanların çok büyük kısmı yazılmıyor ara kelimeler düşüyor"
+    final = "Görüşmek üzere canı çıkmak için"
+
+    assert _merge_final_transcript(draft, final) == draft
+    assert _select_commit_text(final, draft) == draft
+
+
+def test_commit_text_still_allows_short_final_with_shared_context() -> None:
+    draft = "Merhaba sesim iyi geliyor mu yanlış"
+    final = "Merhaba sesim geliyor mu?"
+
+    assert _merge_final_transcript(draft, final) == final
+    assert _select_commit_text(final, draft) == final
+
+
 def test_drop_leading_tail_overlap_removes_cross_segment_repeated_word() -> None:
     assert _drop_leading_tail_overlap("Merhaba.", "Merhaba burada hava çok") == "burada hava çok"
     assert (
