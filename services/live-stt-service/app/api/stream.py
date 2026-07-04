@@ -47,6 +47,10 @@ MIN_FALLBACK_DRAFT_WORDS = 2
 MAX_RECENT_FINAL_WORDS = 24
 ROLLING_CONTINUATION_MIN_PREVIOUS_WORDS = 4
 ROLLING_CONTINUATION_MIN_NEXT_WORDS = 1
+SAME_OPENER_APPEND_MIN_PREVIOUS_WORDS = 4
+SAME_OPENER_APPEND_MAX_PREVIOUS_WORDS = 18
+SAME_OPENER_APPEND_MIN_NEXT_TAIL_WORDS = 3
+SAME_OPENER_APPEND_MAX_SHARED_RATIO = 0.4
 SHORT_FINAL_PRESERVE_MIN_PREVIOUS_WORDS = 5
 SHORT_FINAL_PRESERVE_MAX_RATIO = 0.65
 SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO = 0.45
@@ -230,13 +234,28 @@ def _merge_rolling_partial(previous_text: str, next_text: str) -> str:
     if overlap > 0:
         return " ".join([*previous_raw_words, *next_raw_words[overlap:]])
 
-    if previous_words[0] == next_words[0]:
-        return next_candidate
-
     shared_family_ratio = _shared_token_ratio(
         _overlap_families(previous_words),
         _overlap_families(next_words),
     )
+    if previous_words[0] == next_words[0]:
+        next_tail_raw_words = next_raw_words[1:]
+        next_tail_words = next_words[1:]
+        tail_shared_family_ratio = _shared_token_ratio(
+            _overlap_families(previous_words[1:]),
+            _overlap_families(next_tail_words),
+        )
+        same_opener_looks_like_continuation = (
+            SAME_OPENER_APPEND_MIN_PREVIOUS_WORDS
+            <= len(previous_words)
+            <= SAME_OPENER_APPEND_MAX_PREVIOUS_WORDS
+            and len(next_tail_words) >= SAME_OPENER_APPEND_MIN_NEXT_TAIL_WORDS
+            and tail_shared_family_ratio <= SAME_OPENER_APPEND_MAX_SHARED_RATIO
+        )
+        if same_opener_looks_like_continuation:
+            return " ".join([*previous_raw_words, *next_tail_raw_words])
+        return next_candidate
+
     next_looks_like_continuation = (
         len(previous_words) >= ROLLING_CONTINUATION_MIN_PREVIOUS_WORDS
         and len(next_words) >= ROLLING_CONTINUATION_MIN_NEXT_WORDS

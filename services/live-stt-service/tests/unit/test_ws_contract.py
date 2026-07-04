@@ -430,6 +430,45 @@ def test_stream_appends_short_no_overlap_live_continuations(
     assert second["tentative"] == "Konuşulanların çok büyük kısmı yazılmıyor ara kelimeler düşüyor"
 
 
+def test_stream_preserves_same_opener_live_continuations_without_repeating_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated opener words must not erase the previous rolling window."""
+    _patch_fast_stream_timing(monkeypatch)
+    live_drafts = [
+        "Merhaba burada hava çok",
+        "Merhaba atıyorsun çok değişik şeyler",
+    ]
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        if _is_final_service(self):
+            return "Merhaba burada hava çok atıyorsun çok değişik şeyler."
+        return live_drafts.pop(0) if live_drafts else "Merhaba atıyorsun çok değişik şeyler"
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        first = ws.receive_json()
+        time.sleep(0.002)
+        ws.send_bytes(_speech_frame())
+        second = ws.receive_json()
+
+    for event in (first, second):
+        assert_valid(event)
+        assert event["type"] == "partial"
+        assert event["seq"] == 0
+    assert first["tentative"] == "Merhaba burada hava çok"
+    assert second["tentative"] == "Merhaba burada hava çok atıyorsun çok değişik şeyler"
+
+
 def test_stream_keeps_short_stable_draft_over_unrelated_short_final(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
