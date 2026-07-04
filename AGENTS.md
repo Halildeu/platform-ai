@@ -41,7 +41,7 @@ Repo-spesifik öne çıkanlar:
 - **GPU disiplini**: PoC CPU-only önce → metrik ölç → Codex consensus → GPU karar.
 - **Cross-AI Peer Review**: Code yazan sağlayıcı review yapmaz. Python repo'da Codex review thread her PR için zorunlu.
 - **Test koşmadan "tests added" YASAK**: pytest output + coverage rapor olmadan PR yeşil sayılmaz.
-- **Faz 24 ERP/CRM-agnostic product contract**: Meeting Intelligence belirli bir ERP/CRM markasına göre tasarlanmaz. Pilot müşteri veya adapter örnekleri vendor-specific dokümanda kalır; servis adı, API/DTO, model prompt'u, observability etiketi, acceptance gate ve "done" dili vendor-specific olamaz.
+- **Faz 24 ERP/CRM-agnostic product contract**: Meeting Intelligence belirli bir ERP/CRM markasına, müşteri adına veya pilot adapter'a göre tasarlanmaz. Pilot/customer/adapter isimleri yalnızca adapter konfigürasyonu, evidence paketi veya deployment notunda kalır; servis adı, API/DTO, model prompt'u, observability etiketi, acceptance gate ve "done" dili generic ERP/CRM contract üzerinden yazılır.
 - **Platform ekosistem reuse**: Standalone publish yok; auth/notification/audit/permission reuse zorunlu.
 - **Türkçe cevap default**: Kullanıcıya yönelen tüm cevaplar Türkçe.
 
