@@ -25,6 +25,10 @@ _HALLUCINATION_PATTERNS = [
     re.compile(r"^you know.*", re.IGNORECASE),
     re.compile(r".*thank you.*", re.IGNORECASE),
     re.compile(r"^my mom.*", re.IGNORECASE),
+    re.compile(
+        r"^(izledi[gğ]iniz|istedi[gğ]iniz) i[cç]in te[sş]ekk[uü]r ederim[.!]?$",
+        re.IGNORECASE,
+    ),
     re.compile(r"^(cis|ces)[.!]?$", re.IGNORECASE),
     re.compile(r"^neroba[.!]?$", re.IGNORECASE),
     re.compile(r"^[.!?]*$", re.IGNORECASE),
