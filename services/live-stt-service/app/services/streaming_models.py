@@ -27,11 +27,21 @@ logger = logging.getLogger(__name__)
 class DirectWhisperService:
     """Lazy-loaded, lock-guarded faster-whisper wrapper for streaming."""
 
-    def __init__(self, model_name: str, device: str, compute_type: str, language: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        device: str,
+        compute_type: str,
+        language: str,
+        beam_size: int,
+        role: str = "stream",
+    ) -> None:
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        self.beam_size = beam_size
+        self.role = role
         self._model: object | None = None
         self._lock = threading.Lock()
 
@@ -48,6 +58,7 @@ class DirectWhisperService:
                             "model": self.model_name,
                             "device": self.device,
                             "compute_type": self.compute_type,
+                            "beam_size": self.beam_size,
                         },
                     )
                     self._model = WhisperModel(
@@ -74,7 +85,7 @@ class DirectWhisperService:
             segments, _info = self._model.transcribe(  # type: ignore[attr-defined]
                 audio,
                 language=self.language,
-                beam_size=1,
+                beam_size=self.beam_size,
                 vad_filter=vad,
                 condition_on_previous_text=False,
                 no_speech_threshold=0.75,
@@ -89,12 +100,20 @@ _services_lock = threading.Lock()
 
 
 def _named(
-    key: str, model_name: str, device: str, compute_type: str, language: str
+    key: str, model_name: str, device: str, compute_type: str, language: str, beam_size: int
 ) -> DirectWhisperService:
+    service_key = "\u0000".join([key, model_name, device, compute_type, language, str(beam_size)])
     with _services_lock:
-        if key not in _services:
-            _services[key] = DirectWhisperService(model_name, device, compute_type, language)
-        return _services[key]
+        if service_key not in _services:
+            _services[service_key] = DirectWhisperService(
+                model_name,
+                device,
+                compute_type,
+                language,
+                beam_size,
+                role=key,
+            )
+        return _services[service_key]
 
 
 def get_live_service(settings: Settings) -> DirectWhisperService:
@@ -105,6 +124,7 @@ def get_live_service(settings: Settings) -> DirectWhisperService:
         settings.live_device,
         settings.live_compute_type,
         settings.language,
+        settings.live_beam_size,
     )
 
 
@@ -116,4 +136,5 @@ def get_final_service(settings: Settings) -> DirectWhisperService:
         settings.final_device,
         settings.final_compute_type,
         settings.language,
+        settings.final_beam_size,
     )

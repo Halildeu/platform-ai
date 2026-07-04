@@ -8,11 +8,11 @@ Kısa ses chunk'larını (2-10 sn) hızlı geçici (draft) transcript'e çevirir
 
 PoC scope:
 - Senkron HTTP `POST /transcribe` (multipart audio file)
+- WebSocket `/ws/stream` düşük gecikmeli canlı draft/final event akışı
 - faster-whisper `medium int8` CPU
 - Türkçe (`STT_LANGUAGE=tr` default)
 
 Sonraki sliceler:
-- WebSocket streaming (chunk-by-chunk, draft → final state machine)
 - GPU variant (`large-v3-turbo` int8/float16)
 - Live segment merge + revize
 - Redis queue tarafına push (audio-gateway-service ile entegre)
@@ -23,9 +23,11 @@ Sonraki sliceler:
 app/
 ├── core/config.py            # Pydantic Settings (env STT_*)
 ├── models/schemas.py         # request/response Pydantic
-├── services/transcribe.py    # Whisper wrapper (lazy-load + lock)
+├── services/transcribe.py    # HTTP Whisper wrapper (lazy-load + lock)
+├── services/streaming_models.py # WS live/final Whisper wrappers
 └── api/
     ├── health.py             # GET /health
+    ├── stream.py             # WS /ws/stream live partial/final events
     └── transcribe.py         # POST /transcribe
 tests/
 ├── conftest.py               # mock faster_whisper (no model download in CI)
@@ -62,6 +64,54 @@ uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload
 curl -F "audio=@sample-tr.wav" http://localhost:8200/transcribe | jq
 curl http://localhost:8200/health | jq
 ```
+
+## WebSocket `/ws/stream` canlı transkript davranışı
+
+`/ws/stream` float32 PCM 16 kHz frame kabul eder ve client-facing event
+kontratı `docs/contracts/ws-stream-events.schema.json` ile CI'da pinlenir.
+
+Varsayılan canlı UX ayarları:
+
+| Env | Default | Amaç |
+|---|---:|---|
+| `STT_LIVE_INFER_INTERVAL_MS` | `700` | Konuşma aktifken gerçek partial event cadence'i; CPU dev smoke'ta final pass'i aç bırakmayacak aralık |
+| `STT_LIVE_WINDOW_SEC` | `2.0` | Kısa rolling context; kelime-progressive hissi |
+| `STT_LIVE_BEAM_SIZE` | `1` | Live draft decode genişliği; düşük gecikme için ADR-0031 default |
+| `STT_FINAL_BEAM_SIZE` | `1` | Final revision decode genişliği; ölçümlü A/B için env ile artırılabilir |
+| `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct stream final pass'te Whisper VAD; default kapalı çünkü RMS gate zaten aktif sesi seçer |
+| `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
+| `STT_SILENCE_COMMIT_SEC` | `0.7` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
+| `STT_FORCED_COMMIT_SEC` | `5.0` | Uzun konuşmada bounded finalization safety |
+| `STT_FINAL_WINDOW_SEC` | `6.0` | Final pass için tutulan aktif konuşma penceresi; uzun desktop konuşmada coverage/cadence dengesi |
+| `STT_TAIL_OVERLAP_SEC` | `0.25` | Forced commit sınırında kelime kaybını azaltan kısa ses kuyruğu |
+| `STT_SILENCE_RMS` / `STT_MIN_SPEECH_RMS` | `0.0005` / `0.0005` | Sessizlik/konuşma hysteresis bandı; WebAudio mikrofon RMS seviyesiyle uyumlu |
+
+Partial event'ler aynı `seq` ile gelir; client aynı transcript satırını
+günceller. `confirmed`/`tentative` alanları consumer tarafında ayrı
+stil vermek için ayrılmıştır. Final event doğru/kalıcı metni üretir ve draft
+satırını netleştirir. Sunucu logları transcript içeriği yazmaz; debug event'ler
+`STT_STREAM_DEBUG=true` olmadıkça kapalıdır ve açıkken de transcript-free kalır.
+Bu ayarlar `app.core.config.Settings` içinde bounded Pydantic alanlarıdır:
+`STT_MIN_SPEECH_RMS >= STT_SILENCE_RMS`,
+`STT_MIN_INFER_SEC <= STT_LIVE_WINDOW_SEC` ve
+`STT_TAIL_OVERLAP_SEC < STT_FINAL_WINDOW_SEC` guard'ları boot sırasında
+geçersiz rollout'u durdurur.
+
+Transcript-free canlı stream smoke:
+
+```bash
+python scripts/live_stream_smoke.py \
+  --url ws://127.0.0.1:18220/ws/stream \
+  --wav tests/fixtures/sample-tr-cv17-001.wav
+```
+
+Script raw audio veya transcript text basmaz; fixture/reference hash'i, event
+sayıları, first-partial/final latency, final kelime kapsaması ve transcript event
+gap metriği üretir. Default pass gate'i en az bir partial event, en az bir final
+event, final hallucination=0, error=0, reference TXT varsa en az %50 final word
+coverage ve transcript event gap <= 6000 ms ister. Bu gate, "stream ayakta ama
+konuşmanın büyük kısmı UI'a düşmüyor" sınıfını tek final event ile yanlış PASS
+saymamak için vardır.
 
 ## Docker
 
@@ -278,7 +328,10 @@ Approved GPU live PoC note:
 | `STT_DEVICE` | `cpu` | `cpu`/`cuda`/`auto` |
 | `STT_LANGUAGE` | `tr` | ISO 639-1 veya `auto` |
 | `STT_BEAM_SIZE` | `5` | Whisper beam (1-10) |
+| `STT_LIVE_BEAM_SIZE` | `1` | Direct stream live draft beam (1-10) |
+| `STT_FINAL_BEAM_SIZE` | `1` | Direct stream final revision beam (1-10); `>1` rollout'u latency/WER kanıtı ister |
 | `STT_VAD_FILTER` | `true` | Whisper built-in VAD |
+| `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct `/ws/stream` final pass VAD; quiet desktop speech kaybını önlemek için default kapalı |
 | `STT_MAX_AUDIO_MB` | `50` | DoS guard (1-500) |
 | `STT_LOG_LEVEL` | `INFO` | logging level |
 | `STT_REQUEST_TIMEOUT` | `60` | hard cap sec |

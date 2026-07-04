@@ -26,6 +26,26 @@ Invoke-RestMethod http://127.0.0.1:8200/health   # live-stt  (model load ~30-60 
 Invoke-RestMethod http://127.0.0.1:8300/health   # meeting-ai
 Get-ScheduledTask platform-ai-*                   # ikisi de Running olmalı
 ```
+
+`/health` sadece senkron `/transcribe` modelinin lazy-load durumunu gosterir.
+Canli urun yuzeyi icin asil readiness `/ws/stream` handshake'idir:
+`loading/live_model -> loading/final_model -> ready`. `update.ps1` restart
+sonrasinda bu direct stream modellerini transcript-free websocket warmup ile
+yukler; bu adim basarisizsa ilk kullanici kaydi model yukleme gecikmesini oder.
+
+Direct stream kalite smoke'u icin gelistirici makinesinden tunel acikken anonim
+Common Voice TR fixture'i kullanilabilir:
+
+```powershell
+cd services\live-stt-service
+python scripts\live_stream_smoke.py --url ws://127.0.0.1:18220/ws/stream
+```
+
+Bu smoke stdout'a ham audio veya transcript yazmaz; yalniz event sayisi,
+latency, kelime/karakter sayisi, kisa hash ve hallucination flag gibi redacted
+metrikler uretir. Gercek toplanti kaydi veya kullanici transcript'i evidence'e
+konmaz.
+
 Loglar: `deploy\gpu-host\logs\` (günlük dosya; **transcript-free** — KVKK #30).
 
 ## Güncelleme (yeni kod deploy etme) — drift-proof

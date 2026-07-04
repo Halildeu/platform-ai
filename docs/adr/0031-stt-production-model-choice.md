@@ -109,6 +109,12 @@ Until the approved pilot/customer-pilot dataset and #35/#36 measurements are ava
 This is a role-based choice. One model is not forced to satisfy both live
 latency and final accuracy.
 
+Direct-stream runtime exposes role-specific beam knobs
+(`STT_LIVE_BEAM_SIZE`, `STT_FINAL_BEAM_SIZE`) so latency/accuracy experiments can
+be run without a code change. The ADR default remains beam size `1`; increasing
+final beam above `1` is a measured experiment and needs latency, VRAM and WER/CER
+evidence before rollout.
+
 ## Why This Decision
 
 1. It uses models already exercised in the project instead of introducing a

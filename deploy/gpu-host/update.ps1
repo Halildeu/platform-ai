@@ -168,6 +168,92 @@ function Invoke-SchtasksTask {
   }
 }
 
+function Wait-LiveSttStreamReady {
+  param(
+    [string]$Url = "ws://127.0.0.1:8200/ws/stream",
+    [int]$TimeoutSec = 240
+  )
+
+  $oldEap = $ErrorActionPreference
+  $client = $null
+  try {
+    $ErrorActionPreference = "Continue"
+    $client = [System.Net.WebSockets.ClientWebSocket]::new()
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    $connectTask = $client.ConnectAsync([Uri]$Url, [Threading.CancellationToken]::None)
+    $remainingMs = [Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+    if (-not $connectTask.Wait($remainingMs)) {
+      Write-Host "[update] direct stream warmup timed out while connecting" -ForegroundColor Yellow
+      return $false
+    }
+    if ($connectTask.Exception) {
+      Write-Host "[update] direct stream warmup connect failed: $($connectTask.Exception.GetBaseException().GetType().Name)" -ForegroundColor Yellow
+      return $false
+    }
+
+    $buffer = New-Object byte[] 8192
+    $builder = [System.Text.StringBuilder]::new()
+    while ([DateTime]::UtcNow -lt $deadline) {
+      $remainingMs = [Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+      $segment = [ArraySegment[byte]]::new($buffer)
+      $receiveTask = $client.ReceiveAsync($segment, [Threading.CancellationToken]::None)
+      if (-not $receiveTask.Wait($remainingMs)) {
+        Write-Host "[update] direct stream warmup timed out waiting for ready" -ForegroundColor Yellow
+        return $false
+      }
+      if ($receiveTask.Exception) {
+        Write-Host "[update] direct stream warmup receive failed: $($receiveTask.Exception.GetBaseException().GetType().Name)" -ForegroundColor Yellow
+        return $false
+      }
+
+      $result = $receiveTask.Result
+      if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
+        Write-Host "[update] direct stream warmup closed before ready" -ForegroundColor Yellow
+        return $false
+      }
+
+      if ($result.Count -gt 0) {
+        [void]$builder.Append([System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count))
+      }
+      if (-not $result.EndOfMessage) {
+        continue
+      }
+
+      $payload = $builder.ToString()
+      [void]$builder.Clear()
+      try {
+        $event = $payload | ConvertFrom-Json -ErrorAction Stop
+        if ($event.type -eq "ready") {
+          return $true
+        }
+        if ($event.type -eq "error") {
+          Write-Host "[update] direct stream warmup server error event" -ForegroundColor Yellow
+          return $false
+        }
+      } catch {
+        Write-Host "[update] direct stream warmup ignored non-json event" -ForegroundColor Yellow
+      }
+    }
+
+    Write-Host "[update] direct stream warmup timed out before ready" -ForegroundColor Yellow
+    return $false
+  } finally {
+    if ($client) {
+      try {
+        if ($client.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+          $null = $client.CloseAsync(
+            [System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure,
+            "deploy-warmup",
+            [Threading.CancellationToken]::None
+          ).Wait(2000)
+        }
+      } catch { }
+      $client.Dispose()
+    }
+    $ErrorActionPreference = $oldEap
+  }
+}
+
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
 } else {
@@ -241,6 +327,13 @@ if (-not $NoRestart -and -not $restartFailed) {
       }
     } finally { $ErrorActionPreference = $oldEap }
   }
+
+  Write-Host "[update] warming live-stt direct /ws/stream models..." -ForegroundColor Cyan
+  if (Wait-LiveSttStreamReady -Url "ws://127.0.0.1:8200/ws/stream" -TimeoutSec 240) {
+    Write-Host "[update] direct /ws/stream warmup ready (live + final models loaded)" -ForegroundColor Green
+  } else {
+    Write-Host "[update] direct /ws/stream warmup did not reach ready (first stream may pay model load)" -ForegroundColor Yellow
+  }
 }
 
-Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8300/health" -ForegroundColor Cyan
+Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8300/health ; ws://127.0.0.1:8200/ws/stream ready" -ForegroundColor Cyan

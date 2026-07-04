@@ -11,6 +11,7 @@ import sys
 import types
 from collections.abc import Generator
 from dataclasses import dataclass
+from typing import ClassVar
 
 import pytest
 
@@ -35,6 +36,8 @@ class _FakeInfo:
 class _FakeWhisperModel:
     """Drop-in mock for faster_whisper.WhisperModel — deterministic output."""
 
+    last_kwargs: ClassVar[dict[str, object]] = {}
+
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         self.calls = 0
 
@@ -42,6 +45,7 @@ class _FakeWhisperModel:
         self, _audio: object, **_kwargs: object
     ) -> tuple[list[_FakeSeg], _FakeInfo]:
         self.calls += 1
+        self.__class__.last_kwargs = dict(_kwargs)
         segments = [
             _FakeSeg(0, 0.0, 1.2, "Merhaba dünya."),
             _FakeSeg(1, 1.2, 2.5, "Toplantı başlıyor."),
