@@ -31,6 +31,7 @@ def test_hallucination_filter_blocks_known_artifacts() -> None:
     assert is_hallucination("..") is True
     assert is_hallucination("Altyazı M.K.") is True
     assert is_hallucination("İzlediğiniz için teşekkür ederim.") is True
+    assert is_hallucination("İstediğiniz için teşekkür ederim.") is True
     assert is_hallucination("Videoyu beğenmeyi unutmayın arkadaşlar") is True
     assert is_hallucination("Thank you for watching") is True
     assert is_hallucination("Neroba") is True
