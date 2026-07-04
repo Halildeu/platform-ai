@@ -1,11 +1,11 @@
 # WER Pilot Consent Email Template
 
-Subject: Workcube içi STT pilot toplantı kaydı bilgilendirmesi
+Subject: STT pilot toplantı kaydı bilgilendirmesi
 
 Merhaba,
 
-Bugünkü pilot toplantı kaydı, yalnızca Workcube içi konuşmadan yazıya çeviri
-doğruluk ölçümü için alınmıştır.
+Bugünkü pilot toplantı kaydı, yalnızca konuşmadan yazıya çeviri doğruluk ölçümü
+için alınmıştır.
 
 Kullanım amacı:
 

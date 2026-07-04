@@ -245,7 +245,7 @@ Then run the second compute mode without rebuilding:
 - No multi-worker concurrency is implemented; that is issue #42.
 - No performance winner is selected; that is issue #43.
 - NVDEC/NVENC are optional and not required for audio-only STT.
-- No Workcube meeting recording is used.
+- No approved ERP/CRM pilot meeting recording is used.
 - No production deployment or GitOps change is included.
 
 ## Risks

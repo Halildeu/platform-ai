@@ -1,6 +1,6 @@
 # platform-ai
 
-Meeting Intelligence / Speech-to-Text mikroservisleri — Workcube ERP ekosistemine entegre Python servisleri.
+Meeting Intelligence / Speech-to-Text mikroservisleri — ERP/CRM bağımsız Faz 24 Meeting Intelligence için Python servisleri.
 
 ## Amaç
 
@@ -14,7 +14,9 @@ Telefon, masaüstü ve ileride Teams/Zoom kaynaklarından gelen ses akışını 
 
 üretir. Faz 24 Meeting Intelligence kapsamında konumlanır.
 
-## Repo Konumu (Workcube ekosistem haritası)
+**ERP/CRM-agnostic ürün kuralı**: Hiçbir ERP/CRM marka adı core servis kontratına, API/DTO'ya, model prompt'una, observability etiketine veya acceptance gate'e gömülmez. Pilot müşteri veya adapter örnekleri vendor-specific dokümanda kalır; ürün hedefi tüm ERP/CRM'lerle genel adapter kontratı üzerinden çalışmaktır.
+
+## Repo Konumu (Platform ekosistem haritası)
 
 | Repo | Rol |
 |---|---|
@@ -33,7 +35,7 @@ Telefon, masaüstü ve ileride Teams/Zoom kaynaklarından gelen ses akışını 
 | `diarization-service` | Konuşmacı ayrımı (Speaker 1/2/3...) | FastAPI + pyannote.audio |
 | `meeting-ai-service` | Özet + karar + aksiyon LLM çıkarımı | FastAPI + Anthropic/OpenAI API (ilk faz), Ollama (ileri faz) |
 
-## Reuse — Workcube Ekosisteminden
+## Reuse — Platform Ekosisteminden
 
 - **Keycloak SSO** → JWT validation (`auth-service` realm reuse)
 - **api-gateway** → routing + JWT propagation
@@ -100,7 +102,7 @@ Cross-AI consensus: Claude + Codex `019e879c` AGREE + Mavis `mvs_c922...` msg `7
 ### 3-AI 3 RED (yapılmayacak)
 
 1. ❌ Gateway contract kilitlenmeden mobile/Web veya STT WebSocket contract yazılması
-2. ❌ KVKK ADR olmadan gerçek Workcube meeting kaydı kullanılması
+2. ❌ KVKK ADR olmadan gerçek pilot meeting kaydı kullanılması
 3. ❌ Synthetic WER ile model kararı kapatılması
 
 ### Tahmini MVP
@@ -126,4 +128,4 @@ uvicorn services.live-stt-service.app:app --port 8200
 
 ## Lisans
 
-Internal — Workcube ERP platform.
+Internal — Faz 24 Meeting Intelligence platform.

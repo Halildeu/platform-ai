@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "faz24.diarization-decision-gate.v1"
-PILOT_KINDS = {"pilot-meeting", "workcube-pilot", "customer-pilot"}
+PILOT_KINDS = {"pilot-meeting", "erp-crm-pilot", "customer-pilot"}
 BACKENDS = {"nemo", "pyannote", "speechbrain"}
 APPROVED_LICENSE_STATUSES = {
     "approved",

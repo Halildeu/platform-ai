@@ -5,9 +5,9 @@ Issue: `#34 [PR-wer-01] Privacy-safe pilot meeting recording protokolu`
 ## Purpose
 
 Create a privacy-safe pilot meeting recording protocol for WER evaluation. This
-protocol defines how a 5-10 minute Workcube-internal Turkish pilot meeting can
-be recorded, stored, manually transcribed, and used for accuracy measurement
-without exposing real customer meeting data.
+protocol defines how a 5-10 minute approved internal or customer-pilot Turkish
+meeting can be recorded, stored, manually transcribed, and used for accuracy
+measurement without exposing real customer meeting data.
 
 This protocol does not authorize recording by itself. Recording starts only
 after operator approval, explicit participant consent, and ADR-0030 alignment.
@@ -16,7 +16,7 @@ after operator approval, explicit participant consent, and ADR-0030 alignment.
 
 Included:
 
-- 5-10 minute Workcube-internal pilot meeting recording
+- 5-10 minute approved internal/customer-pilot meeting recording
 - explicit consent flow
 - UI modal copy
 - email notification copy
@@ -39,7 +39,7 @@ Excluded:
 |---|---|
 | Duration | 5-10 minutes |
 | Language | Turkish primary |
-| Setting | Workcube-internal pilot only |
+| Setting | Approved internal/customer pilot only |
 | Participants | 2-5 consenting internal participants |
 | Content | Non-customer, non-confidential, synthetic business discussion |
 | Audio format | WAV or PCM16, mono preferred, 16 kHz or 48 kHz |
@@ -173,7 +173,7 @@ Recording can be used for WER only if all are true:
 ## Operator Action
 
 This issue has `operator-action`. Codex can prepare protocol and templates, but
-cannot create a real Workcube meeting recording or consent on behalf of people.
+cannot create a real pilot meeting recording or consent on behalf of people.
 
 Before recording, operator must provide:
 

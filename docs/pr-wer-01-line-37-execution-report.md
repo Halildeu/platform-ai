@@ -4,7 +4,7 @@ Issue: `#37 [PR-wer-01] ADR girdisi: medium int8 vs large-v3-turbo`
 
 ## Purpose
 
-Record a technically honest STT model decision while the real Workcube pilot
+Record a technically honest STT model decision while the approved ERP/CRM pilot
 dataset is unavailable.
 
 ## Requirement Mapping
@@ -32,7 +32,7 @@ dataset is unavailable.
 
 ## Why #35 / #36 Were Not Fabricated
 
-#35 and #36 require a Workcube pilot dataset. The real recording needs:
+#35 and #36 require an approved ERP/CRM pilot dataset. The real recording needs:
 
 - participant consent;
 - operator approval;
@@ -43,20 +43,20 @@ dataset is unavailable.
 Those inputs do not exist yet. Therefore the ADR records the dependency and
 uses only available evidence. It does not invent pilot WER or GPU RAM values.
 
-## Workcube Recording Blocker
+## Approved Pilot Recording Blocker
 
-A real Workcube meeting recording cannot currently be performed. Therefore:
+A real approved ERP/CRM pilot meeting recording cannot currently be performed. Therefore:
 
 - #35 and #36 were temporarily skipped, not completed;
-- no Workcube WER, CER, latency, accuracy, or model-comparison result is
+- no pilot WER, CER, latency, accuracy, or model-comparison result is
   claimed;
 - #37 uses only the models and observations already tested in the PoC;
 - the decision remains `PROVISIONAL`;
-- the project must return to #35 and #36 after an approved Workcube recording,
+- the project must return to #35 and #36 after an approved pilot recording,
   participant consent, encrypted storage, manual ground truth, and review are
   available.
 
-This deferral prevents the missing Workcube test from blocking all subsequent
+This deferral prevents the missing approved pilot test from blocking all subsequent
 engineering work, but it does not remove the test requirement.
 
 ## Evidence Used
@@ -82,7 +82,7 @@ Approved GPU PoC observations:
 There is one explicit process deviation:
 
 - Normal order is #35 -> #36 -> #37.
-- Workcube pilot recording cannot currently be performed.
+- Approved ERP/CRM pilot recording cannot currently be performed.
 - #37 is therefore written as `PROVISIONAL`, not `ACCEPTED`.
 
 This deviation allows engineering to continue without hiding the missing
@@ -92,7 +92,7 @@ evidence. It does not close #35 or #36 and does not permanently lock a model.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Pilot-domain accuracy unknown | Workcube vocabulary may perform worse | ADR reopen required after #34/#35 |
+| Pilot-domain accuracy unknown | ERP/CRM domain vocabulary may perform worse | ADR reopen required after #34/#35 |
 | GPU RAM/cost values missing | Capacity planning incomplete | #43 performance matrix required |
 | `large-v3` final may be too slow under concurrency | Final queue may grow | #42 multi-worker GPU test |
 | `medium` draft may revise heavily | Poor visual stability | Measure chunk/final drift in #35 |
