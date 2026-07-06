@@ -260,3 +260,39 @@ def test_resolved_model_revision_prefers_requested_revision_over_main(
         )
         == "pinnedhash1"
     )
+
+
+def test_resolved_model_revision_prefers_requested_revision_across_cache_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #235 re-review (F4): the first fix only searched each cache root in
+    # isolation, so a repo found in the DEFAULT HF cache with only "main"
+    # cached there fell back to that "main" hash and returned immediately —
+    # never checking the pyannote-specific root where the actually-requested
+    # revision was cached. Codex reproduced this with exactly this two-root
+    # shape. The requested revision must win regardless of which root has it.
+    pyannote_cache_path = "/fake/torch/pyannote"
+    monkeypatch.setattr(diar_matrix, "_pyannote_cache_dir", lambda: pyannote_cache_path)
+    default_cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [_FakeRevision("mainhash00", {"main"}, last_modified=5.0)],
+            )
+        ]
+    )
+    pyannote_cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [_FakeRevision("pinnedhash1", {"v2.1"}, last_modified=1.0)],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, default_cache, {pyannote_cache_path: pyannote_cache})
+    assert (
+        diar_matrix.resolved_model_revision(
+            "pyannote/speaker-diarization-3.1", requested_revision="v2.1"
+        )
+        == "pinnedhash1"
+    )

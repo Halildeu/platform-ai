@@ -194,14 +194,24 @@ def resolved_model_revision(model_id: str, requested_revision: str = "") -> str 
     evidence with `revision: null` — the record has to carry SOME immutable
     snapshot identifier, whether or not one was explicitly pinned. Reads the
     local `huggingface_hub` cache (already populated by `from_pretrained`
-    above) rather than hitting the network again. When `requested_revision`
-    was explicitly passed to the loader (#235 re-review P2: an explicit pin
-    was silently resolved to whatever cached revision happened to have the
-    "main" ref instead of the actually-requested one when both were cached),
-    that exact pin is preferred over "main"/most-recent. Otherwise prefers the
-    revision whose refs include "main", then falls back to the most recently
-    used cached revision. Tries the standard HF hub cache first, then
-    pyannote's separate `torch.hub`-rooted cache (see `_pyannote_cache_dir`).
+    above) rather than hitting the network again. Tries the standard HF hub
+    cache first, then pyannote's separate `torch.hub`-rooted cache (see
+    `_pyannote_cache_dir`).
+
+    Two full passes over ALL cache roots (#235 re-review F4: a single
+    per-root pass returned the wrong hash when the model was cached in both
+    roots — e.g. only "main" in the default HF cache and the actually
+    requested pin in the pyannote-specific cache — because the first root's
+    own "main" fallback returned before the second root, which held the real
+    match, was ever checked):
+
+    1. If `requested_revision` was explicitly passed, search every cache
+       root for an exact match (commit hash or ref) and return it as soon as
+       one root has it — before falling back to "main" in any root.
+    2. Only if no root had an exact match (or none was requested), search
+       every root again for a "main"-tagged revision, then the most recently
+       used one.
+
     Returns None only if the model was never cached in either location
     (should not happen right after a successful load).
     """
@@ -214,30 +224,44 @@ def resolved_model_revision(model_id: str, requested_revision: str = "") -> str 
     with contextlib.suppress(Exception):
         cache_dirs.append(_pyannote_cache_dir())
 
+    cache_infos: list[Any] = []
     for cache_dir in cache_dirs:
         try:
-            cache_info = scan_cache_dir(cache_dir) if cache_dir else scan_cache_dir()
+            cache_infos.append(scan_cache_dir(cache_dir) if cache_dir else scan_cache_dir())
         except Exception:  # noqa: BLE001, S112 - best-effort provenance, never fatal
             continue
-        found = _revision_from_cache_info(cache_info, model_id, requested_revision)
+
+    if requested_revision:
+        for cache_info in cache_infos:
+            found = _exact_revision_match(cache_info, model_id, requested_revision)
+            if found is not None:
+                return found
+
+    for cache_info in cache_infos:
+        found = _fallback_revision(cache_info, model_id)
         if found is not None:
             return found
     return None
 
 
-def _revision_from_cache_info(
-    cache_info: Any, model_id: str, requested_revision: str = ""
-) -> str | None:
+def _exact_revision_match(cache_info: Any, model_id: str, requested_revision: str) -> str | None:
+    for repo in cache_info.repos:
+        if repo.repo_id != model_id:
+            continue
+        for rev in repo.revisions:
+            if rev.commit_hash == requested_revision or requested_revision in rev.refs:
+                return rev.commit_hash
+        return None
+    return None
+
+
+def _fallback_revision(cache_info: Any, model_id: str) -> str | None:
     for repo in cache_info.repos:
         if repo.repo_id != model_id:
             continue
         revisions = sorted(repo.revisions, key=lambda r: r.last_modified, reverse=True)
         if not revisions:
             return None
-        if requested_revision:
-            for rev in revisions:
-                if rev.commit_hash == requested_revision or requested_revision in rev.refs:
-                    return rev.commit_hash
         for rev in revisions:
             if "main" in rev.refs:
                 return rev.commit_hash
