@@ -124,6 +124,30 @@ python services/diarization-service/scripts/diar_decision_gate.py \
 
 Expected result: `status=pass`, `findingCount=0`, selected backend `pyannote`.
 
+**Overlap acceptance (#235 re-review):** the "pyannote overlap corpus DER <=
+30%" claim above is machine-verified with `--backend pyannote`, not left as
+prose. Without a backend filter, the gate's cross-backend selection picks
+whichever row has the best combined DER+speed+VRAM score — SpeechBrain's
+speed/VRAM advantage lets it "win" that score despite failing the DER
+ceiling, which would report the wrong backend's failure. The filter isolates
+the actual accepted-backend claim:
+
+```bash
+python services/diarization-service/scripts/diar_decision_gate.py \
+  --evidence docs/evidence/diar-overlap-results-2026-07-03.jsonl \
+  --backend pyannote \
+  --max-der 0.30 \
+  --max-rtf 0.05 \
+  --max-latency-ms 3000 \
+  --max-peak-vram-delta-mb 2500 \
+  --min-samples 3
+```
+
+Expected result: `status=pass`, `findingCount=0`, selected backend `pyannote`.
+Both commands now run in CI (`.github/workflows/ci.yml`, `repo-gates` job) so
+a future evidence or threshold regression fails the build instead of relying
+on this document staying accurate.
+
 This gate covers only the source-side #161 backend decision. It does not enable
 production, direct STT, voiceprint, biometric identity, or legal approval.
 

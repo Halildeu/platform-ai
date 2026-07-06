@@ -351,8 +351,21 @@ def evaluate_gate(
     max_latency_ms: float | None,
     max_peak_vram_delta_mb: float | None,
     min_samples: int | None,
+    backend: str | None = None,
 ) -> dict[str, Any]:
-    """Return a metadata-only diarization backend decision gate result."""
+    """Return a metadata-only diarization backend decision gate result.
+
+    `backend`, if given, restricts evaluation to rows whose `backend` field
+    matches (case-insensitive). #235 re-review: the default cross-backend
+    selection picks the row with the best quality SCORE (DER + speed + VRAM
+    combined), not necessarily the accepted backend — for a comparison set
+    where a faster/lighter backend fails the DER ceiling, that row can still
+    "win" the score and mask the failure. An explicit backend filter lets CI
+    machine-verify a specific acceptance claim (e.g. "pyannote's overlap
+    corpus DER passes") instead of relying on prose in the ADR.
+    """
+    if backend:
+        rows = [row for row in rows if str(row.get("backend", "")).lower() == backend.lower()]
     thresholds = _thresholds(
         max_der=max_der,
         max_rtf=max_rtf,
@@ -457,6 +470,11 @@ def main() -> int:
     parser.add_argument("--max-latency-ms", type=float, default=None)
     parser.add_argument("--max-peak-vram-delta-mb", type=float, default=None)
     parser.add_argument("--min-samples", type=int, default=None)
+    parser.add_argument(
+        "--backend",
+        default=None,
+        help="Restrict evaluation to a single backend's rows (#235 overlap acceptance gate)",
+    )
     args = parser.parse_args()
 
     result = evaluate_gate(
@@ -466,6 +484,7 @@ def main() -> int:
         max_latency_ms=args.max_latency_ms,
         max_peak_vram_delta_mb=args.max_peak_vram_delta_mb,
         min_samples=args.min_samples,
+        backend=args.backend,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["status"] == "pass" else 1

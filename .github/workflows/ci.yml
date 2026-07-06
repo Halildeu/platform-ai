@@ -82,6 +82,72 @@ jobs:
             exit 1
           fi
 
+      - name: Accepted #161 diarization decision evidence (pilot)
+        # #235 re-review (P1): CI must actually gate the accepted evidence
+        # file, not just assert an old synthetic snapshot stays blocked.
+        run: |
+          set +e
+          python3 services/diarization-service/scripts/diar_decision_gate.py \
+            --evidence docs/evidence/diar-decision-pilot-2026-07-03.jsonl \
+            --max-der 0.30 \
+            --max-rtf 0.05 \
+            --max-latency-ms 3000 \
+            --max-peak-vram-delta-mb 2500 \
+            --min-samples 3 > /tmp/diar-decision-accepted-result.json
+          gate_status=$?
+          set -e
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(Path("/tmp/diar-decision-accepted-result.json").read_text())
+          if result.get("status") != "pass":
+              raise SystemExit(
+                  "Accepted #161 pilot decision evidence must gate status=pass"
+              )
+          if result.get("selectedDiarization", {}).get("backend") != "pyannote":
+              raise SystemExit("Accepted #161 pilot decision evidence must select pyannote")
+          PY
+          if [ "$gate_status" -ne 0 ]; then
+            echo "Accepted #161 pilot decision evidence gate must exit 0"
+            exit 1
+          fi
+
+      - name: Accepted #161 diarization overlap evidence (pyannote)
+        # #235 re-review (P1): the ADR's "pyannote overlap corpus DER <= 30%"
+        # acceptance claim was prose-only. Cross-backend auto-selection picks
+        # the best combined quality SCORE, which can mask a DER failure
+        # (SpeechBrain is faster/lighter but fails the DER ceiling here) — so
+        # this machine-verifies the pyannote-only claim with --backend.
+        run: |
+          set +e
+          python3 services/diarization-service/scripts/diar_decision_gate.py \
+            --evidence docs/evidence/diar-overlap-results-2026-07-03.jsonl \
+            --backend pyannote \
+            --max-der 0.30 \
+            --max-rtf 0.05 \
+            --max-latency-ms 3000 \
+            --max-peak-vram-delta-mb 2500 \
+            --min-samples 3 > /tmp/diar-overlap-accepted-result.json
+          gate_status=$?
+          set -e
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(Path("/tmp/diar-overlap-accepted-result.json").read_text())
+          if result.get("status") != "pass":
+              raise SystemExit(
+                  "Accepted #161 pyannote overlap evidence must gate status=pass"
+              )
+          if result.get("selectedDiarization", {}).get("backend") != "pyannote":
+              raise SystemExit("Accepted #161 overlap decision evidence must select pyannote")
+          PY
+          if [ "$gate_status" -ne 0 ]; then
+            echo "Accepted #161 pyannote overlap evidence gate must exit 0"
+            exit 1
+          fi
+
   service-tests:
     runs-on: ubuntu-latest
     strategy:

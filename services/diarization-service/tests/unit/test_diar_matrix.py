@@ -226,3 +226,37 @@ def test_resolved_model_revision_falls_back_to_pyannote_cache_dir(
     )
     _install_fake_huggingface_hub(monkeypatch, default_cache, {pyannote_cache_path: pyannote_cache})
     assert diar_matrix.resolved_model_revision("pyannote/speaker-diarization-3.1") == "84fd259124"
+
+
+def test_resolved_model_revision_prefers_requested_revision_over_main(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #235 re-review (P2): an explicit --revision pin was silently resolved to
+    # whatever cached revision happened to carry the "main" ref, instead of
+    # the actually-requested pin, when both were present in the cache (e.g. a
+    # prior unpinned run already cached "main", then a later run explicitly
+    # pinned an older tag/commit). The requested revision must win.
+    cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [
+                    _FakeRevision("mainhash00", {"main"}, last_modified=5.0),
+                    _FakeRevision("pinnedhash1", {"v2.1"}, last_modified=1.0),
+                ],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, cache)
+    assert (
+        diar_matrix.resolved_model_revision(
+            "pyannote/speaker-diarization-3.1", requested_revision="v2.1"
+        )
+        == "pinnedhash1"
+    )
+    assert (
+        diar_matrix.resolved_model_revision(
+            "pyannote/speaker-diarization-3.1", requested_revision="pinnedhash1"
+        )
+        == "pinnedhash1"
+    )

@@ -186,7 +186,7 @@ def _pyannote_cache_dir() -> str:
     return os.path.join(torch_cache_root, "pyannote")
 
 
-def resolved_model_revision(model_id: str) -> str | None:
+def resolved_model_revision(model_id: str, requested_revision: str = "") -> str | None:
     """The actual HF commit hash backing `model_id` in the local cache.
 
     Codex review #235: a `--revision` the operator forgot to pass (or a bare
@@ -194,8 +194,12 @@ def resolved_model_revision(model_id: str) -> str | None:
     evidence with `revision: null` — the record has to carry SOME immutable
     snapshot identifier, whether or not one was explicitly pinned. Reads the
     local `huggingface_hub` cache (already populated by `from_pretrained`
-    above) rather than hitting the network again. Prefers the revision whose
-    refs include the requested pin or "main"; falls back to the most recently
+    above) rather than hitting the network again. When `requested_revision`
+    was explicitly passed to the loader (#235 re-review P2: an explicit pin
+    was silently resolved to whatever cached revision happened to have the
+    "main" ref instead of the actually-requested one when both were cached),
+    that exact pin is preferred over "main"/most-recent. Otherwise prefers the
+    revision whose refs include "main", then falls back to the most recently
     used cached revision. Tries the standard HF hub cache first, then
     pyannote's separate `torch.hub`-rooted cache (see `_pyannote_cache_dir`).
     Returns None only if the model was never cached in either location
@@ -215,19 +219,25 @@ def resolved_model_revision(model_id: str) -> str | None:
             cache_info = scan_cache_dir(cache_dir) if cache_dir else scan_cache_dir()
         except Exception:  # noqa: BLE001, S112 - best-effort provenance, never fatal
             continue
-        found = _revision_from_cache_info(cache_info, model_id)
+        found = _revision_from_cache_info(cache_info, model_id, requested_revision)
         if found is not None:
             return found
     return None
 
 
-def _revision_from_cache_info(cache_info: Any, model_id: str) -> str | None:
+def _revision_from_cache_info(
+    cache_info: Any, model_id: str, requested_revision: str = ""
+) -> str | None:
     for repo in cache_info.repos:
         if repo.repo_id != model_id:
             continue
         revisions = sorted(repo.revisions, key=lambda r: r.last_modified, reverse=True)
         if not revisions:
             return None
+        if requested_revision:
+            for rev in revisions:
+                if rev.commit_hash == requested_revision or requested_revision in rev.refs:
+                    return rev.commit_hash
         for rev in revisions:
             if "main" in rev.refs:
                 return rev.commit_hash
@@ -256,7 +266,7 @@ def run_pyannote(
         pipeline = Pipeline.from_pretrained(model, **kwargs)
     if device == "cuda":
         pipeline.to(torch.device("cuda"))
-    return pipeline, time.perf_counter() - t0, resolved_model_revision(model)
+    return pipeline, time.perf_counter() - t0, resolved_model_revision(model, revision)
 
 
 def _pyannote_turns(pipeline: object, wav: Path) -> list[Turn]:
