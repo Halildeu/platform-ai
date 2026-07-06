@@ -31,8 +31,12 @@ speaker identity is stored in this repository.
 
 | Backend | Corpus DER | RTF | p50 | Peak VRAM delta | Result |
 |---|---:|---:|---:|---:|---|
-| pyannote 3.1 | **17.88%** | 0.026 | 1743 ms | 2154 MB | Passes DER <= 30% |
-| SpeechBrain ECAPA | 20.95% | **0.006** | **332 ms** | **366 MB** | Passes DER <= 30% |
+| pyannote 3.1 | **17.88%** | 0.026 | 1739 ms | 2154 MB | Passes DER <= 30% |
+| SpeechBrain ECAPA | 23.14% | **0.005** | **292 ms** | **367 MB** | Passes DER <= 30% |
+
+Backed by `docs/evidence/diar-pilot-comparison-2026-07-03.jsonl` (both rows,
+real `resolved_revision` — #235 re-review P1: the prior table cited a
+SpeechBrain pilot number with no committed evidence file behind it).
 
 ### Controlled real-voice overlap set
 
@@ -41,8 +45,12 @@ speaker turns with deterministic overlap. Total evaluated audio is 81 seconds.
 
 | Backend | Corpus DER | Mean DER | Max DER | RTF | p50 | Peak VRAM delta |
 |---|---:|---:|---:|---:|---:|---:|
-| pyannote 3.1 | **20.30%** | **19.20%** | 31.31% | 0.025 | 635 ms | 2235 MB |
-| SpeechBrain ECAPA | 32.15% | 32.64% | 35.53% | **0.006** | **103 ms** | **411 MB** |
+| pyannote 3.1 | **20.30%** | **19.20%** | 31.31% | 0.024 | 634 ms | 2234 MB |
+| SpeechBrain ECAPA | 33.14% | 33.80% | 37.57% | **0.006** | **107 ms** | **410 MB** |
+
+Backed by `docs/evidence/diar-overlap-results-2026-07-03.jsonl` (both rows,
+real `resolved_revision`); figures updated from an earlier informal run to
+match this committed evidence exactly.
 
 SpeechBrain is faster and lighter, but its overlap corpus DER exceeds the
 agreed 30% quality ceiling. Pyannote stays below that ceiling in both the pilot
@@ -67,7 +75,7 @@ proposed here — if one is wanted later, the gate needs an explicit
    the DER ceiling on both pilot and overlap evidence.
 3. **Fallback:** retain SpeechBrain ECAPA as an explicit resource-constrained
    degraded-mode candidate. It is not the primary backend because its overlap
-   DER is 32.15%.
+   DER is 33.14% (see overlap table above).
 4. **Identity boundary:** keep anonymous speaker labels canonical. Human
    confirmation is required before applying a person label. This ADR does not
    enable embeddings, voiceprints, or automatic biometric identification —
@@ -124,6 +132,29 @@ python services/diarization-service/scripts/diar_decision_gate.py \
 
 Expected result: `status=pass`, `findingCount=0`, selected backend `pyannote`.
 
+**Pilot "both candidates" acceptance (#235 re-review):** the pilot table's
+SpeechBrain row above is backed by a committed row with real
+`resolved_revision`, not prose alone:
+
+```bash
+python services/diarization-service/scripts/diar_decision_gate.py \
+  --evidence docs/evidence/diar-pilot-comparison-2026-07-03.jsonl \
+  --backend pyannote \
+  --max-der 0.30 \
+  --max-rtf 0.05 \
+  --max-latency-ms 3000 \
+  --max-peak-vram-delta-mb 2500 \
+  --min-samples 3
+```
+
+Expected result: `status=pass`, `findingCount=0`, selected backend `pyannote`.
+(`diar-pilot-comparison-2026-07-03.jsonl` is the two-backend comparison set;
+`diar-decision-pilot-2026-07-03.jsonl` above remains the single accepted-row
+file the go-live decision is conditioned on — the `--backend pyannote` filter
+is what makes the two consistent even though the comparison file's unfiltered
+selection also happens to pick SpeechBrain here, same masking risk as
+overlap, harmlessly, since SpeechBrain's own pilot DER is also under 30%.)
+
 **Overlap acceptance (#235 re-review):** the "pyannote overlap corpus DER <=
 30%" claim above is machine-verified with `--backend pyannote`, not left as
 prose. Without a backend filter, the gate's cross-backend selection picks
@@ -176,9 +207,13 @@ The prior promotion triggers are now satisfied:
 
 - pyannote and SpeechBrain use the same GPU measurement harness;
 - `collar=0.25`, `skip_overlap=false`;
-- real pilot DER exists for both candidates;
-- a distinct real-voice overlap set exists for both candidates;
-- pyannote meets the accepted 30% corpus DER ceiling on both sets;
+- real pilot DER exists for both candidates, committed with real
+  `resolved_revision` in `docs/evidence/diar-pilot-comparison-2026-07-03.jsonl`
+  (#235 re-review: previously only asserted in prose);
+- a distinct real-voice overlap set exists for both candidates, committed in
+  `docs/evidence/diar-overlap-results-2026-07-03.jsonl`;
+- pyannote meets the accepted 30% corpus DER ceiling on both sets, and this is
+  machine-gated (`--backend pyannote`) in CI, not just documented;
 - the canonical G-WER/DER gate passed with WER 6.47% and pyannote DER 17.88%.
 
 Owner review is the final step before changing this ADR status from PROPOSED to
@@ -198,3 +233,28 @@ for both backends (pyannote resolved via the `~/.cache/torch/pyannote`
 fallback added for this fix). `diar_decision_gate.py` re-run against
 `docs/evidence/diar-decision-pilot-2026-07-03.jsonl` returns `status=pass`,
 `findingCount=0`, selected backend `pyannote`. Awaiting Halil's re-review.
+
+Re-review (2026-07-03, Codex cross-AI, thread 019f2877): REVISE — 3 new
+blocking findings + 1 non-blocking:
+
+1. CI's diarization step only re-checked that the old synthetic snapshot
+   stays blocked; it never gated the accepted evidence. Fixed: two new
+   `repo-gates` CI steps run the gate against the accepted pilot and overlap
+   evidence and require `status=pass`/`backend=pyannote`.
+2. The "pyannote overlap corpus DER <= 30%" claim was prose-only; unfiltered
+   cross-backend selection can mask a DER failure behind a faster backend's
+   better combined score. Fixed: `diar_decision_gate.py` gained an optional
+   `--backend` filter, used by both the ADR command and the new CI step.
+3. "Real pilot DER exists for both candidates" had no committed SpeechBrain
+   pilot evidence backing it. Fixed: re-measured on the GPU host and
+   committed `docs/evidence/diar-pilot-comparison-2026-07-03.jsonl` (both
+   backends, real `resolved_revision`); the pilot table above now matches
+   this file exactly.
+4. (non-blocking) `resolved_model_revision()` could return the wrong cached
+   revision's hash when an explicit `--revision` was requested but a
+   different revision (e.g. "main") sorted first. Fixed: it now accepts the
+   requested revision and prefers an exact match; doesn't change today's
+   evidence (`revision` is null on all committed rows).
+
+All four addressed in commit `7995e8a` (code/CI) plus the pilot-comparison
+evidence commit above. Awaiting Halil's re-review.
