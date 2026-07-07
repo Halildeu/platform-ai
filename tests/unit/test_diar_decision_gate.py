@@ -239,6 +239,105 @@ class DiarDecisionGateTests(unittest.TestCase):
             saved = json.loads(stdout.getvalue())
             self.assertEqual(saved["status"], "blocked")
 
+    def test_pilot_row_without_any_revision_is_blocked(self) -> None:
+        # #235 (Codex review): a bare model name with neither an operator
+        # `revision` pin nor a diar_matrix.py-resolved `resolved_revision` is
+        # not a reproducible decision — the gate must not let it through.
+        row = _pilot_row(revision=None)
+        row.pop("resolved_revision", None)
+        result = gate.evaluate_gate(rows=[row], **_threshold_kwargs())
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(
+            any("revision or resolved_revision" in f for f in result["findings"])
+        )
+
+    def test_pilot_row_with_only_resolved_revision_passes(self) -> None:
+        # An operator did not pass --revision, but diar_matrix.py still
+        # captured the actual cached commit hash — that satisfies the
+        # requirement on its own (no explicit pin needed).
+        row = _pilot_row(revision=None, resolved_revision="deadbeef1234")
+        result = gate.evaluate_gate(rows=[row], **_threshold_kwargs())
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(
+            result["selectedDiarization"]["resolved_revision"], "deadbeef1234"
+        )
+
+    def test_unfiltered_comparison_lets_faster_backend_mask_a_der_failure(self) -> None:
+        # #235 re-review (P1): without a backend filter, the gate picks
+        # whichever candidate has the best combined quality SCORE (DER +
+        # speed + VRAM), not necessarily the one an ADR prose claims passed.
+        # A much faster/lighter backend with a failing DER can still "win"
+        # the score, so the overall result reports failure against THAT
+        # backend's DER instead of confirming the accepted backend passes.
+        pyannote_row = _pilot_row(
+            tag="pyannote-overlap",
+            der_corpus=0.203,
+            rtf=0.024,
+            lat_max_ms=965.0,
+            peak_vram_delta_mb=2234.0,
+        )
+        speechbrain_row = _pilot_row(
+            tag="speechbrain-overlap",
+            backend="speechbrain",
+            model="speechbrain/spkrec-ecapa-voxceleb",
+            der_corpus=0.3314,
+            rtf=0.006,
+            lat_max_ms=298.0,
+            peak_vram_delta_mb=410.0,
+        )
+        result = gate.evaluate_gate(
+            rows=[pyannote_row, speechbrain_row], **_threshold_kwargs()
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["selectedDiarization"]["backend"], "speechbrain")
+
+    def test_backend_filter_isolates_pyannote_overlap_acceptance(self) -> None:
+        # The same two rows, but restricted to `--backend pyannote`: this is
+        # how CI machine-verifies "pyannote's overlap corpus DER passes"
+        # instead of trusting unfiltered auto-selection or ADR prose.
+        pyannote_row = _pilot_row(
+            tag="pyannote-overlap",
+            der_corpus=0.203,
+            rtf=0.024,
+            lat_max_ms=965.0,
+            peak_vram_delta_mb=2234.0,
+        )
+        speechbrain_row = _pilot_row(
+            tag="speechbrain-overlap",
+            backend="speechbrain",
+            model="speechbrain/spkrec-ecapa-voxceleb",
+            der_corpus=0.3314,
+            rtf=0.006,
+            lat_max_ms=298.0,
+            peak_vram_delta_mb=410.0,
+        )
+        result = gate.evaluate_gate(
+            rows=[pyannote_row, speechbrain_row],
+            backend="pyannote",
+            **_threshold_kwargs(),
+        )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["selectedDiarization"]["backend"], "pyannote")
+
+    def test_backend_filter_is_case_insensitive_and_excludes_others(self) -> None:
+        result = gate.evaluate_gate(
+            rows=[_pilot_row(backend="SpeechBrain", der_corpus=0.44)],
+            backend="pyannote",
+            **_threshold_kwargs(),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(
+            any(
+                "no diarization candidate rows supplied" in f
+                for f in result["findings"]
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

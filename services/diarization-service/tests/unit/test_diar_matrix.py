@@ -117,3 +117,182 @@ def test_agglomerative_labels_auto_threshold_splits_clear_groups() -> None:
 def test_agglomerative_labels_edge_cases() -> None:
     assert diar_matrix.agglomerative_labels(np.zeros((0, 2))) == []
     assert diar_matrix.agglomerative_labels(np.array([[1.0, 2.0]])) == [0]
+
+
+class _FakeRevision:
+    def __init__(self, commit_hash: str, refs: set[str], last_modified: float) -> None:
+        self.commit_hash = commit_hash
+        self.refs = refs
+        self.last_modified = last_modified
+
+
+class _FakeRepo:
+    def __init__(self, repo_id: str, revisions: list[_FakeRevision]) -> None:
+        self.repo_id = repo_id
+        self.revisions = revisions
+
+
+class _FakeCacheInfo:
+    def __init__(self, repos: list[_FakeRepo]) -> None:
+        self.repos = repos
+
+
+def _install_fake_huggingface_hub(
+    monkeypatch: pytest.MonkeyPatch,
+    default_cache: _FakeCacheInfo,
+    by_cache_dir: dict[str, _FakeCacheInfo] | None = None,
+) -> None:
+    import types
+
+    by_cache_dir = by_cache_dir or {}
+
+    def _fake_scan_cache_dir(cache_dir: str | None = None) -> _FakeCacheInfo:
+        if cache_dir is None:
+            return default_cache
+        return by_cache_dir.get(cache_dir, _FakeCacheInfo([]))
+
+    fake_module = types.ModuleType("huggingface_hub")
+    fake_module.scan_cache_dir = _fake_scan_cache_dir  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_module)
+
+
+def test_resolved_model_revision_prefers_main_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #235 (Codex review): decision evidence must carry an immutable snapshot
+    # id even when --revision was not explicitly passed. When several cached
+    # revisions exist for the same repo, "main" is the one actually resolved
+    # by a bare model-id load (no revision kwarg), so it must win regardless
+    # of last_modified ordering.
+    cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [
+                    _FakeRevision("older111", {"main"}, last_modified=1.0),
+                    _FakeRevision("newer222", set(), last_modified=2.0),
+                ],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, cache)
+    assert diar_matrix.resolved_model_revision("pyannote/speaker-diarization-3.1") == "older111"
+
+
+def test_resolved_model_revision_falls_back_to_most_recent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No revision has "main" in its refs (e.g. loaded by a pinned tag) — fall
+    # back to the most recently used cached revision rather than returning
+    # nothing.
+    cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "speechbrain/spkrec-ecapa-voxceleb",
+                [
+                    _FakeRevision("stale333", {"v1.0"}, last_modified=1.0),
+                    _FakeRevision("fresh444", {"v2.0"}, last_modified=5.0),
+                ],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, cache)
+    assert diar_matrix.resolved_model_revision("speechbrain/spkrec-ecapa-voxceleb") == "fresh444"
+
+
+def test_resolved_model_revision_returns_none_when_repo_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_huggingface_hub(monkeypatch, _FakeCacheInfo([]))
+    monkeypatch.setattr(diar_matrix, "_pyannote_cache_dir", lambda: "/fake/pyannote/cache")
+    assert diar_matrix.resolved_model_revision("pyannote/speaker-diarization-3.1") is None
+
+
+def test_resolved_model_revision_falls_back_to_pyannote_cache_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #235 GPU-host verification: pyannote.audio caches under
+    # `<torch.hub dir>/pyannote`, NOT the standard `~/.cache/huggingface/hub`
+    # scan_cache_dir() reads by default -- SpeechBrain resolved correctly on
+    # the first pass, pyannote stayed null until this fallback was added.
+    pyannote_cache_path = "/fake/torch/pyannote"
+    monkeypatch.setattr(diar_matrix, "_pyannote_cache_dir", lambda: pyannote_cache_path)
+    default_cache = _FakeCacheInfo([])  # nothing in the standard HF hub cache
+    pyannote_cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [_FakeRevision("84fd259124", {"main"}, last_modified=1.0)],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, default_cache, {pyannote_cache_path: pyannote_cache})
+    assert diar_matrix.resolved_model_revision("pyannote/speaker-diarization-3.1") == "84fd259124"
+
+
+def test_resolved_model_revision_prefers_requested_revision_over_main(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #235 re-review (P2): an explicit --revision pin was silently resolved to
+    # whatever cached revision happened to carry the "main" ref, instead of
+    # the actually-requested pin, when both were present in the cache (e.g. a
+    # prior unpinned run already cached "main", then a later run explicitly
+    # pinned an older tag/commit). The requested revision must win.
+    cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [
+                    _FakeRevision("mainhash00", {"main"}, last_modified=5.0),
+                    _FakeRevision("pinnedhash1", {"v2.1"}, last_modified=1.0),
+                ],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, cache)
+    assert (
+        diar_matrix.resolved_model_revision(
+            "pyannote/speaker-diarization-3.1", requested_revision="v2.1"
+        )
+        == "pinnedhash1"
+    )
+    assert (
+        diar_matrix.resolved_model_revision(
+            "pyannote/speaker-diarization-3.1", requested_revision="pinnedhash1"
+        )
+        == "pinnedhash1"
+    )
+
+
+def test_resolved_model_revision_prefers_requested_revision_across_cache_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #235 re-review (F4): the first fix only searched each cache root in
+    # isolation, so a repo found in the DEFAULT HF cache with only "main"
+    # cached there fell back to that "main" hash and returned immediately —
+    # never checking the pyannote-specific root where the actually-requested
+    # revision was cached. Codex reproduced this with exactly this two-root
+    # shape. The requested revision must win regardless of which root has it.
+    pyannote_cache_path = "/fake/torch/pyannote"
+    monkeypatch.setattr(diar_matrix, "_pyannote_cache_dir", lambda: pyannote_cache_path)
+    default_cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [_FakeRevision("mainhash00", {"main"}, last_modified=5.0)],
+            )
+        ]
+    )
+    pyannote_cache = _FakeCacheInfo(
+        [
+            _FakeRepo(
+                "pyannote/speaker-diarization-3.1",
+                [_FakeRevision("pinnedhash1", {"v2.1"}, last_modified=1.0)],
+            )
+        ]
+    )
+    _install_fake_huggingface_hub(monkeypatch, default_cache, {pyannote_cache_path: pyannote_cache})
+    assert (
+        diar_matrix.resolved_model_revision(
+            "pyannote/speaker-diarization-3.1", requested_revision="v2.1"
+        )
+        == "pinnedhash1"
+    )

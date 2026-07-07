@@ -165,13 +165,119 @@ def _trusted_torch_load() -> Iterator[None]:
 # --------------------------------------------------------------------------- #
 # pyannote backend (end-to-end pipeline)
 # --------------------------------------------------------------------------- #
+def _pyannote_cache_dir() -> str:
+    """pyannote.audio's own model cache root — NOT the standard HF hub cache.
+
+    `Pipeline.from_pretrained` (and the models it composes, e.g.
+    `pyannote/segmentation-3.0`, `pyannote/wespeaker-voxceleb-resnet34-LM`)
+    defaults its `cache_dir` to `<torch cache root>/pyannote` — a SIBLING of
+    `torch.hub.get_dir()` (which is `<torch cache root>/hub`, torch's own
+    model-zoo cache), not a child of it. GPU-host verification confirmed the
+    actual on-disk path is `~/.cache/torch/pyannote`, e.g.
+    `~/.cache/torch/pyannote/models--pyannote--speaker-diarization-3.1/
+    snapshots/<hash>` (first attempt at `~/.cache/torch/hub/pyannote` raised
+    `CacheNotFound` — one directory level too deep). The layout under this
+    root is the same `models--org--repo/snapshots/<hash>` shape
+    `scan_cache_dir(cache_dir=...)` already understands.
+    """
+    import torch  # type: ignore[import-not-found]
+
+    torch_cache_root = os.path.dirname(torch.hub.get_dir())  # strip the "hub" leaf
+    return os.path.join(torch_cache_root, "pyannote")
+
+
+def resolved_model_revision(model_id: str, requested_revision: str = "") -> str | None:
+    """The actual HF commit hash backing `model_id` in the local cache.
+
+    Codex review #235: a `--revision` the operator forgot to pass (or a bare
+    model id that silently moves between runs) must not leave the decision
+    evidence with `revision: null` — the record has to carry SOME immutable
+    snapshot identifier, whether or not one was explicitly pinned. Reads the
+    local `huggingface_hub` cache (already populated by `from_pretrained`
+    above) rather than hitting the network again. Tries the standard HF hub
+    cache first, then pyannote's separate `torch.hub`-rooted cache (see
+    `_pyannote_cache_dir`).
+
+    Two full passes over ALL cache roots (#235 re-review F4: a single
+    per-root pass returned the wrong hash when the model was cached in both
+    roots — e.g. only "main" in the default HF cache and the actually
+    requested pin in the pyannote-specific cache — because the first root's
+    own "main" fallback returned before the second root, which held the real
+    match, was ever checked):
+
+    1. If `requested_revision` was explicitly passed, search every cache
+       root for an exact match (commit hash or ref) and return it as soon as
+       one root has it — before falling back to "main" in any root.
+    2. Only if no root had an exact match (or none was requested), search
+       every root again for a "main"-tagged revision, then the most recently
+       used one.
+
+    Returns None only if the model was never cached in either location
+    (should not happen right after a successful load).
+    """
+    try:
+        from huggingface_hub import scan_cache_dir
+    except ImportError:
+        return None
+
+    cache_dirs: list[str | None] = [None]  # None = huggingface_hub's own default
+    with contextlib.suppress(Exception):
+        cache_dirs.append(_pyannote_cache_dir())
+
+    cache_infos: list[Any] = []
+    for cache_dir in cache_dirs:
+        try:
+            cache_infos.append(scan_cache_dir(cache_dir) if cache_dir else scan_cache_dir())
+        except Exception:  # noqa: BLE001, S112 - best-effort provenance, never fatal
+            continue
+
+    if requested_revision:
+        for cache_info in cache_infos:
+            found = _exact_revision_match(cache_info, model_id, requested_revision)
+            if found is not None:
+                return found
+
+    for cache_info in cache_infos:
+        found = _fallback_revision(cache_info, model_id)
+        if found is not None:
+            return found
+    return None
+
+
+def _exact_revision_match(cache_info: Any, model_id: str, requested_revision: str) -> str | None:
+    for repo in cache_info.repos:
+        if repo.repo_id != model_id:
+            continue
+        for rev in repo.revisions:
+            if rev.commit_hash == requested_revision or requested_revision in rev.refs:
+                return rev.commit_hash
+        return None
+    return None
+
+
+def _fallback_revision(cache_info: Any, model_id: str) -> str | None:
+    for repo in cache_info.repos:
+        if repo.repo_id != model_id:
+            continue
+        revisions = sorted(repo.revisions, key=lambda r: r.last_modified, reverse=True)
+        if not revisions:
+            return None
+        for rev in revisions:
+            if "main" in rev.refs:
+                return rev.commit_hash
+        return revisions[0].commit_hash
+    return None
+
+
 def run_pyannote(
     model: str, device: str, token: str, revision: str = ""
-) -> tuple[object, float]:
-    """Load pyannote pipeline; return (pipeline, load_sec). Heavy import deferred.
+) -> tuple[object, float, str | None]:
+    """Load pyannote pipeline; return (pipeline, load_sec, resolved_revision).
 
     `revision` pins the HF model to a commit/tag so results are reproducible
     (review #164: a bare model id can silently change weights between runs).
+    `resolved_revision` is the actual cached commit hash after load (#235) —
+    populated whether or not `revision` was explicitly passed.
     """
     import torch  # type: ignore[import-not-found]
     from pyannote.audio import Pipeline
@@ -184,7 +290,7 @@ def run_pyannote(
         pipeline = Pipeline.from_pretrained(model, **kwargs)
     if device == "cuda":
         pipeline.to(torch.device("cuda"))
-    return pipeline, time.perf_counter() - t0
+    return pipeline, time.perf_counter() - t0, resolved_model_revision(model, revision)
 
 
 def _pyannote_turns(pipeline: object, wav: Path) -> list[Turn]:
@@ -329,8 +435,9 @@ def agglomerative_labels(
     return out
 
 
-def run_speechbrain(model: str, device: str) -> tuple[object, float]:
-    """Load the SpeechBrain ECAPA encoder (non-gated); return (encoder, load_sec)."""
+def run_speechbrain(model: str, device: str) -> tuple[object, float, str | None]:
+    """Load the SpeechBrain ECAPA encoder (non-gated); return
+    (encoder, load_sec, resolved_revision) — see `resolved_model_revision` (#235)."""
     try:
         from speechbrain.inference.speaker import EncoderClassifier
     except ImportError:  # older speechbrain (<1.0) layout
@@ -343,7 +450,7 @@ def run_speechbrain(model: str, device: str) -> tuple[object, float]:
             run_opts={"device": device},
             savedir=os.path.join(os.getenv("TEMP", "/tmp"), "sb-ecapa"),  # noqa: S108
         )
-    return encoder, time.perf_counter() - t0
+    return encoder, time.perf_counter() - t0, resolved_model_revision(model)
 
 
 def _speechbrain_turns(
@@ -428,13 +535,15 @@ def main() -> None:
         if not token:
             print("DIA_HF_TOKEN not set — gated pyannote model needs it", file=sys.stderr)
             sys.exit(4)
-        pipeline, load_sec = run_pyannote(model_used, args.device, token, args.revision)
+        pipeline, load_sec, resolved_revision = run_pyannote(
+            model_used, args.device, token, args.revision
+        )
 
         def diarize_fn(wav: Path) -> list[Turn]:
             return _pyannote_turns(pipeline, wav)
     else:  # speechbrain
         model_used = args.model or SB_DEFAULT_MODEL
-        encoder, load_sec = run_speechbrain(model_used, args.device)
+        encoder, load_sec, resolved_revision = run_speechbrain(model_used, args.device)
 
         def diarize_fn(wav: Path) -> list[Turn]:
             return _speechbrain_turns(encoder, wav, args.num_speakers, args.cluster_threshold)
@@ -464,7 +573,11 @@ def main() -> None:
         "tag": args.tag or f"{args.backend}",
         "backend": args.backend,
         "model": model_used,
-        "revision": args.revision or None,  # reproducibility: pinned HF commit/tag
+        "revision": args.revision or None,  # reproducibility: OPERATOR-pinned HF commit/tag
+        # ACTUAL cached commit hash after load (#235 Codex review) — populated
+        # even when --revision was not passed, so the evidence always carries
+        # an immutable snapshot identifier instead of silently recording null.
+        "resolved_revision": resolved_revision,
         "device": args.device,
         "n_samples": len(ders),
         "der_corpus": der_corpus,  # duration-weighted corpus DER — the decision metric (#189)

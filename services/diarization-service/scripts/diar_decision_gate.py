@@ -99,9 +99,7 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _kind(row: dict[str, Any]) -> str:
-    explicit = (
-        row.get("dataset_kind") or row.get("fixture_kind") or row.get("benchmark_kind")
-    )
+    explicit = row.get("dataset_kind") or row.get("fixture_kind") or row.get("benchmark_kind")
     if explicit:
         return str(explicit)
     tag = str(row.get("tag", "")).lower()
@@ -137,24 +135,16 @@ def _privacy_value_findings(value: Any, *, location: str) -> list[str]:
         for key, nested in value.items():
             nested_location = f"{location}.{key}"
             if key in _DISALLOWED_CONTENT_KEYS and nested not in (None, "", [], {}):
-                findings.append(
-                    f"{nested_location} uses disallowed content field `{key}`"
-                )
+                findings.append(f"{nested_location} uses disallowed content field `{key}`")
             findings.extend(_privacy_value_findings(nested, location=nested_location))
     elif isinstance(value, list):
         for index, nested in enumerate(value):
-            findings.extend(
-                _privacy_value_findings(nested, location=f"{location}[{index}]")
-            )
+            findings.extend(_privacy_value_findings(nested, location=f"{location}[{index}]"))
     elif isinstance(value, str):
         lowered = value.lower()
         if any(marker in lowered for marker in _FILE_MARKERS):
             findings.append(f"{location} contains file-path-like value")
-        if (
-            _EMAIL_RE.search(value)
-            or _TC_OR_PHONE_RE.search(value)
-            or _TR_IBAN_RE.search(value)
-        ):
+        if _EMAIL_RE.search(value) or _TC_OR_PHONE_RE.search(value) or _TR_IBAN_RE.search(value):
             findings.append(f"{location} contains PII-shaped value")
     return findings
 
@@ -165,9 +155,7 @@ def _privacy_findings(rows: list[dict[str, Any]]) -> list[str]:
         for key, value in row.items():
             location = f"diarization[{index}].{key}"
             if key in _DISALLOWED_CONTENT_KEYS and value not in (None, "", [], {}):
-                findings.append(
-                    f"diarization[{index}] contains disallowed content field `{key}`"
-                )
+                findings.append(f"diarization[{index}] contains disallowed content field `{key}`")
             findings.extend(_privacy_value_findings(value, location=location))
     return findings
 
@@ -205,9 +193,7 @@ def _hard_policy_findings(row: dict[str, Any], *, index: int) -> list[str]:
 
     license_status = str(row.get("license_status", "")).lower()
     if license_status in {"forbidden", "rejected", "unknown-prod-risk"}:
-        findings.append(
-            f"row {index} license_status={license_status} is not acceptable"
-        )
+        findings.append(f"row {index} license_status={license_status} is not acceptable")
 
     for key in (
         "biometric_processing",
@@ -215,9 +201,7 @@ def _hard_policy_findings(row: dict[str, Any], *, index: int) -> list[str]:
         "voiceprint_enabled",
     ):
         if _bool_value(row, key) is True:
-            findings.append(
-                f"row {index} sets {key}=true; #161 decision gate is non-biometric"
-            )
+            findings.append(f"row {index} sets {key}=true; #161 decision gate is non-biometric")
 
     deployment_mode = str(row.get("deployment_mode", "")).lower()
     if deployment_mode in {"public-cloud", "third-party-saas", "external-api"}:
@@ -259,6 +243,13 @@ def _missing_pilot_metadata(row: dict[str, Any]) -> list[str]:
     }.items():
         if _metric_value(row, *keys) is None:
             missing.append(label)
+    # #235 (Codex review): a pilot row must carry SOME immutable model
+    # snapshot identifier — either an operator-pinned `revision` or the
+    # `resolved_revision` diar_matrix.py captures from the local HF cache
+    # after load. A bare model name with neither is not reproducible: the
+    # same name can silently point at different weights on a later run.
+    if not row.get("revision") and not row.get("resolved_revision"):
+        missing.append("revision or resolved_revision")
     return missing
 
 
@@ -269,15 +260,11 @@ def _pilot_integrity_findings(row: dict[str, Any], *, index: int) -> list[str]:
 
     license_status = str(row.get("license_status", "")).lower()
     if license_status and license_status not in APPROVED_LICENSE_STATUSES:
-        findings.append(
-            f"pilot row {index} license_status={license_status} is not approved"
-        )
+        findings.append(f"pilot row {index} license_status={license_status} is not approved")
 
     deployment_mode = str(row.get("deployment_mode", "")).lower()
     if deployment_mode and deployment_mode not in SELF_HOST_DEPLOYMENT_MODES:
-        findings.append(
-            f"pilot row {index} deployment_mode={deployment_mode} is not self-host"
-        )
+        findings.append(f"pilot row {index} deployment_mode={deployment_mode} is not self-host")
 
     evidence_hash = str(row.get("evidence_hash", ""))
     if evidence_hash and not _SHA256_RE.fullmatch(evidence_hash):
@@ -303,11 +290,7 @@ def _quality_findings(
 
     latency = _metric_value(row, "lat_max_ms", "latency_p95_ms", "p95_ms")
     max_latency = thresholds["maxLatencyMs"]
-    if (
-        isinstance(max_latency, int | float)
-        and latency is not None
-        and latency > max_latency
-    ):
+    if isinstance(max_latency, int | float) and latency is not None and latency > max_latency:
         findings.append(
             f"pilot latency {latency:.2f}ms exceeds threshold {float(max_latency):.2f}ms"
         )
@@ -321,14 +304,8 @@ def _quality_findings(
 
     n_samples = _metric_value(row, "n_samples")
     min_samples = thresholds["minSamples"]
-    if (
-        isinstance(min_samples, int)
-        and n_samples is not None
-        and n_samples < min_samples
-    ):
-        findings.append(
-            f"pilot n_samples {n_samples:.0f} is below minimum {min_samples}"
-        )
+    if isinstance(min_samples, int) and n_samples is not None and n_samples < min_samples:
+        findings.append(f"pilot n_samples {n_samples:.0f} is below minimum {min_samples}")
     return findings
 
 
@@ -350,6 +327,7 @@ def _summarize_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "backend": row.get("backend"),
         "model": row.get("model"),
         "revision": row.get("revision"),
+        "resolved_revision": row.get("resolved_revision"),
         "device": row.get("device"),
         "deployment_mode": row.get("deployment_mode"),
         "license_status": row.get("license_status"),
@@ -373,8 +351,21 @@ def evaluate_gate(
     max_latency_ms: float | None,
     max_peak_vram_delta_mb: float | None,
     min_samples: int | None,
+    backend: str | None = None,
 ) -> dict[str, Any]:
-    """Return a metadata-only diarization backend decision gate result."""
+    """Return a metadata-only diarization backend decision gate result.
+
+    `backend`, if given, restricts evaluation to rows whose `backend` field
+    matches (case-insensitive). #235 re-review: the default cross-backend
+    selection picks the row with the best quality SCORE (DER + speed + VRAM
+    combined), not necessarily the accepted backend — for a comparison set
+    where a faster/lighter backend fails the DER ceiling, that row can still
+    "win" the score and mask the failure. An explicit backend filter lets CI
+    machine-verify a specific acceptance claim (e.g. "pyannote's overlap
+    corpus DER passes") instead of relying on prose in the ADR.
+    """
+    if backend:
+        rows = [row for row in rows if str(row.get("backend", "")).lower() == backend.lower()]
     thresholds = _thresholds(
         max_der=max_der,
         max_rtf=max_rtf,
@@ -432,9 +423,7 @@ def evaluate_gate(
         findings.extend(integrity_findings)
         missing = _missing_pilot_metadata(row)
         if missing:
-            findings.append(
-                f"pilot row {index} is missing required metadata: {', '.join(missing)}"
-            )
+            findings.append(f"pilot row {index} is missing required metadata: {', '.join(missing)}")
         if not integrity_findings and not missing:
             complete_pilot_rows.append(row)
 
@@ -450,9 +439,7 @@ def evaluate_gate(
             "kinds": kinds,
             "thresholds": thresholds,
             "selectedDiarization": _summarize_row(
-                min(complete_pilot_rows, key=_quality_score)
-                if complete_pilot_rows
-                else None
+                min(complete_pilot_rows, key=_quality_score) if complete_pilot_rows else None
             ),
         }
 
@@ -476,15 +463,18 @@ def evaluate_gate(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Verify Faz 24 diarization backend decision gate"
-    )
+    parser = argparse.ArgumentParser(description="Verify Faz 24 diarization backend decision gate")
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--max-der", type=float, default=None)
     parser.add_argument("--max-rtf", type=float, default=None)
     parser.add_argument("--max-latency-ms", type=float, default=None)
     parser.add_argument("--max-peak-vram-delta-mb", type=float, default=None)
     parser.add_argument("--min-samples", type=int, default=None)
+    parser.add_argument(
+        "--backend",
+        default=None,
+        help="Restrict evaluation to a single backend's rows (#235 overlap acceptance gate)",
+    )
     args = parser.parse_args()
 
     result = evaluate_gate(
@@ -494,6 +484,7 @@ def main() -> int:
         max_latency_ms=args.max_latency_ms,
         max_peak_vram_delta_mb=args.max_peak_vram_delta_mb,
         min_samples=args.min_samples,
+        backend=args.backend,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["status"] == "pass" else 1

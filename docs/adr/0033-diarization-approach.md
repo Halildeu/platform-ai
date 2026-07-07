@@ -1,142 +1,260 @@
-# ADR-0033: Diarization Approach (pyannote vs alternative)
+# ADR-0033: Diarization approach
 
-- Status: **DRAFT — EVIDENCE PENDING (do NOT promote to ACCEPTED yet)**
-- Amended by: **ADR-0035 (2026-06-18)** — voiceprint constraint updated (KVKK m.6, legal-gated)
+- Status: **PROPOSED - OWNER REVIEW**
 - Date: 2026-06-17
-- Issue: `#161 [Faz24 T-B] STT kalite kanıtı — Türkçe WER + diarization [P0]`
-- Decision scope: which diarization approach the product commits to, and where it
-  runs (live vs post-processing), before real-meeting DER evidence exists.
-
-> **Discipline note (why this is still DRAFT).** A previous draft (PR #163) was
-> withdrawn on purpose: *"önce ÖLÇÜM, sonra karar ADR'si — maintainer'a veri
-> olmadan model seçimi sorulamaz"* (the #35 WER matrix → ADR-0031 order was
-> correct). This file therefore records the **candidate matrix, criteria, and the
-> measurement harness**, with measured cells filled only as the GPU sweep
-> produces them. It must not be promoted to ACCEPTED until the pyannote sweep
-> (n>1) and at least one measured alternative exist, and the real-meeting DER
-> (G-WER gate) is calibrated by a pilot.
+- Decision evidence updated: 2026-07-03 (revision-pinned re-measurement, #235)
+- Issue: `#161 [Faz24 T-B] STT quality evidence - Turkish WER + diarization`
+- Amended by: ADR-0035 (voiceprint remains legal-gated)
 
 ## Context
 
-Diarization ("who spoke when") is an industry-standard meeting-intelligence
-feature the product currently lacks. The #161 wedge is **Turkish quality**, so
-the diarization choice must be justified on measured Turkish performance, not on
-a model's reputation. Two hard constraints frame the decision:
+Faz 24 needs measured Turkish speaker diarization, not a model choice based on
+reputation. The decision must also respect two product constraints:
 
-1. **GPU is 8 GB** (RTX 4070; the "12 GB" in older capacity notes is wrong —
-   `nvidia-smi` reports 8188 MiB; finding carried from PR #163). STT
-   (`medium-int8` live + `large-v3-turbo` final, ADR-0031) plus Ollama already
-   press 8 GB. Diarization therefore cannot run as a third concurrent live model
-   → it is a **post-processing / batch** step, not a live path.
-2. **KVKK (ADR-0030):** diarization emits ANONYMOUS `SPEAKER_xx` labels by
-   default. **Amended by ADR-0035 (Karar 2, 2026-06-18):** voiceprint / biometric
-   enrolment is now **approved** for automatic speaker identification — but it is
-   biometric / special-category data (KVKK m.6), so **live processing is GATED on
-   the legal track** (explicit-consent framework + VERBİS/aydınlatma +
-   retention/erasure policy + opt-out fallback to manual labelling) — tracked in
-   **#168**. Code may be written; real-voiceprint processing must NOT go live
-   until that gate clears.
-   Until then, speaker→person linking stays anonymous + human-confirmed (see
-   "Speaker → person" below).
+1. The GPU host is an RTX 4070 with 8 GB VRAM. Diarization must not compete
+   continuously with live STT, final STT, and Ollama.
+2. Diarization output is anonymous `SPEAKER_xx` by default. Automatic identity
+   or voiceprint processing remains outside this decision and subject to the
+   ADR-0035 legal gate.
 
-## Candidate Matrix
+The original synthetic, overlap-free measurements were useful only for proving
+the harness. They were not used to select a backend. The selection below uses
+consented pilot speech plus a controlled real-voice overlap set, scored with
+`collar=0.25` and `skip_overlap=false`.
 
-`PENDING` = not yet measured under the reproducible fixture + RTX 4070 protocol
-(`scripts/diar_matrix.py`). Measured cells cite `docs/pr-diar-01-line-161-matrix-report.md`.
+## Measured candidates
 
-| Candidate | License | Gated model? | TR DER¹ | GPU0 total peak² | RTF | Notes |
-|---|---|---|---|---|---|---|
-| **pyannote 3.1** | MIT (model: gated, free) | yes (HF token) | 47.8%¹ | 2155 MB² | 0.024 | end-to-end pipeline |
-| **speechbrain ECAPA** | Apache-2.0 | **no** (free) | 54.6%¹ | **307 MB**² | **0.003** | 7× less GPU0-total², faster |
-| NeMo | Apache-2.0 | no | PENDING (adapter not wired) | PENDING | PENDING | heavier install; candidate only if pyannote fails target |
-| Cloud (Azure/Google) | commercial | n/a | not measured | n/a | n/a | **m.9 cross-border → ADR-0030 boundary**; rejected unless on-prem fails |
-| VAD-only fallback | — | no | n/a (no speaker sep.) | minimal | minimal | degraded fallback if no GPU model fits |
+All values are metadata-only. No audio, transcript, RTTM, participant name, or
+speaker identity is stored in this repository.
 
-> ¹ **synthetic-smoke, NOT a baseline DER (review #164).** Measured at the
-> dscore-standard `collar=0.25` (n=6) on `2026-06-17`, but on a synthetic fixture
-> whose per-speaker clips repeat byte-identically and never overlap. They measure
-> mainly over-segmentation, **not speaker confusion or overlap** — the hardest,
-> most product-relevant part of DER. (For reference, collar=0 gave 50.1% / 56.6%;
-> the collar moved both ~2pt but not the ordering.) A realistic fixture (distinct,
-> non-identical audio + overlap) and a real-meeting pilot will move absolute DER
-> and the pyannote↔speechbrain gap. **No ranking claim is drawn from these cells**;
-> they prove the harness runs and is deterministic, nothing more.
+### Consented pilot set
 
-> ² **VRAM = total GPU0 `memory.used` peak, NOT backend-isolated (review #189).**
-> Measured in an isolated `.venv-diar` (single process), so the "7× less" relative
-> read holds there, but the absolute MB includes anything else on GPU0. The current
-> `diar_matrix.py` also emits `peak_vram_delta_mb` (peak − pre-load baseline) and a
-> duration-weighted `der_corpus` (the real decision metric); both land in the
-> evidence on the next sweep. The 2026-06-17 cells predate those fields.
+| Backend | Corpus DER | RTF | p50 | Peak VRAM delta | Result |
+|---|---:|---:|---:|---:|---|
+| pyannote 3.1 | **17.88%** | 0.026 | 1739 ms | 2154 MB | Passes DER <= 30% |
+| SpeechBrain ECAPA | 23.14% | **0.005** | **292 ms** | **367 MB** | Passes DER <= 30% |
 
-Both running backends share one harness (same fixtures, same scorer, both on
-GPU). The #161 "pyannote vs alternatif" requirement is **met** in that both are
-wired and measurable. NeMo/cloud are compared on license/VRAM/KVKK only.
-Evidence: `docs/pr-diar-01-line-161-matrix-report.md`,
-`docs/evidence/diar-results-2026-06-17.jsonl`.
+Backed by `docs/evidence/diar-pilot-comparison-2026-07-03.jsonl` (both rows,
+real `resolved_revision` — #235 re-review P1: the prior table cited a
+SpeechBrain pilot number with no committed evidence file behind it).
 
-## Speaker → person mapping
+### Controlled real-voice overlap set
 
-`app/services/speaker_mapping.py` (no biometrics):
-- `summarize_speakers` — contextual facts per anonymous label (talk time, turns,
-  first-seen);
-- `apply_mapping` — overlays a **human-confirmed** `{SPEAKER_00: "Ayşe"}` mapping
-  while keeping the anonymous label canonical (reversible);
-- `suggest_mapping` — best-effort ordering heuristic vs a known attendee roster,
-  explicitly a suggestion to be human-reviewed, never automatic identification.
+The set contains three two-speaker fixtures built from consented, distinct
+speaker turns with deterministic overlap. Total evaluated audio is 81 seconds.
 
-> The "human-confirmed" requirement is a *code helper* today (suggest vs apply are
-> separate), but the actual UI/process enforcement that a human approves a mapping
-> before any name is persisted is a **separate contract**, not guaranteed by this
-> module alone (review #164, Codex). To be tracked as its own issue before any
-> name-linking ships.
+| Backend | Corpus DER | Mean DER | Max DER | RTF | p50 | Peak VRAM delta |
+|---|---:|---:|---:|---:|---:|---:|
+| pyannote 3.1 | **20.30%** | **19.20%** | 31.31% | 0.024 | 634 ms | 2234 MB |
+| SpeechBrain ECAPA | 33.14% | 33.80% | 37.57% | **0.006** | **107 ms** | **410 MB** |
+
+Backed by `docs/evidence/diar-overlap-results-2026-07-03.jsonl` (both rows,
+real `resolved_revision`); figures updated from an earlier informal run to
+match this committed evidence exactly.
+
+SpeechBrain is faster and lighter, but its overlap corpus DER exceeds the
+agreed 30% quality ceiling. Pyannote stays below that ceiling in both the pilot
+and overlap evaluations.
+
+**Ceiling scope (Codex review #235):** the accepted 30% ceiling is a
+**corpus-level** ceiling (`der_corpus`, duration-weighted across all fixtures
+in the set) — not a per-fixture ceiling. Pyannote's overlap `der_max` (the
+single worst fixture) is 31.31%, above 30%; its `der_corpus` (20.30%) is what
+the gate scores and what this decision is conditioned on. A per-fixture
+ceiling is not currently enforced by `diar_decision_gate.py` and is not
+proposed here — if one is wanted later, the gate needs an explicit
+`max-der-max`-style threshold added, not an implicit reading of this table.
 
 ## Decision
 
-Only the placement and identity decisions are firm now; **backend selection is
-deliberately NOT decided in this ADR** (review #164 — the synthetic smoke set
-cannot rank backends).
+1. **Placement:** run diarization as a post-processing batch step. It is not a
+   third continuously resident live model on the 8 GB GPU.
+2. **Primary backend:** use self-hosted
+   `pyannote/speaker-diarization-3.1` on CUDA. Accuracy is the primary product
+   criterion for #161, and pyannote is the only measured candidate that passes
+   the DER ceiling on both pilot and overlap evidence.
+3. **Fallback:** retain SpeechBrain ECAPA as an explicit resource-constrained
+   degraded-mode candidate. It is not the primary backend because its overlap
+   DER is 33.14% (see overlap table above).
+4. **Identity boundary:** keep anonymous speaker labels canonical. Human
+   confirmation is required before applying a person label. This ADR does not
+   enable embeddings, voiceprints, or automatic biometric identification —
+   voiceprint/biometric processing (KVKK m.6, special-category data) stays
+   gated behind ADR-0035's legal track (#168) regardless of this decision.
+5. **Scheduling boundary:** do not co-load pyannote with the full STT and Ollama
+   model set without an explicit GPU capacity check. The measured pyannote VRAM
+   delta is about 2.2 GB.
 
-1. **Placement (FIRM):** diarization runs as **post-processing batch**, not a
-   live model (8 GB constraint). Backend-independent, settled.
-2. **Backend (UNDECIDED):** pyannote 3.1 and speechbrain ECAPA are both **wired
-   and measurable candidates**. No primary is chosen here. Their trade-off space
-   is recorded — speechbrain costs 7× less GPU0-total VRAM (307 MB²) and is 9× faster, which
-   matters under the 8 GB budget; pyannote is a single end-to-end pipeline — but
-   which one wins on Turkish DER is **open until a collar=0.25 measurement on a
-   realistic fixture + pilot**. The synthetic cells do not settle even the
-   relative ranking (see ¹).
-3. **Identity (FIRM):** anonymous labels canonical; names only via
-   human-confirmed overlay (KVKK).
+The existing `speaker_mapping.py` helpers remain within that boundary:
+`summarize_speakers` reports anonymous talk-time/turn facts, `suggest_mapping`
+is advisory only, and `apply_mapping` is reserved for a human-confirmed
+overlay. Anonymous labels remain the canonical reversible representation.
 
-## Explicit Non-Decision
+## Decision gate
 
-- No backend is locked. A single n=1 smoke DER (45.04%) is **not** a decision-grade
-  number — it reflects a synthetic, overlap-free fixture (pyannote may misestimate
-  speaker count) and one sample.
-- No DER target is asserted yet; it is set with the pilot (G-WER gate).
+The metadata-only selected-backend row is:
 
-## Reopen / Promote-to-ACCEPTED Triggers
+`docs/evidence/diar-decision-pilot-2026-07-03.jsonl`
 
-Promote only when ALL hold:
-- pyannote + speechbrain harness runs (n≥5) — ✅ done (n=6, synthetic-smoke);
-- collar=0.25 scoring — ✅ done (now the default; 47.8% / 54.6% on the smoke set);
-- the same on a **realistic fixture** (overlap + distinct, non-identical speaker
-  audio) — ⬜ pending (current cells are still synthetic-smoke);
-- a real-meeting (pilot) DER calibrates absolute numbers (gated on go-live #59 /
-  consent, like ADR-0031's pilot leg) — ⬜ pending;
-- chosen backend meets the agreed diarization DER target (G-WER) — ⬜ pending.
+The metadata-only overlap comparison is:
 
-## Cross-AI Consensus
+`docs/evidence/diar-overlap-results-2026-07-03.jsonl`
 
-Required, not yet complete: this DRAFT (Cursor Fable 5) + independent reviewer +
-human/operator approval all pending.
+Both carry a real `resolved_revision` (the HF commit hash actually backing the
+cached model at measurement time), addressing Halil's #235 finding that the
+prior 2026-07-02 rows had `revision=null` with no gate enforcement. The
+superseded 2026-07-02 files remain in git history for audit but are no longer
+the evidence this gate is evaluated against.
+
+It is evaluated with:
+
+```powershell
+python services/diarization-service/scripts/diar_decision_gate.py `
+  --evidence docs/evidence/diar-decision-pilot-2026-07-03.jsonl `
+  --max-der 0.30 `
+  --max-rtf 0.05 `
+  --max-latency-ms 3000 `
+  --max-peak-vram-delta-mb 2500 `
+  --min-samples 3
+```
+
+Linux/macOS (bash) equivalent:
+
+```bash
+python services/diarization-service/scripts/diar_decision_gate.py \
+  --evidence docs/evidence/diar-decision-pilot-2026-07-03.jsonl \
+  --max-der 0.30 \
+  --max-rtf 0.05 \
+  --max-latency-ms 3000 \
+  --max-peak-vram-delta-mb 2500 \
+  --min-samples 3
+```
+
+Expected result: `status=pass`, `findingCount=0`, selected backend `pyannote`.
+
+**Pilot "both candidates" acceptance (#235 re-review):** the pilot table's
+SpeechBrain row above is backed by a committed row with real
+`resolved_revision`, not prose alone:
+
+```bash
+python services/diarization-service/scripts/diar_decision_gate.py \
+  --evidence docs/evidence/diar-pilot-comparison-2026-07-03.jsonl \
+  --backend pyannote \
+  --max-der 0.30 \
+  --max-rtf 0.05 \
+  --max-latency-ms 3000 \
+  --max-peak-vram-delta-mb 2500 \
+  --min-samples 3
+```
+
+Expected result: `status=pass`, `findingCount=0`, selected backend `pyannote`.
+(`diar-pilot-comparison-2026-07-03.jsonl` is the two-backend comparison set;
+`diar-decision-pilot-2026-07-03.jsonl` above remains the single accepted-row
+file the go-live decision is conditioned on — the `--backend pyannote` filter
+is what makes the two consistent even though the comparison file's unfiltered
+selection also happens to pick SpeechBrain here, same masking risk as
+overlap, harmlessly, since SpeechBrain's own pilot DER is also under 30%.)
+
+**Overlap acceptance (#235 re-review):** the "pyannote overlap corpus DER <=
+30%" claim above is machine-verified with `--backend pyannote`, not left as
+prose. Without a backend filter, the gate's cross-backend selection picks
+whichever row has the best combined DER+speed+VRAM score — SpeechBrain's
+speed/VRAM advantage lets it "win" that score despite failing the DER
+ceiling, which would report the wrong backend's failure. The filter isolates
+the actual accepted-backend claim:
+
+```bash
+python services/diarization-service/scripts/diar_decision_gate.py \
+  --evidence docs/evidence/diar-overlap-results-2026-07-03.jsonl \
+  --backend pyannote \
+  --max-der 0.30 \
+  --max-rtf 0.05 \
+  --max-latency-ms 3000 \
+  --max-peak-vram-delta-mb 2500 \
+  --min-samples 3
+```
+
+Expected result: `status=pass`, `findingCount=0`, selected backend `pyannote`.
+Both commands now run in CI (`.github/workflows/ci.yml`, `repo-gates` job) so
+a future evidence or threshold regression fails the build instead of relying
+on this document staying accurate.
+
+This gate covers only the source-side #161 backend decision. It does not enable
+production, direct STT, voiceprint, biometric identity, or legal approval.
 
 ## Consequences
 
-Positive: candidate matrix + criteria + measurement harness are explicit; the
-8 GB and KVKK constraints are recorded; an alternative is genuinely measurable,
-not hand-waved.
+Positive:
 
-Negative: backend choice stays provisional until the GPU sweep + alternative +
-pilot land; absolute DER cannot be claimed yet.
+- The primary backend is selected from measured Turkish pilot and overlap data.
+- The quality ceiling, GPU cost, and privacy posture are explicit.
+- SpeechBrain remains available as a measured fallback rather than being
+  discarded.
+
+Negative:
+
+- Pyannote uses more VRAM and is slower than SpeechBrain.
+- Its gated Hugging Face model requires controlled token provisioning.
+- The measured rows now carry a real `resolved_revision` captured from the
+  local cache at measurement time, but no explicit `--revision` was pinned
+  during the run itself. Production packaging must still pin the model
+  revision/hash under the repository model-versioning rule; this does not
+  change the measured backend choice.
+
+## Acceptance
+
+The prior promotion triggers are now satisfied:
+
+- pyannote and SpeechBrain use the same GPU measurement harness;
+- `collar=0.25`, `skip_overlap=false`;
+- real pilot DER exists for both candidates, committed with real
+  `resolved_revision` in `docs/evidence/diar-pilot-comparison-2026-07-03.jsonl`
+  (#235 re-review: previously only asserted in prose);
+- a distinct real-voice overlap set exists for both candidates, committed in
+  `docs/evidence/diar-overlap-results-2026-07-03.jsonl`;
+- pyannote meets the accepted 30% corpus DER ceiling on both sets, and this is
+  machine-gated (`--backend pyannote`) in CI, not just documented;
+- the canonical G-WER/DER gate passed with WER 6.47% and pyannote DER 17.88%.
+
+Owner review is the final step before changing this ADR status from PROPOSED to
+ACCEPTED and closing #161.
+
+## Cross-AI Consensus
+
+Halildeu (Cross-AI review, PR #235, 2026-07-03): CHANGES_REQUESTED — evidence
+model revision was null and the gate did not enforce it (both addressed in
+this revision via `diar_matrix.py`'s `resolved_revision` capture and
+`diar_decision_gate.py`'s revision-or-resolved-revision requirement), plus the
+corpus-vs-per-fixture DER ceiling wording above.
+
+Update (2026-07-03): fresh pilot + overlap measurement completed on the real
+GPU host with the fixed `diar_matrix.py`. `resolved_revision` now populates
+for both backends (pyannote resolved via the `~/.cache/torch/pyannote`
+fallback added for this fix). `diar_decision_gate.py` re-run against
+`docs/evidence/diar-decision-pilot-2026-07-03.jsonl` returns `status=pass`,
+`findingCount=0`, selected backend `pyannote`. Awaiting Halil's re-review.
+
+Re-review (2026-07-03, Codex cross-AI, thread 019f2877): REVISE — 3 new
+blocking findings + 1 non-blocking:
+
+1. CI's diarization step only re-checked that the old synthetic snapshot
+   stays blocked; it never gated the accepted evidence. Fixed: two new
+   `repo-gates` CI steps run the gate against the accepted pilot and overlap
+   evidence and require `status=pass`/`backend=pyannote`.
+2. The "pyannote overlap corpus DER <= 30%" claim was prose-only; unfiltered
+   cross-backend selection can mask a DER failure behind a faster backend's
+   better combined score. Fixed: `diar_decision_gate.py` gained an optional
+   `--backend` filter, used by both the ADR command and the new CI step.
+3. "Real pilot DER exists for both candidates" had no committed SpeechBrain
+   pilot evidence backing it. Fixed: re-measured on the GPU host and
+   committed `docs/evidence/diar-pilot-comparison-2026-07-03.jsonl` (both
+   backends, real `resolved_revision`); the pilot table above now matches
+   this file exactly.
+4. (non-blocking) `resolved_model_revision()` could return the wrong cached
+   revision's hash when an explicit `--revision` was requested but a
+   different revision (e.g. "main") sorted first. Fixed: it now accepts the
+   requested revision and prefers an exact match; doesn't change today's
+   evidence (`revision` is null on all committed rows).
+
+All four addressed in commit `7995e8a` (code/CI) plus the pilot-comparison
+evidence commit above. Awaiting Halil's re-review.
