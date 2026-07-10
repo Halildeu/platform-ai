@@ -1,6 +1,6 @@
 """meeting-service aggregate-ingestion client — #244 AI-1 (Verdict A).
 
-Calls platform-backend meeting-service's `POST /internal/v1/meetings/{meetingId}
+Calls platform-backend meeting-service's `POST /api/v1/internal/meetings/{meetingId}
 /analysis-results` (BE-1) after `/analyze` completes, so the analysis becomes
 durable in meeting-service instead of living only in the synchronous HTTP
 response. Best-effort by design (see `submit_analysis_result`): a persistence
@@ -168,7 +168,10 @@ def submit_analysis_result(
         analysis_run_id=analysis_run_id,
         generated_at=generated_at,
     )
-    url = f"{settings.meeting_service_base_url}/internal/v1/meetings/{meeting_id}/analysis-results"
+    url = (
+        f"{settings.meeting_service_base_url}"
+        f"/api/v1/internal/meetings/{meeting_id}/analysis-results"
+    )
 
     last_error: Exception | None = None
     for attempt in range(1, settings.ingestion_max_attempts + 1):

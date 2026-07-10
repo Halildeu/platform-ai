@@ -62,7 +62,7 @@ def _ingestion_response(status: int, **body: object) -> httpx.Response:
         status,
         json=body,
         request=httpx.Request(
-            "POST", f"{MEETING_SERVICE_URL}/internal/v1/meetings/x/analysis-results"
+            "POST", f"{MEETING_SERVICE_URL}/api/v1/internal/meetings/x/analysis-results"
         ),
     )
 
@@ -152,7 +152,7 @@ def test_success_sends_bearer_and_idempotency_key_matching_body(
     assert outcome is IngestionOutcome.SUCCESS
     ingestion_call = calls[-1]
     url, kwargs = ingestion_call
-    assert url == f"{MEETING_SERVICE_URL}/internal/v1/meetings/m-1/analysis-results"
+    assert url == f"{MEETING_SERVICE_URL}/api/v1/internal/meetings/m-1/analysis-results"
     assert kwargs["headers"]["Authorization"] == "Bearer fake-token"
     idempotency_key = kwargs["headers"]["Idempotency-Key"]
     assert kwargs["json"]["analysis_run_id"] == idempotency_key

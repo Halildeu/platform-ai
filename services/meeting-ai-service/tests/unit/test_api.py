@@ -164,7 +164,7 @@ def test_analyze_with_meeting_id_calls_ingestion_endpoint(monkeypatch) -> None: 
         )
     assert resp.status_code == 200
     assert "http://keycloak/token" in calls
-    assert "http://meeting-service:8080/internal/v1/meetings/m-1/analysis-results" in calls
+    assert "http://meeting-service:8080/api/v1/internal/meetings/m-1/analysis-results" in calls
 
 
 def test_analyze_ingestion_failure_does_not_fail_response(monkeypatch) -> None:  # type: ignore[no-untyped-def]
