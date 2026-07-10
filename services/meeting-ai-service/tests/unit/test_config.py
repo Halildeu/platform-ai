@@ -38,3 +38,33 @@ def test_redaction_disable_allowed_only_on_mock() -> None:
     assert s.redact_pii is False
     # Real backends with redaction left on are fine too.
     assert Settings(backend="ollama", redact_pii=True).redact_pii is True
+
+
+def test_ingestion_enabled_requires_credentials() -> None:
+    """#244 AI-1: fail closed at startup, not on the first ingestion call."""
+    with pytest.raises(ValidationError):
+        Settings(ingestion_enabled=True)
+
+
+def test_ingestion_enabled_with_full_credentials_is_valid() -> None:
+    s = Settings(
+        ingestion_enabled=True,
+        meeting_service_token_url="http://keycloak/token",
+        meeting_service_client_id="meeting-ai-service",
+        meeting_service_client_secret="s3cr3t",
+    )
+    assert s.ingestion_enabled is True
+
+
+def test_ingestion_disabled_does_not_require_credentials() -> None:
+    assert Settings().ingestion_enabled is False
+
+
+def test_effective_prompt_version_defaults_per_backend() -> None:
+    assert Settings(backend="mock").effective_prompt_version == "mock-v1"
+    assert Settings(backend="ollama").effective_prompt_version == "ollama-v1"
+
+
+def test_effective_prompt_version_explicit_override_wins() -> None:
+    s = Settings(backend="mock", prompt_version="custom-v3")
+    assert s.effective_prompt_version == "custom-v3"

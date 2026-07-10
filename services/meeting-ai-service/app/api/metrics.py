@@ -55,6 +55,12 @@ kvkk_audit_event_total = Counter(
     ["action", "result"],
 )
 
+mai_ingestion_total = Counter(
+    "mai_ingestion_total",
+    "meeting-service aggregate-ingestion attempts (#244 AI-1)",
+    ["outcome"],
+)
+
 
 @router.get("/metrics", summary="Prometheus metrics endpoint")
 def metrics() -> Response:

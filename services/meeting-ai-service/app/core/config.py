@@ -36,6 +36,23 @@ class Settings(BaseSettings):
       MAI_OLLAMA_TOP_P      0.9
       MAI_OLLAMA_SEED       (unset = random; set int for reproducible eval)
       MAI_OLLAMA_KEEP_ALIVE 5m (unload idle model → free shared GPU VRAM)
+      MAI_INGESTION_ENABLED  False (default — #244 AI-1, opt-in like #184's
+                              streaming.enabled; meeting-service persistence
+                              stays off until GW/SEC provisions the service
+                              token and network path)
+      MAI_MEETING_SERVICE_BASE_URL      http://meeting-service:8080 (default)
+      MAI_MEETING_SERVICE_TOKEN_URL     Keycloak token endpoint (no default —
+                                        required when ingestion is enabled)
+      MAI_MEETING_SERVICE_CLIENT_ID     Keycloak client id for the
+                                        client_credentials grant (GW/SEC-provisioned)
+      MAI_MEETING_SERVICE_CLIENT_SECRET Keycloak client secret (GW/SEC-provisioned,
+                                        read from a mounted secret, never logged)
+      MAI_MEETING_SERVICE_SCOPE         meeting:analysis-result:write (default —
+                                        must match #244 BE-1's required JWT scope)
+      MAI_INGESTION_TIMEOUT_SEC         10 (default — per-attempt HTTP timeout)
+      MAI_INGESTION_MAX_ATTEMPTS        3 (default — retry-safe per #244 AI-1)
+      MAI_PROMPT_VERSION                backend-specific default (mock-v1 /
+                                        ollama-v1) — see Settings.prompt_version
     """
 
     model_config = SettingsConfigDict(
@@ -71,6 +88,17 @@ class Settings(BaseSettings):
     ollama_seed: int | None = Field(default=None)
     ollama_keep_alive: str = Field(default="5m")
 
+    # #244 AI-1 — meeting-service aggregate-ingestion client (default-off).
+    ingestion_enabled: bool = Field(default=False)
+    meeting_service_base_url: str = Field(default="http://meeting-service:8080")
+    meeting_service_token_url: str = Field(default="")
+    meeting_service_client_id: str = Field(default="")
+    meeting_service_client_secret: str = Field(default="")
+    meeting_service_scope: str = Field(default="meeting:analysis-result:write")
+    ingestion_timeout_sec: int = Field(default=10, ge=1, le=120)
+    ingestion_max_attempts: int = Field(default=3, ge=1, le=10)
+    prompt_version: str | None = Field(default=None)
+
     def ollama_options(self) -> dict[str, object]:
         """Decoding options for Ollama `/api/generate` (deterministic extraction).
 
@@ -98,6 +126,37 @@ class Settings(BaseSettings):
         if self.backend == "ollama":
             return self.ollama_model
         return self.model_name
+
+    @property
+    def effective_prompt_version(self) -> str:
+        """Prompt-contract version for provenance (#244 promptVersion field).
+
+        Explicit `MAI_PROMPT_VERSION` wins; otherwise a stable per-backend
+        default so `mock` and `ollama` runs are still distinguishable in
+        meeting-service's ingested rows without requiring an env var.
+        """
+        if self.prompt_version:
+            return self.prompt_version
+        return f"{self.backend}-v1"
+
+    @model_validator(mode="after")
+    def _enforce_ingestion_credentials_when_enabled(self) -> Settings:
+        """#244 AI-1: fail closed at startup, not on the first ingestion call.
+
+        Mirrors `_enforce_kvkk_redaction_boundary` below — a missing
+        credential should be a deploy-time config error, not a runtime
+        surprise discovered only when the first meeting finishes.
+        """
+        if self.ingestion_enabled and not (
+            self.meeting_service_token_url
+            and self.meeting_service_client_id
+            and self.meeting_service_client_secret
+        ):
+            raise ValueError(
+                "MAI_INGESTION_ENABLED=True requires MAI_MEETING_SERVICE_TOKEN_URL, "
+                "MAI_MEETING_SERVICE_CLIENT_ID, and MAI_MEETING_SERVICE_CLIENT_SECRET"
+            )
+        return self
 
     @model_validator(mode="after")
     def _enforce_kvkk_redaction_boundary(self) -> Settings:

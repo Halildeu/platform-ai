@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -121,3 +122,81 @@ def test_analyze_nonmock_residual_pii_blocked_422(monkeypatch) -> None:  # type:
     with TestClient(app) as client:
         resp = client.post("/analyze", json={"transcript": "Kayıt 01234567890 girildi."})
     assert resp.status_code == 422
+
+
+def _set_ingestion_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MAI_INGESTION_ENABLED", "True")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_BASE_URL", "http://meeting-service:8080")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_TOKEN_URL", "http://keycloak/token")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_ID", "meeting-ai-service")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_SECRET", "s3cr3t")
+
+
+def test_analyze_with_meeting_id_calls_ingestion_endpoint(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # #244 AI-1: a successful /analyze with a meeting_id + session_id triggers
+    # a best-effort call to meeting-service's BE-1 endpoint.
+    _set_ingestion_env(monkeypatch)
+    calls: list[str] = []
+
+    def _post(url: str, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(url)
+        if url == "http://keycloak/token":
+            return httpx.Response(
+                200,
+                json={"access_token": "tok", "expires_in": 300},
+                request=httpx.Request("POST", url),
+            )
+        return httpx.Response(
+            200,
+            json={"analysis_run_id": "x", "meeting_id": "m-1", "replayed": False},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", _post)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze",
+            json={
+                "transcript": "Bütçe artışı onaylandı.",
+                "meeting_id": "m-1",
+                "session_id": "SES-1",
+            },
+        )
+    assert resp.status_code == 200
+    assert "http://keycloak/token" in calls
+    assert "http://meeting-service:8080/internal/v1/meetings/m-1/analysis-results" in calls
+
+
+def test_analyze_ingestion_failure_does_not_fail_response(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Best-effort: meeting-service being unreachable must not turn a valid
+    # analysis into a failed /analyze response.
+    _set_ingestion_env(monkeypatch)
+    monkeypatch.setenv("MAI_INGESTION_MAX_ATTEMPTS", "1")
+
+    def _boom(*a, **k):  # type: ignore[no-untyped-def]
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "post", _boom)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze",
+            json={
+                "transcript": "Bütçe artışı onaylandı.",
+                "meeting_id": "m-1",
+                "session_id": "SES-1",
+            },
+        )
+    assert resp.status_code == 200
+    assert len(resp.json()["summary"]) > 0
+
+
+def test_analyze_without_meeting_id_skips_ingestion(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _set_ingestion_env(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(httpx, "post", lambda url, **k: calls.append(url))  # type: ignore[func-returns-value]
+
+    with TestClient(app) as client:
+        resp = client.post("/analyze", json={"transcript": "Bütçe artışı onaylandı."})
+
+    assert resp.status_code == 200
+    assert calls == []

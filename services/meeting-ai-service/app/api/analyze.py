@@ -16,12 +16,14 @@ from app.api.metrics import (
     AnalyzeResult,
     mai_analyze_duration_seconds,
     mai_analyze_total,
+    mai_ingestion_total,
     mai_pii_redaction_total,
     mai_transcript_chars_total,
 )
 from app.core.config import Settings, get_settings
 from app.models.schemas import AnalyzeRequest, AnalyzeResponse
 from app.services.analyze import BackendUnavailableError, MeetingAnalysisService, get_service
+from app.services.ingestion import get_token_client, submit_analysis_result
 from app.services.redact import RedactionError
 
 router = APIRouter()
@@ -139,5 +141,20 @@ async def analyze_endpoint(
     mai_transcript_chars_total.labels(backend=settings.backend).inc(len(transcript))
     if result.redaction_count:
         mai_pii_redaction_total.labels(backend=settings.backend).inc(result.redaction_count)
+
+    # #244 AI-1: best-effort persist to meeting-service. Never blocks or fails
+    # this response — the analysis the user is waiting on is already valid
+    # even if the durable-store call below fails (logged + metriced there).
+    if settings.ingestion_enabled:
+        outcome = await run_in_threadpool(
+            submit_analysis_result,
+            settings,
+            get_token_client(settings),
+            meeting_id=body.meeting_id,
+            session_id=body.session_id,
+            transcript=transcript,
+            result=result,
+        )
+        mai_ingestion_total.labels(outcome=outcome.value).inc()
 
     return result
