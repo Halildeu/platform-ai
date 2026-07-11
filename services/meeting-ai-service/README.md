@@ -127,6 +127,55 @@ MAI_BACKEND=ollama python scripts/intel_eval.py \
 - `POST /analyze` — JSON `{transcript, meeting_id?, session_id?}` → `AnalyzeResponse`
 - `GET /health`, `GET /metrics` (`mai_*`, `kvkk_*`)
 
+## Durable analysis-result delivery (#247)
+
+When `MAI_INGESTION_ENABLED=true`, a successful `/analyze` call is committed to an
+encrypted local SQLite-WAL outbox before the HTTP response returns. Network delivery
+to meeting-service runs in a lifespan worker, so Keycloak/meeting-service latency is
+not added to the user-visible analysis path. The same `analysisRunId` is reused for
+every attempt and sent as `Idempotency-Key`; `200` replay and `201` create both ACK
+the local row. Retryable network/401/429/5xx results use exponential backoff and
+jitter. Terminal 4xx or the attempt limit moves the encrypted row to DLQ.
+
+The outbox contains no raw transcript. It stores the transcript SHA-256 and the
+already-redacted analysis payload. That payload is still sensitive and is encrypted
+with AES-256-GCM. No plaintext fallback or process-generated key exists.
+
+Required configuration when enabled:
+
+- `MAI_MEETING_SERVICE_BASE_URL`
+- `MAI_MEETING_SERVICE_TOKEN_URL`
+- `MAI_MEETING_SERVICE_CLIENT_ID`
+- `MAI_MEETING_SERVICE_CLIENT_SECRET` (Vault/ESO or host secret injection)
+- `MAI_INGESTION_STORE_PATH` (absolute, local persistent disk; not NFS/SMB)
+- `MAI_INGESTION_ACTIVE_KEY_ID`
+- `MAI_INGESTION_ENCRYPTION_KEYS_JSON` — secret JSON keyring, values are base64
+  encoded 32-byte AES keys, for example `{"2026-q3":"<base64>"}`
+
+Key rotation is additive: inject old + new keys, switch `ACTIVE_KEY_ID` to the new
+key, drain/requeue old rows, then remove the old key. Startup fails closed while any
+row references a missing key. The current SQLite adapter supports multiple worker
+processes on one local filesystem via `BEGIN IMMEDIATE` + leases; horizontal
+multi-host execution requires replacing the store adapter with shared PostgreSQL,
+Kafka, or durable Redis rather than putting SQLite on network storage.
+
+Metadata-only health is exposed under `/health.analysis_delivery`; Prometheus emits
+queue depth, oldest age, enqueue, retry, delivered/replayed, and DLQ counters. To
+inspect bounded DLQ metadata and requeue one operator-reviewed row without printing
+payload content:
+
+```bash
+cd services/meeting-ai-service
+python scripts/requeue_analysis_delivery.py --list-dead --limit 100
+python scripts/requeue_analysis_delivery.py --analysis-run-id <uuid>
+```
+
+Service credential rotation is a secret-injection operation: publish the replacement
+client secret through Vault/ESO (or the Windows host secret channel), restart the
+service so settings are refreshed, and monitor the queue/DLQ until delivery catches
+up. A revoked credential is never persisted; repeated `401` attempts retain the
+encrypted payload and eventually move it to DLQ for explicit operator requeue.
+
 ## Run (skeleton)
 
 ```bash

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import json
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -104,6 +108,7 @@ def test_health_ok() -> None:
         resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+    assert resp.json()["analysis_delivery"]["status"] == "disabled"
 
 
 def test_metrics_endpoint() -> None:
@@ -121,3 +126,61 @@ def test_analyze_nonmock_residual_pii_blocked_422(monkeypatch) -> None:  # type:
     with TestClient(app) as client:
         resp = client.post("/analyze", json={"transcript": "Kayıt 01234567890 girildi."})
     assert resp.status_code == 422
+
+
+def _configure_ingestion(monkeypatch, tmp_path: Path, *, max_rows: int = 10) -> None:  # type: ignore[no-untyped-def]
+    keyring = json.dumps({"v1": base64.b64encode(b"K" * 32).decode()})
+    monkeypatch.setenv("MAI_INGESTION_ENABLED", "true")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_TOKEN_URL", "http://127.0.0.1:9/token")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_ID", "meeting-ai")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("MAI_INGESTION_STORE_PATH", str(tmp_path / "outbox.sqlite3"))
+    monkeypatch.setenv("MAI_INGESTION_ACTIVE_KEY_ID", "v1")
+    monkeypatch.setenv("MAI_INGESTION_ENCRYPTION_KEYS_JSON", keyring)
+    monkeypatch.setenv("MAI_INGESTION_TIMEOUT_SEC", "0.1")
+    monkeypatch.setenv("MAI_INGESTION_LEASE_SEC", "1")
+    monkeypatch.setenv("MAI_INGESTION_SHUTDOWN_GRACE_SEC", "0.1")
+    monkeypatch.setenv("MAI_INGESTION_MAX_ROWS", str(max_rows))
+
+
+def test_analyze_durably_enqueues_before_returning(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    _configure_ingestion(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze",
+            json={
+                "transcript": "Bütçe kararlaştırıldı.",
+                "meeting_id": "11111111-1111-4111-8111-111111111111",
+                "session_id": "session-1",
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.headers["X-Analysis-Delivery"] == "queued"
+    assert len(resp.headers["X-Analysis-Run-Id"]) == 36
+
+
+def test_analyze_requires_canonical_ids_when_delivery_enabled(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    _configure_ingestion(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        missing = client.post("/analyze", json={"transcript": "Bir metin."})
+        invalid = client.post(
+            "/analyze",
+            json={"transcript": "Bir metin.", "meeting_id": "not-a-uuid", "session_id": "s"},
+        )
+    assert missing.status_code == 422
+    assert invalid.status_code == 422
+
+
+def test_analyze_fails_closed_when_durable_queue_is_full(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    _configure_ingestion(monkeypatch, tmp_path, max_rows=1)
+    payload = {
+        "transcript": "Bütçe kararlaştırıldı.",
+        "meeting_id": "11111111-1111-4111-8111-111111111111",
+        "session_id": "session-1",
+    }
+    with TestClient(app) as client:
+        first = client.post("/analyze", json=payload)
+        second = client.post("/analyze", json=payload)
+    assert first.status_code == 200
+    assert second.status_code == 503
+    assert second.headers["Retry-After"] == "30"

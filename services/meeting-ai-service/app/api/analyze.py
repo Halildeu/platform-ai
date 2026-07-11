@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from starlette.concurrency import run_in_threadpool
 
 from app.api.metrics import (
@@ -21,7 +21,12 @@ from app.api.metrics import (
 )
 from app.core.config import Settings, get_settings
 from app.models.schemas import AnalyzeRequest, AnalyzeResponse
+from app.services.analysis_delivery import (
+    AnalysisDeliveryContractError,
+    AnalysisDeliveryRuntime,
+)
 from app.services.analyze import BackendUnavailableError, MeetingAnalysisService, get_service
+from app.services.durable_outbox import OutboxError, OutboxFullError
 from app.services.redact import RedactionError
 
 router = APIRouter()
@@ -40,6 +45,7 @@ def _correlation_id(request: Request) -> str:
 )
 async def analyze_endpoint(
     request: Request,
+    response: Response,
     body: AnalyzeRequest,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> AnalyzeResponse:
@@ -132,12 +138,60 @@ async def analyze_endpoint(
             "action_items": len(result.action_items),
         },
     )
-    mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.SUCCESS.value).inc()
     mai_analyze_duration_seconds.labels(backend=settings.backend).observe(
         result.elapsed_ms / 1000.0
     )
     mai_transcript_chars_total.labels(backend=settings.backend).inc(len(transcript))
     if result.redaction_count:
         mai_pii_redaction_total.labels(backend=settings.backend).inc(result.redaction_count)
+
+    delivery: AnalysisDeliveryRuntime = request.app.state.analysis_delivery
+    try:
+        analysis_run_id = await delivery.enqueue_analysis(
+            meeting_id=body.meeting_id,
+            session_id=body.session_id,
+            transcript=transcript,
+            result=result,
+        )
+    except AnalysisDeliveryContractError as exc:
+        logger.warning(
+            "Durable analysis delivery contract rejected",
+            extra={**log_extra, "err_class": type(exc).__name__},
+        )
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.CLIENT_ERROR.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except OutboxFullError as exc:
+        logger.error("Durable analysis delivery queue full", extra=log_extra)
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.DELIVERY_ERROR.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Durable analysis delivery queue is full; retry after operator recovery",
+            headers={"Retry-After": "30"},
+        ) from exc
+    except OutboxError as exc:
+        logger.error(
+            "Durable analysis delivery enqueue failed",
+            extra={**log_extra, "err_class": type(exc).__name__},
+        )
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.DELIVERY_ERROR.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Durable analysis delivery is unavailable",
+            headers={"Retry-After": "5"},
+        ) from exc
+    if analysis_run_id is not None:
+        response.headers["X-Analysis-Run-Id"] = analysis_run_id
+        response.headers["X-Analysis-Delivery"] = "queued"
+
+    mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.SUCCESS.value).inc()
 
     return result
