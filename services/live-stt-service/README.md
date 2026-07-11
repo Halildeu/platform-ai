@@ -87,9 +87,12 @@ Varsayılan canlı UX ayarları:
 | `STT_SILENCE_RMS` / `STT_MIN_SPEECH_RMS` | `0.0005` / `0.0005` | Sessizlik/konuşma hysteresis bandı; WebAudio mikrofon RMS seviyesiyle uyumlu |
 
 Partial event'ler aynı `seq` ile gelir; client aynı transcript satırını
-günceller. `confirmed`/`tentative` alanları consumer tarafında ayrı
-stil vermek için ayrılmıştır. Final event doğru/kalıcı metni üretir ve draft
-satırını netleştirir. Sunucu logları transcript içeriği yazmaz; debug event'ler
+günceller. Ardışık rolling pencerelerde yerel uzlaşma gören kelimeler
+`confirmed`, hâlâ düzeltilebilir kuyruk `tentative` alanında taşınır. Consumer
+`ready.partial_mode=stable-v1` yeteneğini gördüğünde bu iki alanı birleştirir
+fakat farklı hipotezleri yeniden append etmez. Final event doğru/kalıcı metni
+üretir ve draft satırını netleştirir. Sunucu logları
+transcript içeriği yazmaz; debug event'ler
 `STT_STREAM_DEBUG=true` olmadıkça kapalıdır ve açıkken de transcript-free kalır.
 Bu ayarlar `app.core.config.Settings` içinde bounded Pydantic alanlarıdır:
 `STT_MIN_SPEECH_RMS >= STT_SILENCE_RMS`,

@@ -57,6 +57,7 @@ def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> Non
     assert [first["type"], second["type"], ready["type"]] == ["loading", "loading", "ready"]
     assert first["stage"] == "live_model"
     assert second["stage"] == "final_model"
+    assert ready["partial_mode"] == "stable-v1"
 
 
 def test_partial_and_final_payload_shapes_match_contract() -> None:
@@ -156,8 +157,10 @@ def test_stream_emits_same_seq_word_progressive_partials(
         assert_valid(event)
         assert event["type"] == "partial"
         assert event["seq"] == 0
+    assert first["confirmed"] == ""
     assert first["tentative"] == "Merhaba"
-    assert second["tentative"] == "Merhaba nasılsın"
+    assert second["confirmed"] == "Merhaba"
+    assert second["tentative"] == "nasılsın"
 
 
 def test_stream_default_gate_accepts_quiet_desktop_microphone(
@@ -387,8 +390,10 @@ def test_stream_appends_growing_no_overlap_live_windows(
         assert_valid(event)
         assert event["type"] == "partial"
         assert event["seq"] == 0
+    assert first["confirmed"] == ""
     assert first["tentative"] == "Merhaba sesim geliyor mu"
-    assert second["tentative"] == "Merhaba sesim geliyor mu bir sürü eksik var yine"
+    assert second["confirmed"] == "Merhaba sesim geliyor mu"
+    assert second["tentative"] == "bir sürü eksik var yine"
 
 
 def test_stream_appends_short_no_overlap_live_continuations(
@@ -426,14 +431,16 @@ def test_stream_appends_short_no_overlap_live_continuations(
         assert_valid(event)
         assert event["type"] == "partial"
         assert event["seq"] == 0
+    assert first["confirmed"] == ""
     assert first["tentative"] == "Konuşulanların çok büyük kısmı yazılmıyor"
-    assert second["tentative"] == "Konuşulanların çok büyük kısmı yazılmıyor ara kelimeler düşüyor"
+    assert second["confirmed"] == "Konuşulanların çok büyük kısmı yazılmıyor"
+    assert second["tentative"] == "ara kelimeler düşüyor"
 
 
-def test_stream_preserves_same_opener_live_continuations_without_repeating_opener(
+def test_stream_revises_competing_same_opener_tail_without_fabricating_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repeated opener words must not erase the previous rolling window."""
+    """Competing same-opener windows revise only the tentative tail."""
     _patch_fast_stream_timing(monkeypatch)
     live_drafts = [
         "Merhaba burada hava çok",
@@ -465,8 +472,10 @@ def test_stream_preserves_same_opener_live_continuations_without_repeating_opene
         assert_valid(event)
         assert event["type"] == "partial"
         assert event["seq"] == 0
+    assert first["confirmed"] == ""
     assert first["tentative"] == "Merhaba burada hava çok"
-    assert second["tentative"] == "Merhaba burada hava çok atıyorsun çok değişik şeyler"
+    assert second["confirmed"] == "Merhaba"
+    assert second["tentative"] == "atıyorsun çok değişik şeyler"
 
 
 def test_stream_keeps_short_stable_draft_over_unrelated_short_final(

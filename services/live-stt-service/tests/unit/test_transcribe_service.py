@@ -100,7 +100,7 @@ def test_sync_transcribe_suppresses_all_hallucination_text(
             pass
 
         def transcribe(self, _audio: object, **_kwargs: object):  # type: ignore[no-untyped-def]
-            return [_FakeSeg(0, 0.0, 1.0, "İzlediğiniz için teşekkür ederim.")], _FakeInfo()
+            return [_FakeSeg(0, 0.0, 1.0, "Videoyu beğenmeyi unutmayın.")], _FakeInfo()
 
     monkeypatch.setattr(sys.modules["faster_whisper"], "WhisperModel", ArtifactOnlyWhisperModel)
 
