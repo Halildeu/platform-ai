@@ -15,7 +15,9 @@ from app.api.stream import (
     _merge_final_transcript,
     _merge_rolling_partial,
     _select_commit_text,
+    _select_partial_parts,
     _select_partial_text,
+    _stabilize_rolling_partial,
 )
 from app.core.config import Settings
 from app.services.hallucination import is_hallucination
@@ -30,10 +32,7 @@ def test_hallucination_filter_blocks_known_artifacts() -> None:
     assert is_hallucination("") is True
     assert is_hallucination("..") is True
     assert is_hallucination("Altyazı M.K.") is True
-    assert is_hallucination("İzlediğiniz için teşekkür ederim.") is True
-    assert is_hallucination("İstediğiniz için teşekkür ederim.") is True
     assert is_hallucination("Videoyu beğenmeyi unutmayın arkadaşlar") is True
-    assert is_hallucination("Thank you for watching") is True
     assert is_hallucination("Neroba") is True
 
 
@@ -95,6 +94,12 @@ def test_hallucination_filter_passes_real_speech() -> None:
     )
     assert is_hallucination("Kelime akışı aktif ve doğruluk oranı gayet iyi.") is False
     assert is_hallucination("Merhaba burada hava çok.") is False
+    assert is_hallucination("İzlediğiniz için teşekkür ederim.") is False
+    assert is_hallucination("İstediğiniz için teşekkür ederim.") is False
+    assert is_hallucination("Teşekkür ederim.") is False
+    assert is_hallucination("Görüşürüz.") is False
+    assert is_hallucination("İyi günler.") is False
+    assert is_hallucination("Thank you for the detailed review.") is False
     assert (
         is_hallucination(
             "Enteresan her kelimenin başına merhaba atıyorsun. "
@@ -206,6 +211,65 @@ def test_partial_text_appends_one_word_no_overlap_continuation_after_stable_draf
         )
         == "Konuşulanların çok büyük kısmı yazılmıyor düşüyor"
     )
+
+
+def test_partial_stabilizer_promotes_overlap_and_keeps_new_tail_tentative() -> None:
+    assert _stabilize_rolling_partial(
+        "",
+        "Bugün toplantıda hızlı şekilde",
+        "hızlı şekilde yazıya dönüşüyor",
+    ) == (
+        "Bugün toplantıda hızlı şekilde",
+        "yazıya dönüşüyor",
+    )
+
+
+def test_partial_stabilizer_replaces_competing_same_opener_tail() -> None:
+    assert _stabilize_rolling_partial(
+        "",
+        "Merhaba burada hava çok",
+        "Merhaba atıyorsun çok değişik şeyler",
+    ) == (
+        "Merhaba",
+        "atıyorsun çok değişik şeyler",
+    )
+
+
+def test_partial_stabilizer_strips_confirmed_context_from_full_window() -> None:
+    assert _stabilize_rolling_partial(
+        "Merhaba",
+        "nasılsın",
+        "Merhaba nasılsın bugün",
+    ) == (
+        "Merhaba nasılsın",
+        "bugün",
+    )
+
+
+def test_partial_stabilizer_recovers_words_around_confirmed_middle_context() -> None:
+    assert _stabilize_rolling_partial(
+        "hızlı şekilde",
+        "",
+        "bugün hızlı şekilde yazıya dönüşüyor",
+    ) == (
+        "bugün hızlı şekilde",
+        "yazıya dönüşüyor",
+    )
+
+
+def test_partial_stabilizer_replaces_overlapping_alternative_without_appending() -> None:
+    assert _stabilize_rolling_partial(
+        "",
+        "bütçe raporunu cuma teslim edelim",
+        "raporu cuma günü teslim edelim",
+    ) == (
+        "",
+        "raporu cuma günü teslim edelim",
+    )
+
+
+def test_partial_selection_does_not_drop_legitimate_common_meeting_phrase() -> None:
+    assert _select_partial_parts("Teşekkür ederim.", "", "") == ("", "Teşekkür ederim.")
 
 
 def test_commit_text_applies_final_suffix_without_dropping_live_prefix() -> None:
@@ -385,6 +449,38 @@ def test_direct_stream_service_passes_role_specific_beam_size() -> None:
     assert fake_model.kwargs["beam_size"] == 5
     assert fake_model.kwargs["language"] == "tr"
     assert fake_model.kwargs["condition_on_previous_text"] is False
+
+
+def test_direct_stream_service_filters_low_confidence_silence_decode() -> None:
+    service = DirectWhisperService(
+        model_name="test-model",
+        device="cpu",
+        compute_type="int8",
+        language="tr",
+        beam_size=1,
+    )
+
+    class FakeModel:
+        def transcribe(self, _audio: object, **_kwargs: object) -> tuple[list[object], object]:
+            return [
+                SimpleNamespace(
+                    text="Teşekkür ederim.",
+                    no_speech_prob=0.9,
+                    avg_logprob=-0.2,
+                ),
+                SimpleNamespace(
+                    text="Toplantıya devam edelim.",
+                    no_speech_prob=0.05,
+                    avg_logprob=-0.2,
+                ),
+            ], object()
+
+    service._model = FakeModel()
+
+    assert (
+        service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
+        == "Toplantıya devam edelim."
+    )
 
 
 def test_stream_router_importable_without_gpu() -> None:

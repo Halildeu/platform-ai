@@ -15,13 +15,38 @@ time, so CPU/CI environments are unaffected unless `/ws/stream` is used.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 
 import numpy as np
 
 from app.core.config import Settings
+from app.services.hallucination import is_hallucination
 
 logger = logging.getLogger(__name__)
+
+_NO_SPEECH_THRESHOLD = 0.75
+_LOG_PROB_THRESHOLD = -1.0
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, float | int):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
+
+
+def _usable_stream_segment(segment: object) -> bool:
+    text = str(getattr(segment, "text", "")).strip()
+    if is_hallucination(text):
+        return False
+
+    no_speech_prob = _finite_float(getattr(segment, "no_speech_prob", None))
+    if no_speech_prob is not None and no_speech_prob > _NO_SPEECH_THRESHOLD:
+        return False
+
+    avg_logprob = _finite_float(getattr(segment, "avg_logprob", None))
+    return avg_logprob is None or avg_logprob >= _LOG_PROB_THRESHOLD
 
 
 class DirectWhisperService:
@@ -88,11 +113,13 @@ class DirectWhisperService:
                 beam_size=self.beam_size,
                 vad_filter=vad,
                 condition_on_previous_text=False,
-                no_speech_threshold=0.75,
-                log_prob_threshold=-1.0,
+                no_speech_threshold=_NO_SPEECH_THRESHOLD,
+                log_prob_threshold=_LOG_PROB_THRESHOLD,
                 compression_ratio_threshold=2.4,
             )
-            return " ".join(s.text.strip() for s in segments).strip()
+            return " ".join(
+                str(segment.text).strip() for segment in segments if _usable_stream_segment(segment)
+            ).strip()
 
 
 _services: dict[str, DirectWhisperService] = {}

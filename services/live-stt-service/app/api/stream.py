@@ -163,6 +163,15 @@ def _suffix_prefix_overlap(previous_words: list[str], next_words: list[str]) -> 
     return 0
 
 
+def _common_prefix_size(left_words: list[str], right_words: list[str]) -> int:
+    size = 0
+    for left, right in zip(left_words, right_words, strict=False):
+        if left != right:
+            break
+        size += 1
+    return size
+
+
 def _overlap_family(word: str) -> str:
     family = word
     for _ in range(2):
@@ -231,6 +240,8 @@ def _merge_rolling_partial(previous_text: str, next_text: str) -> str:
         return " ".join([*previous_raw_words, *next_raw_words[overlap:]])
 
     if previous_words[0] == next_words[0]:
+        # Same-opener hypotheses normally cover the same rolling audio. Appending
+        # unrelated tails fabricates a sentence from competing ASR alternatives.
         return next_candidate
 
     shared_family_ratio = _shared_token_ratio(
@@ -355,6 +366,139 @@ def _select_partial_text(draft: str, sent_draft: str) -> str | None:
     return candidate
 
 
+def _partial_text(confirmed: str, tentative: str) -> str:
+    return " ".join(part for part in (confirmed.strip(), tentative.strip()) if part).strip()
+
+
+def _prepare_candidate_after_confirmed(confirmed: str, candidate: str) -> tuple[str, str]:
+    """Align a fresh rolling hypothesis around already-confirmed context."""
+    confirmed_raw_words = confirmed.split()
+    candidate_raw_words = candidate.split()
+    confirmed_words = _normalized_words(confirmed)
+    candidate_words = _normalized_words(candidate)
+    if not confirmed_words or not candidate_words:
+        return confirmed.strip(), candidate.strip()
+
+    if candidate_words[: len(confirmed_words)] == confirmed_words:
+        return confirmed.strip(), " ".join(candidate_raw_words[len(confirmed_words) :]).strip()
+
+    confirmed_at = _contiguous_index(candidate_words, confirmed_words)
+    if confirmed_at >= 0:
+        # A rolling decode can rewind and recover words immediately before the
+        # stable prefix. Prepend those words and keep the post-match tail draft.
+        recovered_prefix = candidate_raw_words[:confirmed_at]
+        augmented_confirmed = " ".join([*recovered_prefix, *confirmed_raw_words]).strip()
+        tail_start = confirmed_at + len(confirmed_words)
+        return augmented_confirmed, " ".join(candidate_raw_words[tail_start:]).strip()
+
+    if _contiguous_index(confirmed_words, candidate_words) >= 0:
+        return confirmed.strip(), ""
+
+    overlap = _suffix_prefix_speech_overlap(confirmed_words, candidate_words)
+    if overlap >= 2:
+        return confirmed.strip(), " ".join(candidate_raw_words[overlap:]).strip()
+    return confirmed.strip(), candidate.strip()
+
+
+def _append_confirmed(confirmed: str, addition: str) -> str:
+    addition = addition.strip()
+    if not addition:
+        return confirmed.strip()
+    stable = confirmed.strip()
+    if not stable:
+        return addition
+
+    stable_raw_words = stable.split()
+    addition_raw_words = addition.split()
+    overlap = _suffix_prefix_speech_overlap(
+        _normalized_words(stable),
+        _normalized_words(addition),
+    )
+    if overlap >= len(addition_raw_words):
+        return stable
+    return " ".join([*stable_raw_words, *addition_raw_words[overlap:]]).strip()
+
+
+def _stabilize_rolling_partial(
+    confirmed: str,
+    previous_tentative: str,
+    next_text: str,
+) -> tuple[str, str]:
+    """Promote locally-agreed words and keep revisable words tentative.
+
+    The live model repeatedly decodes an overlapping audio window. Words seen in
+    two compatible windows become confirmed. A competing hypothesis replaces
+    only the tentative tail; it is never appended solely because it shares the
+    first word with the previous hypothesis.
+    """
+    stable = confirmed.strip()
+    previous = previous_tentative.strip()
+    stable, candidate = _prepare_candidate_after_confirmed(stable, next_text.strip())
+
+    if not candidate:
+        return stable, previous
+    if not previous:
+        return stable, candidate
+
+    previous_raw_words = previous.split()
+    candidate_raw_words = candidate.split()
+    previous_words = _normalized_words(previous)
+    candidate_words = _normalized_words(candidate)
+
+    if previous_words == candidate_words:
+        return stable, previous
+    if candidate_words[: len(previous_words)] == previous_words:
+        promoted = _append_confirmed(stable, previous)
+        return promoted, " ".join(candidate_raw_words[len(previous_words) :]).strip()
+    if previous_words[: len(candidate_words)] == candidate_words:
+        return stable, previous
+    if _contiguous_index(candidate_words, previous_words) >= 0:
+        return stable, candidate
+    if _contiguous_index(previous_words, candidate_words) >= 0:
+        return stable, previous
+
+    overlap = _suffix_prefix_speech_overlap(previous_words, candidate_words)
+    if overlap > 0:
+        promoted = _append_confirmed(stable, previous)
+        return promoted, " ".join(candidate_raw_words[overlap:]).strip()
+
+    common_prefix = _common_prefix_size(previous_words, candidate_words)
+    if common_prefix > 0:
+        promoted = _append_confirmed(stable, " ".join(previous_raw_words[:common_prefix]))
+        return promoted, " ".join(candidate_raw_words[common_prefix:]).strip()
+
+    shared_family_ratio = _shared_token_ratio(
+        _overlap_families(previous_words),
+        _overlap_families(candidate_words),
+    )
+    if shared_family_ratio >= 0.5:
+        return stable, candidate
+
+    # With no lexical relationship, the rolling window has moved on. Preserve
+    # the previous window as stable context and expose the new window as draft.
+    return _append_confirmed(stable, previous), candidate
+
+
+def _select_partial_parts(
+    draft: str,
+    confirmed: str,
+    tentative: str,
+) -> tuple[str, str] | None:
+    candidate = (draft or "").strip()
+    if not candidate or is_hallucination(candidate):
+        return None
+
+    selected = _stabilize_rolling_partial(confirmed, tentative, candidate)
+    current = (confirmed.strip(), tentative.strip())
+    if selected == current:
+        return None
+
+    displayed = _partial_text(*selected)
+    if not displayed or is_hallucination(displayed):
+        return None
+    return selected
+
+
 def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
     """Choose a KVKK-safe final payload without letting hallucinations poison state."""
     candidate = (final_text or "").strip()
@@ -409,6 +553,7 @@ async def stream_endpoint(
             "sample_rate": SAMPLE_RATE,
             "live_model": settings.live_model_name,
             "final_model": settings.final_model_name,
+            "partial_mode": "stable-v1",
         }
     )
     logger.info(
@@ -422,7 +567,8 @@ async def stream_endpoint(
     last_debug_t = 0.0
     seg_index = 0
     last_draft = ""
-    sent_draft = ""
+    confirmed_draft = ""
+    tentative_draft = ""
     pcm_chunks = 0
     speech_seen = False
     last_speech_t: float | None = None
@@ -447,7 +593,8 @@ async def stream_endpoint(
             await websocket.send_json(payload)
 
     async def commit_current(reason: str) -> None:
-        nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
+        nonlocal buffer, buffer_start_t, seg_index, last_draft, confirmed_draft
+        nonlocal tentative_draft, speech_seen
         nonlocal last_speech_t, last_final_text, recent_final_text, buffer_start_sample
 
         def trim_leading_silence(
@@ -462,13 +609,15 @@ async def stream_endpoint(
             commit_end_sample: int,
             committed_audio: np.ndarray,
         ) -> None:
-            nonlocal buffer, buffer_start_t, seg_index, last_draft, sent_draft, speech_seen
+            nonlocal buffer, buffer_start_t, seg_index, last_draft, confirmed_draft
+            nonlocal tentative_draft, speech_seen
             nonlocal last_speech_t, buffer_start_sample
 
             async with buffer_lock:
                 seg_index += 1
                 last_draft = ""
-                sent_draft = ""
+                confirmed_draft = ""
+                tentative_draft = ""
 
                 # The receive loop may trim the rolling buffer while the final
                 # model is still decoding. Use absolute sample coordinates so
@@ -606,7 +755,7 @@ async def stream_endpoint(
         )
 
     async def infer_live_partial() -> None:
-        nonlocal last_draft, sent_draft
+        nonlocal last_draft, confirmed_draft, tentative_draft
 
         async with buffer_lock:
             live_samples = int(settings.live_window_sec * SAMPLE_RATE)
@@ -641,36 +790,42 @@ async def stream_endpoint(
             await send_debug("draft_filtered", elapsed_ms=elapsed_ms)
             return
 
-        selected_draft = _select_partial_text(draft, sent_draft)
-        if selected_draft is None:
+        selected_parts = _select_partial_parts(draft, confirmed_draft, tentative_draft)
+        if selected_parts is None:
             await send_debug(
                 "draft_regression_filtered",
                 elapsed_ms=elapsed_ms,
-                previous_words=_word_count(sent_draft),
+                previous_words=_word_count(last_draft),
                 candidate_words=_word_count(draft),
             )
             return
 
+        previous_draft = last_draft
+        next_confirmed, next_tentative = selected_parts
+        selected_draft = _partial_text(next_confirmed, next_tentative)
         last_draft = selected_draft
-        if selected_draft != sent_draft:
-            await send_json(
-                {
-                    "type": "partial",
-                    "seq": active_seq,
-                    "confirmed": "",
-                    "tentative": selected_draft,
-                    "elapsed_ms": elapsed_ms,
-                    "rms": round(live_rms, 5),
-                    "source": settings.live_model_name,
-                }
-            )
-            await send_debug(
-                "draft_sent",
-                seq=active_seq,
-                elapsed_ms=elapsed_ms,
-                text_len=len(draft),
-            )
-            sent_draft = selected_draft
+        confirmed_draft = next_confirmed
+        tentative_draft = next_tentative
+        if selected_draft == previous_draft:
+            await send_debug("draft_stability_advanced", seq=active_seq, elapsed_ms=elapsed_ms)
+            return
+        await send_json(
+            {
+                "type": "partial",
+                "seq": active_seq,
+                "confirmed": confirmed_draft,
+                "tentative": tentative_draft,
+                "elapsed_ms": elapsed_ms,
+                "rms": round(live_rms, 5),
+                "source": settings.live_model_name,
+            }
+        )
+        await send_debug(
+            "draft_sent",
+            seq=active_seq,
+            elapsed_ms=elapsed_ms,
+            text_len=len(draft),
+        )
 
     async def inference_loop() -> None:
         nonlocal last_live_infer_t
