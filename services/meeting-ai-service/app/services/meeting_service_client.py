@@ -56,13 +56,20 @@ class ServiceTokenClient:
             try:
                 response = await self._client.post(
                     self._settings.meeting_service_token_url,
+                    # `permissions` is a LIST value: httpx encodes a list into a
+                    # REPEATED form field (permissions=a&permissions=b), which is how
+                    # auth-service binds form.get("permissions"). A scalar would emit a
+                    # single occurrence and silently drop a second permission. auth-service
+                    # requires `audience` and ignores `scope` (sending scope alone yields
+                    # 400 invalid_audience — the #248 live-auth bug this fixes).
                     data={
                         "grant_type": "client_credentials",
                         "client_id": self._settings.meeting_service_client_id,
                         "client_secret": (
                             self._settings.meeting_service_client_secret.get_secret_value()
                         ),
-                        "scope": self._settings.meeting_service_scope,
+                        "audience": self._settings.meeting_service_audience,
+                        "permissions": self._settings.meeting_service_permissions,
                     },
                     timeout=self._settings.ingestion_timeout_sec,
                 )
