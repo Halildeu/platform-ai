@@ -141,6 +141,19 @@ class AskResponse(BaseModel):
     elapsed_ms: int = Field(ge=0)
 
 
+class AnalysisDeliveryHealth(BaseModel):
+    """Metadata-only status of the durable analysis-result delivery pipeline."""
+
+    enabled: bool
+    status: str = Field(description="disabled / ok / degraded")
+    worker_running: bool
+    pending: int = Field(ge=0)
+    in_flight: int = Field(ge=0)
+    dead_letter: int = Field(ge=0)
+    oldest_pending_age_sec: float | None = Field(default=None, ge=0.0)
+    error_code: str | None = None
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
 
@@ -149,6 +162,7 @@ class HealthResponse(BaseModel):
     backend: str
     model: str
     redact_pii: bool
+    analysis_delivery: AnalysisDeliveryHealth | None = None
 
 
 class ErrorResponse(BaseModel):

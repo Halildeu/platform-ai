@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 
 from fastapi import APIRouter, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 
 class AnalyzeResult(str, Enum):
@@ -20,6 +20,7 @@ class AnalyzeResult(str, Enum):
     NOT_IMPLEMENTED = "not_implemented"  # 501 (LLM stub)
     BACKEND_ERROR = "backend_error"  # 502 (LLM backend unreachable/unusable)
     REDACTION_BLOCKED = "redaction_blocked"  # 422 (ADR-0043 D3 fail-closed residual PII)
+    DELIVERY_ERROR = "delivery_error"  # 503 (durable system-of-record handoff unavailable)
 
 
 router = APIRouter()
@@ -53,6 +54,29 @@ kvkk_audit_event_total = Counter(
     "kvkk_audit_event_total",
     "KVKK audit events",
     ["action", "result"],
+)
+
+mai_ingestion_enqueue_total = Counter(
+    "mai_ingestion_enqueue_total",
+    "Durable analysis-result enqueue attempts",
+    ["outcome"],
+)
+
+mai_ingestion_delivery_total = Counter(
+    "mai_ingestion_delivery_total",
+    "Analysis-result delivery attempts",
+    ["outcome"],
+)
+
+mai_ingestion_queue_depth = Gauge(
+    "mai_ingestion_queue_depth",
+    "Durable analysis-result rows by state",
+    ["state"],
+)
+
+mai_ingestion_oldest_pending_age_seconds = Gauge(
+    "mai_ingestion_oldest_pending_age_seconds",
+    "Age of the oldest pending or leased analysis-result row",
 )
 
 

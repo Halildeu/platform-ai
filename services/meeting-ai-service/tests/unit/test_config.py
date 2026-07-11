@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import json
+from pathlib import Path
+
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from app.core.config import Settings
 
@@ -13,6 +17,7 @@ def test_defaults() -> None:
     assert s.backend == "mock"
     assert s.redact_pii is True
     assert s.request_timeout == 60
+    assert s.ingestion_enabled is False
 
 
 def test_backend_pattern_rejects_unknown() -> None:
@@ -38,3 +43,56 @@ def test_redaction_disable_allowed_only_on_mock() -> None:
     assert s.redact_pii is False
     # Real backends with redaction left on are fine too.
     assert Settings(backend="ollama", redact_pii=True).redact_pii is True
+
+
+def _ingestion_values(tmp_path: Path) -> dict[str, object]:
+    return {
+        "ingestion_enabled": True,
+        "meeting_service_token_url": "https://auth.test/token",
+        "meeting_service_client_id": "meeting-ai",
+        "meeting_service_client_secret": SecretStr("meeting-service-secret-value"),
+        "ingestion_store_path": tmp_path / "outbox.sqlite3",
+        "ingestion_active_key_id": "v1",
+        "ingestion_encryption_keys_json": SecretStr(
+            json.dumps({"v1": base64.b64encode(b"K" * 32).decode()})
+        ),
+        "ingestion_timeout_sec": 1.0,
+        "ingestion_lease_sec": 3.0,
+    }
+
+
+def test_ingestion_enabled_requires_credentials_absolute_path_and_keyring(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        Settings(ingestion_enabled=True)
+
+    values = _ingestion_values(tmp_path)
+    values["ingestion_store_path"] = Path("relative.sqlite3")
+    with pytest.raises(ValidationError):
+        Settings(**values)
+
+    values = _ingestion_values(tmp_path)
+    values["ingestion_active_key_id"] = "missing"
+    with pytest.raises(ValidationError):
+        Settings(**values)
+
+
+def test_ingestion_keyring_is_aes256_and_secret_repr_is_redacted(tmp_path: Path) -> None:
+    values = _ingestion_values(tmp_path)
+    settings = Settings(**values)
+    assert settings.ingestion_encryption_keys() == {"v1": b"K" * 32}
+    assert "meeting-service-secret-value" not in repr(settings)
+    assert base64.b64encode(b"K" * 32).decode() not in repr(settings)
+
+    values["ingestion_encryption_keys_json"] = SecretStr(
+        json.dumps({"v1": base64.b64encode(b"short").decode()})
+    )
+    with pytest.raises(ValidationError):
+        Settings(**values)
+
+
+def test_ingestion_lease_must_cover_token_and_ingestion_timeouts(tmp_path: Path) -> None:
+    values = _ingestion_values(tmp_path)
+    values["ingestion_timeout_sec"] = 10.0
+    values["ingestion_lease_sec"] = 20.0
+    with pytest.raises(ValidationError, match="two HTTP timeout windows"):
+        Settings(**values)

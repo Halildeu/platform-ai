@@ -14,7 +14,12 @@ redacted text.
 
 from __future__ import annotations
 
-from pydantic import Field, model_validator
+import base64
+import binascii
+import json
+from pathlib import Path
+
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -71,6 +76,28 @@ class Settings(BaseSettings):
     ollama_seed: int | None = Field(default=None)
     ollama_keep_alive: str = Field(default="5m")
 
+    # #247 — durable meeting-service analysis-result delivery (default-off).
+    ingestion_enabled: bool = Field(default=False)
+    meeting_service_base_url: str = Field(default="http://meeting-service:8080")
+    meeting_service_token_url: str = Field(default="")
+    meeting_service_client_id: str = Field(default="")
+    meeting_service_client_secret: SecretStr = Field(default=SecretStr(""))
+    meeting_service_scope: str = Field(default="meeting:analysis-result:write")
+    ingestion_store_path: Path = Field(default=Path("data/analysis-delivery.sqlite3"))
+    ingestion_active_key_id: str = Field(default="")
+    ingestion_encryption_keys_json: SecretStr = Field(default=SecretStr(""))
+    ingestion_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
+    ingestion_max_attempts: int = Field(default=8, ge=1, le=100)
+    ingestion_base_backoff_sec: float = Field(default=1.0, ge=0.1, le=300.0)
+    ingestion_max_backoff_sec: float = Field(default=300.0, ge=1.0, le=86_400.0)
+    ingestion_jitter_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
+    ingestion_poll_interval_sec: float = Field(default=1.0, ge=0.05, le=60.0)
+    ingestion_lease_sec: float = Field(default=30.0, ge=1.0, le=3_600.0)
+    ingestion_shutdown_grace_sec: float = Field(default=5.0, ge=0.1, le=120.0)
+    ingestion_max_rows: int = Field(default=10_000, ge=1, le=1_000_000)
+    ingestion_stale_after_sec: float = Field(default=300.0, ge=1.0, le=604_800.0)
+    prompt_version: str | None = Field(default=None, max_length=64)
+
     def ollama_options(self) -> dict[str, object]:
         """Decoding options for Ollama `/api/generate` (deterministic extraction).
 
@@ -98,6 +125,67 @@ class Settings(BaseSettings):
         if self.backend == "ollama":
             return self.ollama_model
         return self.model_name
+
+    @property
+    def effective_prompt_version(self) -> str:
+        """Stable producer provenance when no explicit prompt version is configured."""
+        return self.prompt_version or f"{self.backend}-v1"
+
+    def ingestion_encryption_keys(self) -> dict[str, bytes]:
+        """Decode the secret AES-256-GCM keyring without exposing it in repr/logs."""
+        raw = self.ingestion_encryption_keys_json.get_secret_value()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MAI_INGESTION_ENCRYPTION_KEYS_JSON must be valid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("MAI_INGESTION_ENCRYPTION_KEYS_JSON must be a JSON object")
+
+        decoded: dict[str, bytes] = {}
+        for key_id, encoded in parsed.items():
+            if not isinstance(key_id, str) or not key_id or not isinstance(encoded, str):
+                raise ValueError("ingestion encryption keyring entries must be non-empty strings")
+            try:
+                key = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(
+                    f"ingestion encryption key {key_id!r} is not valid base64"
+                ) from exc
+            if len(key) != 32:
+                raise ValueError(f"ingestion encryption key {key_id!r} must decode to 32 bytes")
+            decoded[key_id] = key
+        return decoded
+
+    @model_validator(mode="after")
+    def _enforce_ingestion_boundary(self) -> Settings:
+        """Fail at startup when durable delivery cannot meet its security contract."""
+        if not self.ingestion_enabled:
+            return self
+        if not (
+            self.meeting_service_token_url
+            and self.meeting_service_client_id
+            and self.meeting_service_client_secret.get_secret_value()
+        ):
+            raise ValueError(
+                "MAI_INGESTION_ENABLED=True requires token URL, client id, and client secret"
+            )
+        if not self.ingestion_store_path.is_absolute():
+            raise ValueError("MAI_INGESTION_STORE_PATH must be absolute when ingestion is enabled")
+        keys = self.ingestion_encryption_keys()
+        if not self.ingestion_active_key_id or self.ingestion_active_key_id not in keys:
+            raise ValueError(
+                "MAI_INGESTION_ACTIVE_KEY_ID must select a key from the encrypted keyring"
+            )
+        if self.ingestion_max_backoff_sec < self.ingestion_base_backoff_sec:
+            raise ValueError("ingestion max backoff must be >= base backoff")
+        # A cold delivery can spend one timeout acquiring a token and a second
+        # timeout posting the payload. Keep ownership for the whole attempt so
+        # another worker cannot reclaim and duplicate it mid-flight.
+        if self.ingestion_lease_sec <= 2 * self.ingestion_timeout_sec:
+            raise ValueError("ingestion lease must be greater than two HTTP timeout windows")
+        return self
 
     @model_validator(mode="after")
     def _enforce_kvkk_redaction_boundary(self) -> Settings:

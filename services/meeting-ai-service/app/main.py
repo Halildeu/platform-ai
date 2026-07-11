@@ -19,6 +19,7 @@ from starlette.responses import Response
 from app import __version__
 from app.api import analyze, ask, health, metrics
 from app.core.config import get_settings
+from app.services.analysis_delivery import AnalysisDeliveryRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    analysis_delivery = AnalysisDeliveryRuntime(settings)
+    app.state.analysis_delivery = analysis_delivery
     logging.basicConfig(
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s [%(correlation_id)s] %(message)s",
@@ -64,8 +67,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "correlation_id": "startup",
         },
     )
-    yield
-    logger.info("meeting-ai-service stopping", extra={"correlation_id": "shutdown"})
+    await analysis_delivery.start()
+    try:
+        yield
+    finally:
+        await analysis_delivery.stop()
+        logger.info("meeting-ai-service stopping", extra={"correlation_id": "shutdown"})
 
 
 app = FastAPI(
