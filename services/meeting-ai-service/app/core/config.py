@@ -82,7 +82,17 @@ class Settings(BaseSettings):
     meeting_service_token_url: str = Field(default="")
     meeting_service_client_id: str = Field(default="")
     meeting_service_client_secret: SecretStr = Field(default=SecretStr(""))
+    meeting_service_audience: str = Field(default="meeting-service")
+    # The service-token PERMISSION(s), sent as the auth-service `permissions` form
+    # param (repeated) — NOT an OAuth2 `scope` (auth-service ignores `scope` and
+    # requires `audience`). Comma-separated for multiple; env name kept for back-compat.
     meeting_service_scope: str = Field(default="meeting:analysis-result:write")
+
+    @property
+    def meeting_service_permissions(self) -> list[str]:
+        """Split the comma-separated permission string into the list auth-service expects."""
+        return [p.strip() for p in self.meeting_service_scope.split(",") if p.strip()]
+
     ingestion_store_path: Path = Field(default=Path("data/analysis-delivery.sqlite3"))
     ingestion_active_key_id: str = Field(default="")
     ingestion_encryption_keys_json: SecretStr = Field(default=SecretStr(""))
