@@ -314,10 +314,10 @@ function Protect-MeetingAiSecret {
     }
     $plainBytes = [Text.Encoding]::UTF8.GetBytes($PlainText)
     try {
-        $protected = [Security.Cryptography.ProtectedData]::Protect(
+        $protected = [System.Security.Cryptography.ProtectedData]::Protect(
             $plainBytes,
             $script:MeetingAiDpapiEntropy,
-            [Security.Cryptography.DataProtectionScope]::LocalMachine
+            [System.Security.Cryptography.DataProtectionScope]::LocalMachine
         )
         try {
             return [Convert]::ToBase64String($protected)
@@ -341,10 +341,10 @@ function Unprotect-MeetingAiSecret {
         throw "Runtime config key $KeyName is not valid base64."
     }
     try {
-        $plain = [Security.Cryptography.ProtectedData]::Unprotect(
+        $plain = [System.Security.Cryptography.ProtectedData]::Unprotect(
             $protected,
             $script:MeetingAiDpapiEntropy,
-            [Security.Cryptography.DataProtectionScope]::LocalMachine
+            [System.Security.Cryptography.DataProtectionScope]::LocalMachine
         )
         try {
             $value = (New-Object Text.UTF8Encoding($false, $true)).GetString($plain)
