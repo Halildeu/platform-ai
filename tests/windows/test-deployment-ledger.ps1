@@ -58,8 +58,9 @@ function Invoke-ChildPowerShell {
     }
     $confirmToken = ""
     if ($SuppressConfirmation) { $confirmToken = " -Confirm:`$false" }
-    $command = "& '{0}' {1}{2}" -f `
-        $Script.Replace("'", "''"), ($commandTokens -join " "), $confirmToken
+    $command = (("& '{0}' {1}{2}" -f `
+        $Script.Replace("'", "''"), ($commandTokens -join " "), $confirmToken) +
+        [Environment]::NewLine + "exit `$LASTEXITCODE")
     $invocationId = [Guid]::NewGuid().ToString("N")
     $wrapperPath = Join-Path $tempRoot ("deploy-child-{0}.ps1" -f $invocationId)
     $stdoutPath = Join-Path $tempRoot ("deploy-child-{0}.stdout" -f $invocationId)
