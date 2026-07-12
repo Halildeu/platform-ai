@@ -4,6 +4,12 @@
 # are DPAPI LocalMachine blobs at rest and are exposed only to the child process.
 # Windows PowerShell 5.1 compatible; never write values to output or errors.
 
+try {
+    Add-Type -AssemblyName System.Security -ErrorAction Stop
+} catch {
+    throw "Windows DPAPI support assembly could not be loaded."
+}
+
 $script:MeetingAiSystemSid = "S-1-5-18"
 $script:MeetingAiAdministratorsSid = "S-1-5-32-544"
 $script:MeetingAiDpapiEntropy = [Text.Encoding]::UTF8.GetBytes(

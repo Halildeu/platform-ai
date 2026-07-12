@@ -65,6 +65,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
 
         self.assertIn("S-1-5-18", script)
         self.assertIn("S-1-5-32-544", script)
+        self.assertIn("Add-Type -AssemblyName System.Security", script)
         self.assertIn("OrdinalIgnoreCase", script)
         self.assertIn("System.Security.Cryptography.ProtectedData]::Unprotect", script)
         self.assertIn("System.Security.Cryptography.DataProtectionScope]::LocalMachine", script)
