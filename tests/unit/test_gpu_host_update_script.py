@@ -80,6 +80,8 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("must be an absolute HTTPS URL", script)
         self.assertIn("MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI", script)
         self.assertIn("Write-MeetingAiSecretFileAtomic", script)
+        self.assertIn("MoveFileEx", script)
+        self.assertIn("replaceExistingAndWriteThrough", script)
         self.assertIn("Clear-MeetingAiRuntimeTlsKey", script)
         self.assertNotIn('"MAI_MEETING_SERVICE_CLIENT_SECRET" =', script)
         self.assertNotIn("Get-Random", script)

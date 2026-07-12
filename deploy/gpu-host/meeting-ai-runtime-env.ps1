@@ -9,6 +9,22 @@ try {
 } catch {
     throw "Windows DPAPI support assembly could not be loaded."
 }
+if ($null -eq ("MeetingAi.NativeMethods" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+
+namespace MeetingAi {
+    public static class NativeMethods {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool MoveFileEx(
+            string existingFileName,
+            string newFileName,
+            int flags
+        );
+    }
+}
+"@ -ErrorAction Stop
+}
 
 $script:MeetingAiSystemSid = "S-1-5-18"
 $script:MeetingAiAdministratorsSid = "S-1-5-32-544"
@@ -573,7 +589,18 @@ function Write-MeetingAiSecretFileAtomic {
         [IO.File]::WriteAllText($temp, $Content, (New-Object Text.UTF8Encoding($false)))
         Assert-MeetingAiAcl -Path $temp
         if (Test-Path -LiteralPath $full -PathType Leaf) {
-            [IO.File]::Replace($temp, $full, $null, $true)
+            # .NET Framework File.Replace rejects a null backup path on PS 5.1.
+            # MoveFileEx keeps same-volume replacement atomic without creating a
+            # second plaintext private-key copy.
+            $replaceExistingAndWriteThrough = 0x1 -bor 0x8
+            if (-not [MeetingAi.NativeMethods]::MoveFileEx(
+                    $temp,
+                    $full,
+                    $replaceExistingAndWriteThrough
+                )) {
+                $win32Error = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw "Runtime secret atomic replacement failed (Win32 $win32Error)."
+            }
         } else {
             [IO.File]::Move($temp, $full)
         }
