@@ -109,6 +109,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Production uses private DNS", script)
         self.assertIn("IO.File]::Replace", script)
         self.assertIn("Set-Acl -LiteralPath $tempPath -AclObject $OriginalAcl", script)
+        self.assertIn("Assert-AclSecurityEquivalent", script)
         self.assertIn("Global\\platform-ai-private-gateway-host-v1", script)
         self.assertIn("SupportsShouldProcess = $true", script)
         self.assertIn("Assert-GatewayResolution", script)

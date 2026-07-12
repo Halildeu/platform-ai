@@ -36,6 +36,29 @@ function New-Fixture {
     [IO.File]::WriteAllText($hostsPath, $Content, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Get-AclFingerprint {
+    param([Parameter(Mandatory = $true)]$Acl)
+    $rules = @($Acl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    ) | ForEach-Object {
+        "{0}|{1}|{2}|{3}|{4}|{5}" -f
+            $_.IdentityReference.Value,
+            [int]$_.AccessControlType,
+            [int64]$_.FileSystemRights,
+            [int]$_.InheritanceFlags,
+            [int]$_.PropagationFlags,
+            $_.IsInherited
+    } | Sort-Object)
+    return @(
+        ("owner={0}" -f $Acl.Owner),
+        ("group={0}" -f $Acl.Group),
+        ("protected={0}" -f $Acl.AreAccessRulesProtected),
+        $rules
+    ) -join "`n"
+}
+
 function Invoke-Shim {
     param(
         [scriptblock]$Resolver = { param($name) @("10.99.0.1") },
@@ -68,7 +91,7 @@ try {
 
     $original = "# baseline`r`n127.0.0.1 localhost`r`n10.20.30.40 other.internal # keep`r`n"
     New-Fixture -Content $original
-    $aclBefore = (Get-Acl -LiteralPath $hostsPath).GetSecurityDescriptorSddlForm("All")
+    $aclBefore = Get-AclFingerprint -Acl (Get-Acl -LiteralPath $hostsPath)
     Invoke-Shim
 
     $applied = [IO.File]::ReadAllText($hostsPath)
@@ -82,7 +105,7 @@ try {
     $bytes = [IO.File]::ReadAllBytes($hostsPath)
     Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and `
         $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) "Hosts file must not gain a BOM."
-    $aclAfter = (Get-Acl -LiteralPath $hostsPath).GetSecurityDescriptorSddlForm("All")
+    $aclAfter = Get-AclFingerprint -Acl (Get-Acl -LiteralPath $hostsPath)
     Assert-True ($aclAfter -eq $aclBefore) "Hosts file ACL changed after atomic replace."
     Assert-True ($global:PrivateGatewayFlushCount -eq 1) `
         "Apply must flush DNS exactly once."

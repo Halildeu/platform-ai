@@ -218,6 +218,58 @@ function New-ManagedGatewayContent {
     return $prefix + $block + $newline
 }
 
+function Get-AclSecurityFingerprint {
+    param([Parameter(Mandatory = $true)]$Acl)
+
+    function Resolve-IdentitySid {
+        param([Parameter(Mandatory = $true)][string]$Identity)
+        try {
+            $account = New-Object Security.Principal.NTAccount($Identity)
+            return $account.Translate(
+                [Security.Principal.SecurityIdentifier]
+            ).Value
+        } catch {
+            return $Identity
+        }
+    }
+
+    $owner = Resolve-IdentitySid -Identity $Acl.Owner
+    $group = Resolve-IdentitySid -Identity $Acl.Group
+    $rules = @($Acl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    ) | ForEach-Object {
+        "{0}|{1}|{2}|{3}|{4}|{5}" -f
+            $_.IdentityReference.Value,
+            [int]$_.AccessControlType,
+            [int64]$_.FileSystemRights,
+            [int]$_.InheritanceFlags,
+            [int]$_.PropagationFlags,
+            $_.IsInherited
+    } | Sort-Object)
+    return @(
+        ("owner={0}" -f $owner),
+        ("group={0}" -f $group),
+        ("protected={0}" -f $Acl.AreAccessRulesProtected),
+        $rules
+    ) -join "`n"
+}
+
+function Assert-AclSecurityEquivalent {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)]$Actual,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $expectedFingerprint = Get-AclSecurityFingerprint -Acl $Expected
+    $actualFingerprint = Get-AclSecurityFingerprint -Acl $Actual
+    if ($actualFingerprint -ne $expectedFingerprint) {
+        throw "ACL security contract changed after atomic replacement: $Path"
+    }
+}
+
 function Write-HostsFileAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -245,8 +297,12 @@ function Write-HostsFileAtomic {
         } else {
             [IO.File]::Replace($tempPath, $Path, $BackupPath, $true)
             Set-Acl -LiteralPath $BackupPath -AclObject $OriginalAcl
+            Assert-AclSecurityEquivalent -Expected $OriginalAcl `
+                -Actual (Get-Acl -LiteralPath $BackupPath) -Path $BackupPath
         }
         Set-Acl -LiteralPath $Path -AclObject $OriginalAcl
+        Assert-AclSecurityEquivalent -Expected $OriginalAcl `
+            -Actual (Get-Acl -LiteralPath $Path) -Path $Path
         if (-not [string]::IsNullOrWhiteSpace($transientBackupPath) -and
             (Test-Path -LiteralPath $transientBackupPath)) {
             Remove-Item -LiteralPath $transientBackupPath -Force
