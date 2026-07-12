@@ -146,7 +146,9 @@ Required configuration when enabled:
 - `MAI_MEETING_SERVICE_BASE_URL`
 - `MAI_MEETING_SERVICE_TOKEN_URL`
 - `MAI_MEETING_SERVICE_CLIENT_ID`
-- `MAI_MEETING_SERVICE_CLIENT_SECRET` (Vault/ESO or host secret injection)
+- `MAI_MEETING_SERVICE_CLIENT_SECRET` (Vault/ESO or host secret injection; on the
+  Windows GPU host this is materialized only in process from a DPAPI LocalMachine
+  blob by `deploy/gpu-host/meeting-ai-runtime-env.ps1`)
 - `MAI_INGESTION_STORE_PATH` (absolute, local persistent disk; not NFS/SMB)
 - `MAI_INGESTION_ACTIVE_KEY_ID`
 - `MAI_INGESTION_ENCRYPTION_KEYS_JSON` — secret JSON keyring, values are base64
@@ -175,6 +177,13 @@ client secret through Vault/ESO (or the Windows host secret channel), restart th
 service so settings are refreshed, and monitor the queue/DLQ until delivery catches
 up. A revoked credential is never persisted; repeated `401` attempts retain the
 encrypted payload and eventually move it to DLQ for explicit operator requeue.
+
+The Windows host channel is non-executable and fail-closed. Use elevated
+`deploy/gpu-host/configure-meeting-ai.ps1`; it prompts with `SecureString`, stores
+the client secret and AES keyring as DPAPI LocalMachine ciphertext under a
+SYSTEM/Administrators-only ACL, writes by same-volume atomic replace, and keeps old
+encryption keys during additive rotation. Plaintext `.ps1` secret overrides are not
+supported for meeting-ai ingestion.
 
 ## Run (skeleton)
 

@@ -1,7 +1,7 @@
 # platform-ai — GPU host production install (Windows Scheduled Tasks)
 # Run ONCE as Administrator on the GPU PC. Creates two auto-start tasks:
 #   platform-ai-live-stt    -> live-stt-service  :8200 (cuda, ADR-0031 defaults)
-#   platform-ai-meeting-ai  -> meeting-ai-service :8300 (ollama, mock fallback)
+#   platform-ai-meeting-ai  -> meeting-ai-service :8300 (ollama, fail-closed)
 # Tasks start at machine boot (no login needed), restart on failure, and are
 # started immediately at the end of this script.
 #

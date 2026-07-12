@@ -4,11 +4,13 @@
 param(
     [string]$RepoRoot = "C:\platform-ai",
     [int]$Port = 8300,
-    # #54 decision: Option B (ollama). Falls back to mock automatically if the
-    # Ollama server is not reachable at startup, so the service never hard-fails.
+    # #54 decision: Option B (ollama). A stage/prod host must never silently
+    # serve the deterministic mock when Ollama is unavailable.
     [string]$Backend = "ollama",
     [string]$OllamaHost = "http://localhost:11434",
     [string]$OllamaModel = "llama3.1:8b",
+    [ValidateSet("stage", "prod")][string]$AppEnv = "stage",
+    [string]$RuntimeConfigPath = "",
     # Full path required: the task runs as SYSTEM, whose PATH does not include
     # per-user Python installs. install.ps1 resolves and passes this.
     [string]$PythonExe = "python"
@@ -20,21 +22,44 @@ $logDir = Join-Path $RepoRoot "deploy\gpu-host\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
 $log = Join-Path $logDir ("meeting-ai-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
 
+$runtimeEnv = Join-Path (Split-Path $PSCommandPath -Parent) "meeting-ai-runtime-env.ps1"
+. $runtimeEnv
+if ([string]::IsNullOrWhiteSpace($RuntimeConfigPath)) {
+    $RuntimeConfigPath = Join-Path $env:ProgramData "Acik\platform-ai\meeting-ai.env"
+}
+try {
+    $runtimeConfigLoaded = Import-MeetingAiRuntimeEnvironment `
+        -Path $RuntimeConfigPath -Optional
+} catch {
+    # Runtime-env errors are deliberately value-free. Keep the durable-delivery
+    # fail-closed boundary, but leave a useful Scheduled Task diagnosis.
+    Add-Content $log ("[startup] Runtime config rejected: {0}" -f $_.Exception.Message)
+    throw "Meeting-ai runtime config was rejected; inspect the transcript-free service log."
+}
+
+if ($Backend -eq "mock") {
+    throw "The mock meeting-ai backend is forbidden for the GPU-host stage/prod launcher."
+}
+
 if ($Backend -eq "ollama") {
     try {
         Invoke-RestMethod -Uri "$OllamaHost/api/tags" -TimeoutSec 3 | Out-Null
     } catch {
-        Add-Content $log "[startup] Ollama not reachable at $OllamaHost - falling back to mock backend"
-        $Backend = "mock"
+        Add-Content $log "[startup] Ollama readiness check failed; refusing mock fallback"
+        throw "Ollama readiness check failed. Scheduled Task restart policy will retry."
     }
 }
 
 # KVKK boundary: MAI_REDACT_PII stays at its default (true) and cannot be
 # disabled for non-mock backends (config validator).
-$env:MAI_BACKEND = $Backend
-$env:MAI_OLLAMA_HOST = $OllamaHost
-$env:MAI_OLLAMA_MODEL = $OllamaModel
-$env:MAI_LOG_LEVEL = "INFO"
+$env:MAI_APP_ENV = $AppEnv
+if (-not $env:MAI_BACKEND) { $env:MAI_BACKEND = $Backend }
+if (-not $env:MAI_OLLAMA_HOST) { $env:MAI_OLLAMA_HOST = $OllamaHost }
+if (-not $env:MAI_OLLAMA_MODEL) { $env:MAI_OLLAMA_MODEL = $OllamaModel }
+if (-not $env:MAI_LOG_LEVEL) { $env:MAI_LOG_LEVEL = "INFO" }
+if (-not $runtimeConfigLoaded -and -not $env:MAI_INGESTION_ENABLED) {
+    $env:MAI_INGESTION_ENABLED = "false"
+}
 
 # Same Intel-Fortran/MKL console-handler guard as start-live-stt.ps1: prevents a
 # `forrtl: error (200) window-CLOSE` abort on schtasks /End / session close if any

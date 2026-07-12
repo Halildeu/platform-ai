@@ -9,8 +9,9 @@ başlatılır. Login gerekmez (SYSTEM hesabı).
   (`pip install -r services/live-stt-service/requirements.txt` ve
   `pip install -r services/meeting-ai-service/requirements.txt`)
 - CUDA sürücüsü (live-stt için), modeller ilk açılışta indirilir/cache'ten gelir
-- (Opsiyonel, #54 Option B) Ollama + `ollama pull llama3.1:8b` —
-  yoksa meeting-ai otomatik **mock**'a düşer, servis yine ayağa kalkar
+- (#54 Option B) Ollama + `ollama pull llama3.1:8b`. Stage/prod launcher
+  mock'a dusmez; Ollama yoksa fail-closed cikar ve Scheduled Task restart
+  policy tekrar dener.
 
 ## Kurulum (yönetici PowerShell)
 ```powershell
@@ -25,6 +26,49 @@ Set-ExecutionPolicy -Scope Process Bypass
 Invoke-RestMethod http://127.0.0.1:8200/health   # live-stt  (model load ~30-60 sn)
 Invoke-RestMethod http://127.0.0.1:8300/health   # meeting-ai
 Get-ScheduledTask platform-ai-*                   # ikisi de Running olmalı
+```
+
+## meeting-ai durable delivery runtime config
+
+`meeting-ai-service` varsayilan olarak analysis delivery kapali baslar. Canonical
+meeting-service persist/read zincirini acmadan once Windows hostunda elevated
+PowerShell ile DPAPI-protected runtime config uretin. Client secret komut satirina,
+shell history'ye veya repoya yazilmaz; script `SecureString` prompt kullanir.
+
+```powershell
+cd C:\platform-ai
+.\deploy\gpu-host\configure-meeting-ai.ps1 `
+  -MeetingServiceBaseUrl "https://<internal-meeting-service-origin>" `
+  -MeetingServiceTokenUrl "https://<internal-auth-service-origin>/oauth2/token"
+```
+
+Config `C:\ProgramData\Acik\platform-ai\meeting-ai.env` altinda olusur. OAuth
+client secret ve AES-256-GCM keyring DPAPI LocalMachine ciphertext olarak tutulur;
+dosya ve outbox dizini yalniz `SYSTEM` ile `BUILTIN\Administrators` ACL'ine
+sahiptir. Launcher unknown/duplicate key, BOM, control character, UNC/removable
+disk, reparse point, broad ACL, HTTP endpoint veya eksik keyring gorurse fail-closed
+cikar. Dosya baska hosta kopyalanamaz; DPAPI blob yalniz uretildigi makinede acilir.
+DPAPI optional entropy repo icinde sabittir ve ek bir parola degildir; ayni makinede
+gizlilik siniri dar ACL'dir. Bu nedenle loader ACL inheritance, owner ve tum Allow
+ACE'lerini SID bazinda her boot'ta yeniden dogrular.
+
+AES key rotation eski key'leri silmeden additive yapilir:
+
+```powershell
+.\deploy\gpu-host\configure-meeting-ai.ps1 -RotateEncryptionKey
+```
+
+Her guncelleme ayni dizinde atomic replace yapar ve onceki DPAPI-protected config'i
+tek `meeting-ai.env.bak` dosyasinda, ayni dar ACL ile tutar. Eski key, encrypted
+outbox'ta o key ile yazilmis satir kalmadigi metadata-only DLQ/queue denetimiyle
+kanitlanmadan keyring'den kaldirilmaz. PowerShell transcription/script-block logging
+provisioning oturumunda kapali olmali; komut veya log secret degeri yazmaz.
+
+Yeni config ile servis baslamazsa onceki atomik backup geri alinabilir. Restore,
+mevcut config'i yeni backup yaparak iki surum arasinda geri donulebilir kalir:
+
+```powershell
+.\deploy\gpu-host\configure-meeting-ai.ps1 -RestoreBackup
 ```
 
 `/health` sadece senkron `/transcribe` modelinin lazy-load durumunu gosterir.
