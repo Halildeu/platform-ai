@@ -170,7 +170,10 @@ Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC)
 
 $short = Invoke-Update @("-TargetCommit", $commitD.Substring(0, 12), `
     "-NoRestart")
-Assert-True ($short.ExitCode -eq 2) "short commit must fail with guard exit 2"
+Assert-True ($short.ExitCode -eq 2) (
+    "short commit must fail with guard exit 2: actual={0}; output={1}" -f `
+    $short.ExitCode, ($short.Output -join " | ")
+)
 
 [IO.File]::WriteAllText((Join-Path $deploy "c.txt"), "dirty")
 $dirty = Invoke-Update @("-TargetCommit", $commitD, "-NoRestart")
