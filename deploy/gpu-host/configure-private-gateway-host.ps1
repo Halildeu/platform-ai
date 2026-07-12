@@ -229,19 +229,35 @@ function Write-HostsFileAtomic {
     $directory = Split-Path -Parent $Path
     $tempPath = Join-Path $directory (".{0}.platform-ai.{1}.tmp" -f
         [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString('N'))
+    $transientBackupPath = ""
     try {
         [IO.File]::WriteAllText($tempPath, $Content, $Utf8NoBom)
         Set-Acl -LiteralPath $tempPath -AclObject $OriginalAcl
         if ([string]::IsNullOrWhiteSpace($BackupPath)) {
-            [IO.File]::Replace($tempPath, $Path, $null, $true)
+            # Windows PowerShell 5.1 / .NET Framework rejects a null backup
+            # path in the four-argument File.Replace overload. Keep the swap
+            # atomic by using a same-directory transient backup and remove it
+            # only after the destination postcondition has been established.
+            $transientBackupPath = Join-Path $directory `
+                (".{0}.platform-ai.{1}.rollback" -f
+                    [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString('N'))
+            [IO.File]::Replace($tempPath, $Path, $transientBackupPath, $true)
         } else {
             [IO.File]::Replace($tempPath, $Path, $BackupPath, $true)
             Set-Acl -LiteralPath $BackupPath -AclObject $OriginalAcl
         }
         Set-Acl -LiteralPath $Path -AclObject $OriginalAcl
+        if (-not [string]::IsNullOrWhiteSpace($transientBackupPath) -and
+            (Test-Path -LiteralPath $transientBackupPath)) {
+            Remove-Item -LiteralPath $transientBackupPath -Force
+        }
     } finally {
         if (Test-Path -LiteralPath $tempPath) {
             Remove-Item -LiteralPath $tempPath -Force
+        }
+        if (-not [string]::IsNullOrWhiteSpace($transientBackupPath) -and
+            (Test-Path -LiteralPath $transientBackupPath)) {
+            Remove-Item -LiteralPath $transientBackupPath -Force
         }
     }
 }
@@ -368,13 +384,25 @@ try {
         Assert-GatewayResolution -Hostname $GatewayHostname -IPv4 $GatewayIPv4 `
             -Probe $ResolverProbe
     } catch {
+        $verificationError = $_
+        $rollbackError = $null
         if ($mutated -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-            $rollbackContent = Read-Utf8WithoutBom -Path $backupPath
-            Write-HostsFileAtomic -Path $HostsPath -Content $rollbackContent `
-                -OriginalAcl $originalAcl
-            try { Invoke-DnsFlush -Action $DnsFlushAction } catch { }
+            try {
+                $rollbackContent = Read-Utf8WithoutBom -Path $backupPath
+                Write-HostsFileAtomic -Path $HostsPath -Content $rollbackContent `
+                    -OriginalAcl $originalAcl
+                try { Invoke-DnsFlush -Action $DnsFlushAction } catch { }
+            } catch {
+                $rollbackError = $_
+            }
         }
-        throw
+        if ($null -ne $rollbackError) {
+            throw ("Gateway resolution verification failed and hosts rollback also failed. " +
+                "Verification: {0}; rollback: {1}" -f
+                $verificationError.Exception.Message,
+                $rollbackError.Exception.Message)
+        }
+        throw $verificationError.Exception
     }
 } finally {
     if ($lockTaken) { [void]$mutex.ReleaseMutex() }

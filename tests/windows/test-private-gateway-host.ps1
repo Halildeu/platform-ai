@@ -10,7 +10,7 @@ $fixtureRoot = Join-Path $env:RUNNER_TEMP "private-gateway-host-contract"
 $hostsPath = Join-Path $fixtureRoot "hosts"
 $targetHost = "meeting-ai-gateway.internal"
 $targetIp = "10.99.0.1"
-$flushCount = 0
+$global:PrivateGatewayFlushCount = 0
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -49,7 +49,7 @@ function Invoke-Shim {
         HostsPath = $hostsPath
         GatewayHostname = $targetHost
         GatewayIPv4 = $targetIp
-        DnsFlushAction = { $script:flushCount += 1; return 0 }
+        DnsFlushAction = { $global:PrivateGatewayFlushCount += 1; return 0 }
         ResolverProbe = $Resolver
         Confirm = $false
         MutexTimeoutSeconds = $MutexTimeoutSeconds
@@ -84,13 +84,15 @@ try {
         $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) "Hosts file must not gain a BOM."
     $aclAfter = (Get-Acl -LiteralPath $hostsPath).GetSecurityDescriptorSddlForm("All")
     Assert-True ($aclAfter -eq $aclBefore) "Hosts file ACL changed after atomic replace."
-    Assert-True ($flushCount -eq 1) "Apply must flush DNS exactly once."
+    Assert-True ($global:PrivateGatewayFlushCount -eq 1) `
+        "Apply must flush DNS exactly once."
 
     $firstBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($hostsPath))
     Invoke-Shim
     $secondBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($hostsPath))
     Assert-True ($firstBytes -eq $secondBytes) "Idempotent apply changed the hosts file."
-    Assert-True ($flushCount -eq 2) "Idempotent apply must still verify live resolution."
+    Assert-True ($global:PrivateGatewayFlushCount -eq 2) `
+        "Idempotent apply must still verify live resolution."
 
     Invoke-Shim -RestoreBackup
     Assert-True ([IO.File]::ReadAllText($hostsPath) -eq $original) `
@@ -189,6 +191,7 @@ try {
 
     Write-Host "private gateway hosts shim Windows contract: PASS"
 } finally {
+    Remove-Variable -Name PrivateGatewayFlushCount -Scope Global -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $fixtureRoot) {
         Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
     }
