@@ -37,6 +37,7 @@ jobs:
           foreach ($script in @(
             "deploy/gpu-host/update.ps1",
             "deploy/gpu-host/drift-guard.ps1",
+            "deploy/gpu-host/deployment-state.ps1",
             "deploy/gpu-host/start-live-stt.ps1",
             "deploy/gpu-host/start-meeting-ai.ps1",
             "deploy/gpu-host/meeting-ai-runtime-env.ps1",
@@ -240,11 +241,15 @@ jobs:
         shell: powershell
         run: |
           foreach ($script in @(
+            "deploy/gpu-host/update.ps1",
+            "deploy/gpu-host/drift-guard.ps1",
+            "deploy/gpu-host/deployment-state.ps1",
             "deploy/gpu-host/start-meeting-ai.ps1",
             "deploy/gpu-host/meeting-ai-runtime-env.ps1",
             "deploy/gpu-host/configure-meeting-ai.ps1",
             "deploy/gpu-host/configure-private-gateway-host.ps1",
             "deploy/gpu-host/install.ps1",
+            "tests/windows/test-deployment-ledger.ps1",
             "tests/windows/test-meeting-ai-runtime.ps1",
             "tests/windows/test-private-gateway-host.ps1"
           )) {
@@ -258,3 +263,7 @@ jobs:
       - name: Private gateway hosts shim atomicity and rollback contract
         shell: powershell
         run: .\tests\windows\test-private-gateway-host.ps1
+
+      - name: Immutable commit ledger rollout rollback and drift contract
+        shell: powershell
+        run: .\tests\windows\test-deployment-ledger.ps1

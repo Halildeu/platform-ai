@@ -1,21 +1,26 @@
 <#
 .SYNOPSIS
-  Drift-proof GPU-host deploy update. Pins the deploy clone's tracked working
-  tree to origin/main, then restarts the live-stt + meeting-ai scheduled tasks.
+  Immutable GPU-host deploy update. Pins the deploy clone to an explicit full
+  commit, records a hardened deployment ledger, and restarts scheduled tasks.
 
 .DESCRIPTION
-  Replaces the fragile `cd C:\platform-ai; git pull` in README update section.
+  A moving origin/main head is discovery truth, not a deploy artifact. Normal
+  deploy requires -TargetCommit with exactly 40 hexadecimal characters. The
+  commit must exist and remain an ancestor of origin/main after a fresh fetch.
+  The resulting working tree is detached at that exact commit.
 
   The deploy clone (e.g. C:\Users\denetimpc\platform-ai) is a READ-ONLY MIRROR
   of origin/main. Development must NEVER happen here - see drift-guard.ps1 and
   the 2026-06-21 incident where 13 unpushed diarization commits (#161/#164) sat
   local-only on this clone (single point of failure, no GitHub backup).
 
-  FAIL-CLOSED SAFETY: this script REFUSES to `git reset --hard` if it would
-  destroy un-backed-up local work (commits not in origin/$Branch, or a dirty
-  tracked tree) OR if it cannot positively verify the state (missing origin ref,
-  a failed git query). On any doubt it aborts and tells the operator to push +
-  PR first. -Force overrides ONLY after the work is confirmed on GitHub.
+  A SYSTEM + Administrators-only deployment-state.json records the current and
+  bounded previous commit. -Rollback may target only that previous commit and
+  consumes the rollback slot so repeated rollback cannot ping-pong revisions.
+
+  Exit codes: 0 success; 2 guard/no-mutation failure; 3 source pin landed but
+  scheduled-task restart failed; 4 automatic source restoration or rollback
+  mutation failed. Warmup remains best-effort and transcript-free.
 
 .PARAMETER RepoRoot
   Deploy clone path. Defaults to the repo this script lives in (deploy/gpu-host/..).
@@ -23,28 +28,75 @@
 .PARAMETER Branch
   Tracking branch. Default 'main'. The deploy clone tracks main only.
 
-.PARAMETER NoRestart
-  Update the working tree but do not restart the scheduled tasks.
+.PARAMETER StatePath
+  Hardened deployment ledger path. Defaults to ProgramData.
 
-.PARAMETER Force
-  Override the unpushed-work safety abort. Use ONLY after preserving local work.
+.PARAMETER Rollback
+  Roll back only to deployment-state.json previousCommit.
+
+.PARAMETER NoRestart
+  Pin and ledger the working tree but do not restart scheduled tasks.
 
 .EXAMPLE
   cd C:\Users\denetimpc\platform-ai
   Set-ExecutionPolicy -Scope Process Bypass
-  .\deploy\gpu-host\update.ps1
+  .\deploy\gpu-host\update.ps1 -TargetCommit <full-40-hex-commit>
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
 param(
   [string]$RepoRoot = "",
-  [string]$Branch   = "main",
-  [switch]$NoRestart,
-  [switch]$Force
+  [string]$Branch = "main",
+  [string]$TargetCommit = "",
+  [string]$StatePath = "C:\ProgramData\Acik\platform-ai\deployment-state.json",
+  [switch]$Rollback,
+  [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
-function Fail($msg) { Write-Error $msg; exit 1 }
+$script:DeployExitGuard = 2
+$script:DeployExitRestartFailed = 3
+$script:DeployExitRollbackFailed = 4
+$script:DeployMutex = $null
+$script:DeployLockTaken = $false
+$script:DefaultDeploymentStatePath = `
+  "C:\ProgramData\Acik\platform-ai\deployment-state.json"
+$script:TestFaultsEnabled = (
+  $env:CI -eq "true" -and
+  $StatePath -ne $script:DefaultDeploymentStatePath
+)
+
+function Stop-Deploy {
+  param(
+    [Parameter(Mandatory = $true)][string]$Message,
+    [Parameter(Mandatory = $true)][int]$Code
+  )
+  Write-Error $Message
+  if ($script:DeployMutex) {
+    if ($script:DeployLockTaken) {
+      try { $script:DeployMutex.ReleaseMutex() } catch { }
+    }
+    $script:DeployMutex.Dispose()
+    $script:DeployMutex = $null
+  }
+  exit $Code
+}
+
+function Invoke-GitCapture {
+  param([Parameter(Mandatory = $true)][string[]]$GitArgs)
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = @(& git @GitArgs 2> $null)
+    return [pscustomobject]@{
+      ExitCode = $LASTEXITCODE
+      Output = $output
+    }
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
 function Invoke-GitStream {
   param([Parameter(Mandatory = $true)][string[]]$GitArgs)
   $oldEap = $ErrorActionPreference
@@ -66,75 +118,231 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   }
   if ([string]::IsNullOrWhiteSpace($scriptDir)) {
-    Fail "Could not resolve script directory. Pass -RepoRoot explicitly."
+    Stop-Deploy "Could not resolve script directory. Pass -RepoRoot explicitly." `
+      $script:DeployExitGuard
   }
   $RepoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
 }
 
 if (-not (Test-Path (Join-Path $RepoRoot ".git"))) {
-  Fail "RepoRoot '$RepoRoot' is not a git clone. Pass -RepoRoot explicitly."
+  Stop-Deploy "RepoRoot '$RepoRoot' is not a git clone. Pass -RepoRoot explicitly." `
+    $script:DeployExitGuard
 }
+if ($Branch -notmatch '^[A-Za-z0-9._/-]+$') {
+  Stop-Deploy "Branch contains unsupported characters." $script:DeployExitGuard
+}
+
+$stateModule = Join-Path $PSScriptRoot "deployment-state.ps1"
+if (-not (Test-Path -LiteralPath $stateModule -PathType Leaf)) {
+  Stop-Deploy "Missing deployment-state.ps1 beside update.ps1." `
+    $script:DeployExitGuard
+}
+. $stateModule
+
+$script:DeployMutex = New-Object Threading.Mutex(
+  $false,
+  "Global\platform-ai-gpu-deploy-v1"
+)
+try {
+  $script:DeployLockTaken = $script:DeployMutex.WaitOne(0)
+} catch [Threading.AbandonedMutexException] {
+  $script:DeployLockTaken = $true
+}
+if (-not $script:DeployLockTaken) {
+  Stop-Deploy "Another GPU deploy operation is already active." `
+    $script:DeployExitGuard
+}
+
 Set-Location $RepoRoot
-Write-Host "[update] repo=$RepoRoot branch=$Branch" -ForegroundColor Cyan
+Write-Host "[update] repo=$RepoRoot branch=$Branch rollback=$Rollback" `
+  -ForegroundColor Cyan
 
-# 1. Refresh remote refs (needed to compare against origin/$Branch). Fail-closed.
+# Refresh remote refs before every object or ancestry decision.
 if ((Invoke-GitStream -GitArgs @("fetch", "--prune", "origin")) -ne 0) {
-  Fail "git fetch failed (network / auth). Aborting - no mutation."
+  Stop-Deploy "git fetch failed (network/auth). No mutation." `
+    $script:DeployExitGuard
 }
 
-# 2. FAIL-CLOSED guard. EVERY safety query must succeed; if we cannot positively
-#    verify the state we ABORT, rather than risk a reset --hard that loses work.
 $originRef = "origin/{0}" -f $Branch
 $originRemoteRef = "refs/remotes/{0}" -f $originRef
 $unpushedRange = "{0}..HEAD" -f $originRef
+$branchRef = "refs/remotes/{0}" -f $originRef
 
-git rev-parse --verify --quiet $originRemoteRef *> $null
-if ($LASTEXITCODE -ne 0) { Fail "$originRef not found after fetch - cannot verify safety. Aborting." }
-
-$head = git rev-parse --abbrev-ref HEAD
-if ($LASTEXITCODE -ne 0) { Fail "git rev-parse HEAD failed - cannot verify safety. Aborting." }
-$head = "$head".Trim()
-
-$dirty = @(git status --porcelain --untracked-files=no)
-if ($LASTEXITCODE -ne 0) { Fail "git status failed - cannot verify safety. Aborting." }
-
-$unpushed = @(git log --oneline $unpushedRange)
-if ($LASTEXITCODE -ne 0) { Fail "git log $unpushedRange failed - cannot verify local work. Aborting." }
-
-if (($unpushed.Count -gt 0 -or $dirty.Count -gt 0) -and -not $Force) {
-  Write-Host ""
-  Write-Host "  ABORT - un-backed-up local work would be DESTROYED by reset --hard:" -ForegroundColor Red
-  if ($head -ne $Branch)     { Write-Host "    - HEAD is on '$head', not '$Branch'" -ForegroundColor Yellow }
-  if ($unpushed.Count -gt 0) { Write-Host "    - $($unpushed.Count) local commit(s) not in ${originRef}:" -ForegroundColor Yellow; $unpushed | ForEach-Object { Write-Host "        $_" } }
-  if ($dirty.Count -gt 0)    { Write-Host "    - $($dirty.Count) modified tracked file(s)" -ForegroundColor Yellow }
-  Write-Host ""
-  Write-Host "  This clone is a deploy MIRROR - it must not hold local work." -ForegroundColor Red
-  Write-Host "  Preserve it FIRST, then re-run:" -ForegroundColor Red
-  Write-Host "    1. In your DEV clone (not here): push the branch + open a PR." -ForegroundColor Gray
-  Write-Host "    2. If the work only exists here: extract via git bundle ->" -ForegroundColor Gray
-  Write-Host "       git bundle create C:\Temp\save.bundle $head --not $originRef" -ForegroundColor Gray
-  Write-Host "       then copy it off-box and push from a credentialed clone." -ForegroundColor Gray
-  Write-Host "    3. Only after it is on GitHub: re-run with -Force." -ForegroundColor Gray
-  Fail "Refusing to discard un-backed-up work without -Force."
+$originCheck = Invoke-GitCapture -GitArgs @(
+  "rev-parse", "--verify", "--quiet", $originRemoteRef
+)
+if ($originCheck.ExitCode -ne 0) {
+  Stop-Deploy "$originRef not found after fetch. No mutation." `
+    $script:DeployExitGuard
 }
 
-# 3. Pin to origin/$Branch atomically (checkout -B sets the branch + tree), then
-#    reset --hard (belt-and-suspenders). Each step is exit-checked - a failed
-#    checkout must NOT fall through to reset on the wrong ref.
-$before = (git rev-parse HEAD).Trim()
-# -Force genuinely discards confirmed-preserved local work (clobbers a dirty
-# tracked tree); the non-Force path stays safe and aborts on any obstruction.
-if ($Force) {
-  $checkoutExit = Invoke-GitStream -GitArgs @("checkout", "-f", "-B", $Branch, $originRef)
+$headResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+if ($headResult.ExitCode -ne 0 -or $headResult.Output.Count -ne 1) {
+  Stop-Deploy "git rev-parse HEAD failed. No mutation." `
+    $script:DeployExitGuard
+}
+$before = "$($headResult.Output[0])".Trim().ToLowerInvariant()
+if ($before -notmatch '^[0-9a-f]{40}$') {
+  Stop-Deploy "Current HEAD is not a full commit id. No mutation." `
+    $script:DeployExitGuard
+}
+
+$dirtyResult = Invoke-GitCapture -GitArgs @(
+  "status", "--porcelain", "--untracked-files=no"
+)
+if ($dirtyResult.ExitCode -ne 0) {
+  Stop-Deploy "git status failed. No mutation." $script:DeployExitGuard
+}
+
+$unpushedResult = Invoke-GitCapture -GitArgs @("rev-list", $unpushedRange)
+if ($unpushedResult.ExitCode -ne 0) {
+  Stop-Deploy "git rev-list $unpushedRange failed. No mutation." `
+    $script:DeployExitGuard
+}
+
+if ($dirtyResult.Output.Count -gt 0) {
+  Stop-Deploy "Dirty tracked tree detected. Preserve work before deploy." `
+    $script:DeployExitGuard
+}
+if ($unpushedResult.Output.Count -gt 0) {
+  Stop-Deploy "Local commit(s) not present in $originRef. Preserve via push + PR." `
+    $script:DeployExitGuard
+}
+
+$state = $null
+try {
+  $state = Read-DeploymentState -StatePath $StatePath
+} catch {
+  Stop-Deploy ("Deployment ledger rejected: {0}" -f $_.Exception.Message) `
+    $script:DeployExitGuard
+}
+if ($state -and $state.currentCommit -ne $before) {
+  Stop-Deploy "HEAD does not match deployment ledger currentCommit. No mutation." `
+    $script:DeployExitGuard
+}
+
+$action = "deploy"
+$target = ""
+$previous = $null
+if ($Rollback) {
+  $action = "rollback"
+  if (-not [string]::IsNullOrWhiteSpace($TargetCommit)) {
+    Stop-Deploy "-Rollback cannot be combined with -TargetCommit." `
+      $script:DeployExitGuard
+  }
+  if (-not $state -or [string]::IsNullOrWhiteSpace($state.previousCommit)) {
+    Stop-Deploy "Rollback requested but ledger has no previousCommit." `
+      $script:DeployExitGuard
+  }
+  $target = $state.previousCommit
 } else {
-  $checkoutExit = Invoke-GitStream -GitArgs @("checkout", "-B", $Branch, $originRef)
+  if ($TargetCommit.ToLowerInvariant() -notmatch '^[0-9a-f]{40}$') {
+    Stop-Deploy "Normal deploy requires -TargetCommit with exactly 40 hex characters." `
+      $script:DeployExitGuard
+  }
+  $target = $TargetCommit.ToLowerInvariant()
+  if ($state) {
+    if ($target -eq $before) { $previous = $state.previousCommit }
+    else { $previous = $before }
+  }
 }
-if ($checkoutExit -ne 0) { Fail "git checkout -B $Branch $originRef failed - deploy state unchanged." }
-if ((Invoke-GitStream -GitArgs @("reset", "--hard", $originRef)) -ne 0) {
-  Fail "git reset --hard $originRef failed."
+
+$objectSpec = $target + "^{commit}"
+$objectResult = Invoke-GitCapture -GitArgs @("rev-parse", "--verify", $objectSpec)
+if ($objectResult.ExitCode -ne 0 -or $objectResult.Output.Count -ne 1 -or
+    "$($objectResult.Output[0])".Trim().ToLowerInvariant() -ne $target) {
+  Stop-Deploy "Target is not an available exact commit object. No mutation." `
+    $script:DeployExitGuard
 }
-$after = (git rev-parse HEAD).Trim()
-Write-Host "[update] $before -> $after (tracked tree pinned to $originRef)" -ForegroundColor Green
+$ancestorResult = Invoke-GitCapture -GitArgs @(
+  "merge-base", "--is-ancestor", $target, $originRef
+)
+if ($ancestorResult.ExitCode -ne 0) {
+  Stop-Deploy "Target is not an ancestor of $originRef. No mutation." `
+    $script:DeployExitGuard
+}
+
+if (-not $PSCmdlet.ShouldProcess(
+    $RepoRoot,
+    ("{0} immutable commit {1}" -f $action, $target)
+  )) {
+  Write-Host "[update] WhatIf/declined: validation passed; no mutation." `
+    -ForegroundColor Yellow
+  $script:DeployMutex.ReleaseMutex()
+  $script:DeployMutex.Dispose()
+  $script:DeployMutex = $null
+  exit 0
+}
+
+$pinFailedCode = $script:DeployExitRollbackFailed
+if ((Invoke-GitStream -GitArgs @("checkout", "--detach", $target)) -ne 0 -or
+    (Invoke-GitStream -GitArgs @("reset", "--hard", $target)) -ne 0) {
+  Stop-Deploy "Failed to pin target commit $target." $pinFailedCode
+}
+$afterResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+$symbolicResult = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
+if ($afterResult.ExitCode -ne 0 -or $afterResult.Output.Count -ne 1 -or
+    "$($afterResult.Output[0])".Trim().ToLowerInvariant() -ne $target -or
+    $symbolicResult.ExitCode -eq 0) {
+  Stop-Deploy "Detached exact-pin postcondition failed." $pinFailedCode
+}
+
+$ledgerRecord = New-DeploymentStateRecord -CurrentCommit $target `
+  -PreviousCommit $previous -BranchRef $branchRef -Action $action `
+  -Result "source-pinned"
+try {
+  if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE -eq "1") {
+    throw "CI fault injection: deployment ledger write failure"
+  }
+  Write-DeploymentStateAtomic -StatePath $StatePath -State $ledgerRecord
+} catch {
+  Write-Host "[update] ledger write failed; restoring pre-deploy commit" `
+    -ForegroundColor Red
+  $restoreOk = $false
+  if (-not ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE -eq "1")) {
+    $restoreOk = ((Invoke-GitStream -GitArgs @(
+      "checkout", "--detach", $before
+    )) -eq 0)
+  }
+  if ($restoreOk) {
+    $restoreOk = ((Invoke-GitStream -GitArgs @(
+      "reset", "--hard", $before
+    )) -eq 0)
+  }
+  if ($restoreOk) {
+    $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+    $restoreSymbolic = Invoke-GitCapture -GitArgs @(
+      "symbolic-ref", "-q", "HEAD"
+    )
+    $restoreOk = ($restoreHead.ExitCode -eq 0 -and
+      $restoreHead.Output.Count -eq 1 -and
+      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -eq $before -and
+      $restoreSymbolic.ExitCode -ne 0)
+  }
+  if (-not $restoreOk) {
+    Stop-Deploy "Ledger write and automatic source restoration failed." `
+      $script:DeployExitRollbackFailed
+  }
+  Stop-Deploy ("Ledger write failed; source restored: {0}" -f `
+    $_.Exception.Message) $script:DeployExitGuard
+}
+Write-Host "[update] $before -> $target (detached immutable pin)" `
+  -ForegroundColor Green
+
+function Set-DeploymentLedgerResult {
+  param([Parameter(Mandatory = $true)][string]$Result)
+
+  $ledgerRecord["lastResult"] = $Result
+  $ledgerRecord["timestampUtc"] = [DateTime]::UtcNow.ToString("o")
+  try {
+    Write-DeploymentStateAtomic -StatePath $StatePath -State $ledgerRecord
+  } catch {
+    Stop-Deploy ("Pinned source but ledger result update failed: {0}" -f `
+      $_.Exception.Message) $script:DeployExitRollbackFailed
+  }
+}
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
 #    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
@@ -256,11 +464,14 @@ function Wait-LiveSttStreamReady {
 
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
+  Set-DeploymentLedgerResult -Result "pinned-no-restart"
 } else {
   $restartFailed = $false
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
     if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
-      Write-Host "[update] task '$task' not installed (skipping)" -ForegroundColor Yellow
+      Write-Host "[update] ERROR: required task '$task' is not installed" `
+        -ForegroundColor Red
+      $restartFailed = $true
       continue
     }
     # /End returns non-zero when the task is not running (benign). When it WAS
@@ -275,7 +486,11 @@ if ($NoRestart) {
       Write-Host "[update] restarted $task" -ForegroundColor Green
     }
   }
-  if ($restartFailed) { Fail "One or more scheduled tasks failed to restart (git pin landed; services may be stale code)." }
+  if ($restartFailed) {
+    Set-DeploymentLedgerResult -Result "restart-failed"
+    Stop-Deploy "Source pin landed but one or more scheduled tasks failed to restart." `
+      $script:DeployExitRestartFailed
+  }
 }
 
 # 5. Warm live-stt so /health reaches "ok" after the deploy without a manual
@@ -337,3 +552,12 @@ if (-not $NoRestart -and -not $restartFailed) {
 }
 
 Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8300/health ; ws://127.0.0.1:8200/ws/stream ready" -ForegroundColor Cyan
+if (-not $NoRestart) {
+  Set-DeploymentLedgerResult -Result "tasks-restarted"
+}
+if ($script:DeployMutex) {
+  if ($script:DeployLockTaken) { $script:DeployMutex.ReleaseMutex() }
+  $script:DeployMutex.Dispose()
+  $script:DeployMutex = $null
+}
+exit 0
