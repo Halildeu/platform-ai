@@ -162,8 +162,7 @@ class AnalysisDeliveryRuntime:
     ) -> None:
         self.settings = settings
         self.enabled = settings.ingestion_enabled
-        self._owns_http_client = False
-        self._http_client = http_client
+        self._owns_transport = False
         self._store = store
         self._transport = transport
         self._random = random_source or random.Random()  # noqa: S311 - retry jitter, not crypto
@@ -183,10 +182,8 @@ class AnalysisDeliveryRuntime:
                 max_rows=settings.ingestion_max_rows,
             )
         if self.enabled and self._transport is None:
-            if self._http_client is None:
-                self._http_client = httpx.AsyncClient()
-                self._owns_http_client = True
-            self._transport = MeetingServiceClient(settings, self._http_client)
+            self._transport = MeetingServiceClient(settings, http_client)
+            self._owns_transport = True
 
     @property
     def worker_running(self) -> bool:
@@ -213,8 +210,8 @@ class AnalysisDeliveryRuntime:
                 self._worker.cancel()
                 await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
-        if self._owns_http_client and self._http_client is not None:
-            await self._http_client.aclose()
+        if self._owns_transport and isinstance(self._transport, MeetingServiceClient):
+            await self._transport.aclose()
 
     async def enqueue_analysis(
         self,
@@ -397,9 +394,13 @@ class AnalysisDeliveryRuntime:
             self.settings.ingestion_base_backoff_sec * (2 ** (message.attempt_count - 1)),
         )
         jitter = self.settings.ingestion_jitter_ratio
-        jittered = float(exponential * self._random.uniform(1.0 - jitter, 1.0 + jitter))
+        maximum = self.settings.ingestion_max_backoff_sec
+        jittered = min(
+            maximum,
+            float(exponential * self._random.uniform(1.0 - jitter, 1.0 + jitter)),
+        )
         if outcome.retry_after_sec is not None:
-            return float(max(jittered, outcome.retry_after_sec))
+            return float(min(maximum, max(jittered, outcome.retry_after_sec)))
         return float(jittered)
 
     async def _wait_for_work(self) -> None:

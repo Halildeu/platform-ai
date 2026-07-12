@@ -8,6 +8,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $deployDir = Join-Path $repoRoot "deploy\gpu-host"
 $runtimeScript = Join-Path $deployDir "meeting-ai-runtime-env.ps1"
 $configureScript = Join-Path $deployDir "configure-meeting-ai.ps1"
+$startScript = Join-Path $deployDir "start-meeting-ai.ps1"
 . $runtimeScript
 
 $runtimeRoot = Get-MeetingAiRuntimeRoot
@@ -15,6 +16,12 @@ $configPath = Join-Path $runtimeRoot "meeting-ai.env"
 $storePath = Join-Path $runtimeRoot "meeting-ai\analysis-delivery.sqlite3"
 $plainTestCredential = "ci-ephemeral-credential"
 $secureCredential = ConvertTo-SecureString $plainTestCredential -AsPlainText -Force
+$tlsSourceRoot = Join-Path $env:RUNNER_TEMP "meeting-ai-mtls-source"
+$tlsCaSource = Join-Path $tlsSourceRoot "ca.pem"
+$tlsCertSource = Join-Path $tlsSourceRoot "client.pem"
+$tlsKeySource = Join-Path $tlsSourceRoot "client.key"
+$startupProbeRoot = Join-Path $env:RUNNER_TEMP "meeting-ai-startup-cleanup"
+$plainTestKey = "-----BEGIN PRIVATE KEY-----`nci-ephemeral-key`n-----END PRIVATE KEY-----"
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -82,6 +89,65 @@ try {
         $env:MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI
     )) "DPAPI blob must not be exported to the child environment."
 
+    New-Item -ItemType Directory -Path $tlsSourceRoot -Force | Out-Null
+    [IO.File]::WriteAllText(
+        $tlsCaSource,
+        "-----BEGIN CERTIFICATE-----`nci-ca`n-----END CERTIFICATE-----",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    [IO.File]::WriteAllText(
+        $tlsCertSource,
+        "-----BEGIN CERTIFICATE-----`nci-client`n-----END CERTIFICATE-----",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    [IO.File]::WriteAllText(
+        $tlsKeySource,
+        $plainTestKey,
+        (New-Object Text.UTF8Encoding($false))
+    )
+    & $configureScript `
+        -TlsMode "mutual" `
+        -TlsCaPath $tlsCaSource `
+        -TlsClientCertPath $tlsCertSource `
+        -TlsClientKeyPath $tlsKeySource `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
+    $mtlsConfigText = [IO.File]::ReadAllText($configPath)
+    Assert-True ($mtlsConfigText.Contains("MAI_MEETING_SERVICE_TLS_MODE=mutual")) `
+        "Mutual TLS mode is missing."
+    Assert-True ($mtlsConfigText.Contains("MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI=")) `
+        "DPAPI client key blob is missing."
+    Assert-True (-not $mtlsConfigText.Contains($plainTestKey)) `
+        "Plain client key must not be stored in config."
+
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
+        "Mutual TLS runtime config import must succeed."
+    $runtimeKeyPath = Get-MeetingAiRuntimeTlsKeyPath
+    Assert-True (Test-Path -LiteralPath $runtimeKeyPath -PathType Leaf) `
+        "Runtime client key was not materialized."
+    Assert-MeetingAiAcl -Path $runtimeKeyPath
+    Assert-True ($env:MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH -eq $runtimeKeyPath) `
+        "Runtime client key path was not exported."
+    Assert-True ([IO.File]::ReadAllText($runtimeKeyPath).Contains("PRIVATE KEY")) `
+        "Runtime client key materialization failed."
+    Assert-True ([string]::IsNullOrWhiteSpace(
+        $env:MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI
+    )) "DPAPI key blob must not be exported to the child environment."
+
+    Assert-ThrowsLike {
+        & $startScript `
+            -RepoRoot $startupProbeRoot `
+            -Backend "mock" `
+            -RuntimeConfigPath $configPath `
+            -PythonExe "not-invoked.exe"
+    } "mock meeting-ai backend is forbidden"
+    Assert-True (-not (Test-Path -LiteralPath $runtimeKeyPath -PathType Leaf)) `
+        "Startup rejection must clean the materialized plaintext client key."
+    Assert-True ([string]::IsNullOrWhiteSpace(
+        $env:MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH
+    )) "Startup rejection must clear the runtime key environment path."
+
     $beforeValues = Read-MeetingAiConfigFile -Path $configPath
     $beforeActive = $beforeValues["MAI_INGESTION_ACTIVE_KEY_ID"]
     $beforeJson = Unprotect-MeetingAiSecret `
@@ -148,10 +214,17 @@ try {
 
     Write-Host "meeting-ai Windows runtime contract: PASS"
 } finally {
+    Clear-MeetingAiRuntimeTlsKey
     $env:MAI_MEETING_SERVICE_CLIENT_SECRET = $null
     $env:MAI_INGESTION_ENCRYPTION_KEYS_JSON = $null
     $secureCredential.Dispose()
     if (Test-Path -LiteralPath $runtimeRoot) {
         Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $tlsSourceRoot) {
+        Remove-Item -LiteralPath $tlsSourceRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $startupProbeRoot) {
+        Remove-Item -LiteralPath $startupProbeRoot -Recurse -Force
     }
 }

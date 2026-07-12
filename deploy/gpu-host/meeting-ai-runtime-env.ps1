@@ -28,6 +28,20 @@ function Get-MeetingAiConfigSchema {
         }
         "MAI_MEETING_SERVICE_AUDIENCE" = @{ Required = $true; SecretTarget = "" }
         "MAI_MEETING_SERVICE_SCOPE" = @{ Required = $true; SecretTarget = "" }
+        "MAI_MEETING_SERVICE_TLS_MODE" = @{ Required = $true; SecretTarget = "" }
+        "MAI_MEETING_SERVICE_TLS_CA_PATH" = @{ Required = $false; SecretTarget = "" }
+        "MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH" = @{
+            Required = $false
+            SecretTarget = ""
+        }
+        "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI" = @{
+            Required = $false
+            SecretTarget = "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH"
+        }
+        "MAI_MEETING_SERVICE_TLS_RELOAD_INTERVAL_SEC" = @{
+            Required = $false
+            SecretTarget = ""
+        }
         "MAI_INGESTION_STORE_PATH" = @{ Required = $true; SecretTarget = "" }
         "MAI_INGESTION_ACTIVE_KEY_ID" = @{ Required = $true; SecretTarget = "" }
         "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI" = @{
@@ -394,6 +408,34 @@ function Assert-MeetingAiConfigValues {
             throw "$urlName must be an absolute HTTPS URL."
         }
     }
+    $tlsMode = $Values["MAI_MEETING_SERVICE_TLS_MODE"].ToLowerInvariant()
+    if ($tlsMode -notin @("server", "mutual")) {
+        throw "MAI_MEETING_SERVICE_TLS_MODE must be exactly server or mutual."
+    }
+    if ($tlsMode -eq "mutual") {
+        foreach ($name in @(
+                "MAI_MEETING_SERVICE_TLS_CA_PATH",
+                "MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH",
+                "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"
+            )) {
+            if (-not $Values.ContainsKey($name) -or
+                [string]::IsNullOrWhiteSpace($Values[$name])) {
+                throw "Mutual TLS runtime config is missing required key: $name."
+            }
+        }
+    }
+    foreach ($pathName in @(
+            "MAI_MEETING_SERVICE_TLS_CA_PATH",
+            "MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH"
+        )) {
+        if (-not $Values.ContainsKey($pathName)) { continue }
+        $tlsPath = Assert-MeetingAiRuntimePath -Path $Values[$pathName] `
+            -Purpose "Meeting-service TLS material"
+        if (-not (Test-Path -LiteralPath $tlsPath -PathType Leaf)) {
+            throw "$pathName must reference an existing TLS material file."
+        }
+        Assert-MeetingAiAcl -Path $tlsPath
+    }
     [void](Assert-MeetingAiRuntimePath -Path $Values["MAI_INGESTION_STORE_PATH"] `
         -Purpose "Analysis delivery store")
 }
@@ -464,6 +506,26 @@ function Import-MeetingAiRuntimeEnvironment {
 
         $storeParent = Split-Path -Parent $values["MAI_INGESTION_STORE_PATH"]
         Assert-MeetingAiAcl -Path $storeParent -Directory
+
+        if ($values["MAI_MEETING_SERVICE_TLS_MODE"].ToLowerInvariant() -eq "mutual") {
+            $clientKey = Unprotect-MeetingAiSecret `
+                -ProtectedBase64 $values["MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"] `
+                -KeyName "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"
+            try {
+                $runtimeKeyPath = Join-Path (Get-MeetingAiRuntimeRoot) `
+                    "runtime\meeting-service-client.key"
+                Write-MeetingAiSecretFileAtomic -Path $runtimeKeyPath -Content $clientKey
+                [Environment]::SetEnvironmentVariable(
+                    "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH",
+                    $runtimeKeyPath,
+                    "Process"
+                )
+            } finally {
+                $clientKey = $null
+            }
+        } else {
+            Clear-MeetingAiRuntimeTlsKey
+        }
     }
 
     $schema = Get-MeetingAiConfigSchema
@@ -475,6 +537,53 @@ function Import-MeetingAiRuntimeEnvironment {
         [Environment]::SetEnvironmentVariable($name, $resolvedSecrets[$name], "Process")
     }
     return $true
+}
+
+function Get-MeetingAiRuntimeTlsKeyPath {
+    return Join-Path (Get-MeetingAiRuntimeRoot) "runtime\meeting-service-client.key"
+}
+
+function Clear-MeetingAiRuntimeTlsKey {
+    $runtimeKeyPath = Get-MeetingAiRuntimeTlsKeyPath
+    if (Test-Path -LiteralPath $runtimeKeyPath -PathType Leaf) {
+        Remove-Item -LiteralPath $runtimeKeyPath -Force
+    }
+    [Environment]::SetEnvironmentVariable(
+        "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH",
+        $null,
+        "Process"
+    )
+}
+
+function Write-MeetingAiSecretFileAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Content)) {
+        throw "Runtime secret material must not be empty."
+    }
+    $full = Assert-MeetingAiRuntimePath -Path $Path -Purpose "Runtime TLS key"
+    $directory = Initialize-MeetingAiDirectory -Path (Split-Path -Parent $full)
+    $temp = Join-Path $directory (".meeting-ai-key-{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
+    try {
+        [IO.File]::WriteAllBytes($temp, @())
+        Set-Acl -LiteralPath $temp -AclObject (New-MeetingAiAcl)
+        [IO.File]::WriteAllText($temp, $Content, (New-Object Text.UTF8Encoding($false)))
+        Assert-MeetingAiAcl -Path $temp
+        if (Test-Path -LiteralPath $full -PathType Leaf) {
+            [IO.File]::Replace($temp, $full, $null, $true)
+        } else {
+            [IO.File]::Move($temp, $full)
+        }
+        Set-Acl -LiteralPath $full -AclObject (New-MeetingAiAcl)
+        Assert-MeetingAiAcl -Path $full
+    } finally {
+        if (Test-Path -LiteralPath $temp) {
+            Remove-Item -LiteralPath $temp -Force
+        }
+    }
 }
 
 function Write-MeetingAiConfigAtomic {
@@ -505,6 +614,13 @@ function Write-MeetingAiConfigAtomic {
                 -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
             Assert-MeetingAiKeyring -KeyringJson $candidateKeyring `
                 -ActiveKeyId $candidate["MAI_INGESTION_ACTIVE_KEY_ID"]
+            if ($candidate["MAI_MEETING_SERVICE_TLS_MODE"].ToLowerInvariant() -eq
+                "mutual") {
+                $candidateClientKey = Unprotect-MeetingAiSecret `
+                    -ProtectedBase64 $candidate["MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"] `
+                    -KeyName "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"
+                $candidateClientKey = $null
+            }
             $candidateClientSecret = $null
             $candidateKeyring = $null
         }

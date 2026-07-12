@@ -18,6 +18,8 @@ import base64
 import binascii
 import json
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -87,6 +89,11 @@ class Settings(BaseSettings):
     # param (repeated) — NOT an OAuth2 `scope` (auth-service ignores `scope` and
     # requires `audience`). Comma-separated for multiple; env name kept for back-compat.
     meeting_service_scope: str = Field(default="meeting:analysis-result:write")
+    meeting_service_tls_mode: Literal["server", "mutual"] = Field(default="server")
+    meeting_service_tls_ca_path: Path | None = Field(default=None)
+    meeting_service_tls_client_cert_path: Path | None = Field(default=None)
+    meeting_service_tls_client_key_path: Path | None = Field(default=None)
+    meeting_service_tls_reload_interval_sec: float = Field(default=60.0, ge=1.0, le=3600.0)
 
     @property
     def meeting_service_permissions(self) -> list[str]:
@@ -181,6 +188,35 @@ class Settings(BaseSettings):
             raise ValueError(
                 "MAI_INGESTION_ENABLED=True requires token URL, client id, and client secret"
             )
+        for name, value in (
+            ("MAI_MEETING_SERVICE_BASE_URL", self.meeting_service_base_url),
+            ("MAI_MEETING_SERVICE_TOKEN_URL", self.meeting_service_token_url),
+        ):
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+                raise ValueError(
+                    f"{name} must be an absolute HTTPS URL without embedded credentials"
+                )
+
+        tls_paths = {
+            "MAI_MEETING_SERVICE_TLS_CA_PATH": self.meeting_service_tls_ca_path,
+            "MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH": (self.meeting_service_tls_client_cert_path),
+            "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH": self.meeting_service_tls_client_key_path,
+        }
+        if self.meeting_service_tls_mode == "mutual" and any(
+            path is None for path in tls_paths.values()
+        ):
+            raise ValueError(
+                "MAI_MEETING_SERVICE_TLS_MODE=mutual requires CA, client certificate, and "
+                "client key paths"
+            )
+        for name, path in tls_paths.items():
+            if path is None:
+                continue
+            if not path.is_absolute():
+                raise ValueError(f"{name} must be an absolute path")
+            if not path.is_file():
+                raise ValueError(f"{name} must reference a readable file")
         if not self.ingestion_store_path.is_absolute():
             raise ValueError("MAI_INGESTION_STORE_PATH must be absolute when ingestion is enabled")
         keys = self.ingestion_encryption_keys()

@@ -42,6 +42,19 @@ cd C:\platform-ai
   -MeetingServiceTokenUrl "https://<internal-auth-service-origin>/oauth2/token"
 ```
 
+Kalici uretim siniri icin ayni komut mTLS malzemesini operator tarafindan dosya
+yolu ile alir; private key degeri komut satirina yazilmaz:
+
+```powershell
+.\deploy\gpu-host\configure-meeting-ai.ps1 `
+  -MeetingServiceBaseUrl "https://meeting-ai-gateway.internal:<port>" `
+  -MeetingServiceTokenUrl "https://meeting-ai-gateway.internal:<port>/oauth2/token" `
+  -TlsMode mutual `
+  -TlsCaPath "C:\secure-transfer\meeting-ai-ca.pem" `
+  -TlsClientCertPath "C:\secure-transfer\meeting-ai-client.pem" `
+  -TlsClientKeyPath "C:\secure-transfer\meeting-ai-client.key"
+```
+
 Config `C:\ProgramData\Acik\platform-ai\meeting-ai.env` altinda olusur. OAuth
 client secret ve AES-256-GCM keyring DPAPI LocalMachine ciphertext olarak tutulur;
 dosya ve outbox dizini yalniz `SYSTEM` ile `BUILTIN\Administrators` ACL'ine
@@ -51,6 +64,18 @@ cikar. Dosya baska hosta kopyalanamaz; DPAPI blob yalniz uretildigi makinede aci
 DPAPI optional entropy repo icinde sabittir ve ek bir parola degildir; ayni makinede
 gizlilik siniri dar ACL'dir. Bu nedenle loader ACL inheritance, owner ve tum Allow
 ACE'lerini SID bazinda her boot'ta yeniden dogrular.
+
+mTLS client private key'i configte yalniz DPAPI LocalMachine ciphertext olarak
+tutulur. Launcher key'i servis omru icin hardened runtime dizinine atomik olarak
+materialize eder, yalniz `SYSTEM` ve `BUILTIN\Administrators` ACL'ini kabul eder ve
+servis ciktiginda dosyayi temizler. CA ve client certificate public malzeme olsa da
+ayni dar ACL'li runtime kokune versioned dosya olarak kopyalanir. Rotation yeni
+DPAPI configini atomik yazar; Scheduled Task restart'i yeni cert/key ciftini birlikte
+secer. Bu restart hem rollback hem de beklenmeyen process-kill sonrasi stale
+runtime-key temizligi icin zorunlu operasyon adimidir. Servis icindeki metadata
+reload'u Kubernetes Secret gibi cert/key setini atomik degistiren orchestrator'lar
+icin ek kesintisiz rotation destegidir; Windows DPAPI kanalinda restart gate'i
+bypass edilmez.
 
 AES key rotation eski key'leri silmeden additive yapilir:
 

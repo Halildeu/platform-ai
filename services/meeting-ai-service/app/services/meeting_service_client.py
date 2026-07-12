@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import email.utils
+import ssl
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
 
 import httpx
 
@@ -35,10 +38,172 @@ class _CachedToken:
     expires_at_monotonic: float
 
 
+class MeetingServiceTlsError(RuntimeError):
+    """The pinned TLS material is unavailable or cannot be loaded safely."""
+
+
+_TlsFingerprint = tuple[tuple[str, int, int], ...]
+_ClientFactory = Callable[[ssl.SSLContext], httpx.AsyncClient]
+
+
+def _tls_paths(settings: Settings) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    if settings.meeting_service_tls_ca_path is not None:
+        paths.append(settings.meeting_service_tls_ca_path)
+    if settings.meeting_service_tls_mode == "mutual":
+        assert settings.meeting_service_tls_client_cert_path is not None
+        assert settings.meeting_service_tls_client_key_path is not None
+        paths.extend(
+            (
+                settings.meeting_service_tls_client_cert_path,
+                settings.meeting_service_tls_client_key_path,
+            )
+        )
+    return tuple(paths)
+
+
+def _tls_fingerprint(settings: Settings) -> _TlsFingerprint:
+    """Return metadata only; certificate/key contents never enter logs or state."""
+    fingerprint: list[tuple[str, int, int]] = []
+    try:
+        for path in _tls_paths(settings):
+            stat = path.stat()
+            fingerprint.append((str(path), stat.st_mtime_ns, stat.st_size))
+    except OSError as exc:
+        raise MeetingServiceTlsError("meeting-service TLS material is unavailable") from exc
+    return tuple(fingerprint)
+
+
+def build_meeting_service_ssl_context(settings: Settings) -> ssl.SSLContext:
+    """Build a hostname-verifying TLS context with optional client authentication."""
+    try:
+        context = ssl.create_default_context(
+            cafile=(
+                str(settings.meeting_service_tls_ca_path)
+                if settings.meeting_service_tls_ca_path is not None
+                else None
+            )
+        )
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        if settings.meeting_service_tls_mode == "mutual":
+            assert settings.meeting_service_tls_client_cert_path is not None
+            assert settings.meeting_service_tls_client_key_path is not None
+            context.load_cert_chain(
+                certfile=str(settings.meeting_service_tls_client_cert_path),
+                keyfile=str(settings.meeting_service_tls_client_key_path),
+            )
+        return context
+    except (OSError, ssl.SSLError) as exc:
+        raise MeetingServiceTlsError("meeting-service TLS material could not be loaded") from exc
+
+
+class ReloadingHttpClient:
+    """Own an httpx client and atomically reload changed CA/client-cert material."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        client_factory: _ClientFactory | None = None,
+    ) -> None:
+        self._settings = settings
+        self._external_client = client
+        self._owned_client: httpx.AsyncClient | None = None
+        self._client_factory = client_factory or (
+            lambda context: httpx.AsyncClient(verify=context, trust_env=False)
+        )
+        self._fingerprint: _TlsFingerprint | None = None
+        self._next_check = 0.0
+        self._lock = asyncio.Lock()
+        self._active_requests: dict[httpx.AsyncClient, int] = {}
+        self._retired_clients: set[httpx.AsyncClient] = set()
+
+    async def post(self, *args: object, **kwargs: object) -> httpx.Response:
+        if self._external_client is not None:
+            return await self._external_client.post(*args, **kwargs)  # type: ignore[arg-type]
+
+        client = await self._acquire_client()
+        try:
+            return await client.post(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            await self._release_client(client)
+
+    async def _acquire_client(self) -> httpx.AsyncClient:
+        client, close_after_unlock = await self._get_or_refresh_client(acquire=True)
+        if close_after_unlock is not None:
+            await close_after_unlock.aclose()
+        return client
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        client, close_after_unlock = await self._get_or_refresh_client(acquire=False)
+        if close_after_unlock is not None:
+            await close_after_unlock.aclose()
+        return client
+
+    async def _get_or_refresh_client(
+        self, *, acquire: bool
+    ) -> tuple[httpx.AsyncClient, httpx.AsyncClient | None]:
+        if self._external_client is not None:
+            return self._external_client, None
+
+        async with self._lock:
+            now = time.monotonic()
+            close_after_unlock: httpx.AsyncClient | None = None
+            if self._owned_client is None or now >= self._next_check:
+                fingerprint = _tls_fingerprint(self._settings)
+                self._next_check = now + self._settings.meeting_service_tls_reload_interval_sec
+                if self._owned_client is None or fingerprint != self._fingerprint:
+                    context = build_meeting_service_ssl_context(self._settings)
+                    replacement = self._client_factory(context)
+                    previous = self._owned_client
+                    self._owned_client = replacement
+                    self._fingerprint = fingerprint
+                    if previous is not None:
+                        if self._active_requests.get(previous, 0) > 0:
+                            self._retired_clients.add(previous)
+                        else:
+                            close_after_unlock = previous
+
+            assert self._owned_client is not None
+            client = self._owned_client
+            if acquire:
+                self._active_requests[client] = self._active_requests.get(client, 0) + 1
+            return client, close_after_unlock
+
+    async def _release_client(self, client: httpx.AsyncClient) -> None:
+        close_after_unlock = False
+        async with self._lock:
+            active = self._active_requests.get(client, 0)
+            if active <= 1:
+                self._active_requests.pop(client, None)
+                if client in self._retired_clients:
+                    self._retired_clients.remove(client)
+                    close_after_unlock = True
+            else:
+                self._active_requests[client] = active - 1
+        if close_after_unlock:
+            await client.aclose()
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            clients = set(self._retired_clients)
+            if self._owned_client is not None:
+                clients.add(self._owned_client)
+            self._owned_client = None
+            self._fingerprint = None
+            self._retired_clients.clear()
+            self._active_requests.clear()
+        for client in clients:
+            await client.aclose()
+
+
 class ServiceTokenClient:
     """OAuth2 client-credentials token cache; credentials are never persisted."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
+    def __init__(self, settings: Settings, client: ReloadingHttpClient) -> None:
         self._settings = settings
         self._client = client
         self._cached: _CachedToken | None = None
@@ -73,7 +238,7 @@ class ServiceTokenClient:
                     },
                     timeout=self._settings.ingestion_timeout_sec,
                 )
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, MeetingServiceTlsError) as exc:
                 return None, DeliveryAttempt(
                     DeliveryDisposition.RETRY,
                     error_code=f"token_network_{type(exc).__name__}",
@@ -124,10 +289,10 @@ class ServiceTokenClient:
 class MeetingServiceClient:
     """Classify delivery outcomes without logging response bodies or credentials."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings
-        self._client = client
-        self._tokens = ServiceTokenClient(settings, client)
+        self._client = ReloadingHttpClient(settings, client)
+        self._tokens = ServiceTokenClient(settings, self._client)
 
     async def deliver(self, message: ClaimedMessage) -> DeliveryAttempt:
         token, token_error = await self._tokens.get_token()
@@ -148,7 +313,7 @@ class MeetingServiceClient:
                 },
                 timeout=self._settings.ingestion_timeout_sec,
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, MeetingServiceTlsError) as exc:
             return DeliveryAttempt(
                 DeliveryDisposition.RETRY,
                 error_code=f"ingestion_network_{type(exc).__name__}",
@@ -174,6 +339,9 @@ class MeetingServiceClient:
             DeliveryDisposition.TERMINAL,
             error_code=f"ingestion_http_{response.status_code}",
         )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
