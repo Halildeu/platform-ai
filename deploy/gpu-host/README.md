@@ -16,8 +16,10 @@ başlatılır. Login gerekmez (SYSTEM hesabı).
 ## Kurulum (yönetici PowerShell)
 ```powershell
 cd C:\platform-ai
-git pull
 Set-ExecutionPolicy -Scope Process Bypass
+.\deploy\gpu-host\update.ps1 `
+  -TargetCommit <approved-full-40-hex-commit> `
+  -NoRestart -Confirm:$false
 .\deploy\gpu-host\install.ps1            # RepoRoot farklıysa: -RepoRoot D:\platform-ai
 ```
 
@@ -126,17 +128,55 @@ Loglar: `deploy\gpu-host\logs\` (günlük dosya; **transcript-free** — KVKK #3
 
 ```powershell
 cd C:\Users\denetimpc\platform-ai
-.\deploy\gpu-host\update.ps1
+$TargetCommit = "<Project #4 evidence alanindaki approved full 40-hex commit>"
+.\deploy\gpu-host\update.ps1 -TargetCommit $TargetCommit -Confirm:$false
 ```
-`update.ps1` = `git fetch` + `reset --hard origin/main` + scheduled-task restart
-(`platform-ai-live-stt` + `platform-ai-meeting-ai`). **Fail-closed**: push'lanmamış
-lokal commit veya dirty tracked-tree varsa reset YAPMAZ, durur — işi önce push+PR
-ile koru, sonra `-Force`. Eski `git pull` yöntemi drift ürettiği için kullanılmaz.
+`origin/main` hareketli bir discovery ref'idir; deploy artifact'i degildir. Commit,
+merge edilmis PR'in tam 40-hex SHA'si olarak Project #4 evidence alanina kaydedilir.
+`update.ps1` yeni remote truth'u fetch eder, target'in commit object oldugunu ve
+`origin/main` soyunda kaldigini kanitlar, sonra clone'u o exact commit'te detached
+HEAD'e pinler. Scheduled task restart'i bundan sonra calisir.
+
+Script dirty tracked tree, push'lanmamis lokal commit, eksik object, ancestry
+uyusmazligi, malformed/insecure ledger veya mevcut HEAD/ledger uyusmazliginda
+**mutasyon yapmadan exit 2** ile durur. Override yoktur; deploy clone'daki is once
+dev clone'a tasinip push + PR ile korunur. Source pin landed fakat task restart
+basarisizsa ledger `restart-failed` yazar ve **exit 3** doner. Rollback mutation
+veya otomatik source restore basarisizligi **exit 4**'tur.
+
+Ledger `C:\ProgramData\Acik\platform-ai\deployment-state.json` altinda schema v1
+olarak tutulur. Dizin ve dosya inheritance kapali, yalniz `SYSTEM` ve
+`BUILTIN\Administrators` FullControl ACL'lidir; same-volume atomic replace ve
+postcondition read-back uygulanir. Log/ledger secret veya transcript icermez.
+
+On kontrol, source mutation yapmadan ayni object/ancestry/dirty/ledger gate'lerini
+calistirir:
+
+```powershell
+.\deploy\gpu-host\update.ps1 -TargetCommit $TargetCommit -WhatIf
+```
+
+Bounded rollback operator tarafindan commit secmez; yalniz hardened ledger'daki
+`previousCommit` kullanilir. Basarili rollback previous slotunu tuketir, boylece
+arka arkaya rollback ile iki revision arasinda ping-pong olusmaz:
+
+```powershell
+.\deploy\gpu-host\update.ps1 -Rollback -Confirm:$false
+```
+
+Eski `git pull`, `git checkout main`, `git reset --hard origin/main` ve `-Force`
+yontemleri immutable source kanitini bozdugu icin kullanilmaz.
 
 ### Drift kontrolü (günlük, opsiyonel — read-only)
 ```powershell
-.\deploy\gpu-host\drift-guard.ps1   # HEAD!=main / unpushed / dirty / behind → uyarı + log
+.\deploy\gpu-host\drift-guard.ps1
 ```
+
+Guard moving `origin/main` ilerlediginde pinned hostu stale saymaz. Alarm
+kosullari: hardened ledger gecersiz/eksik, `HEAD != currentCommit`, symbolic HEAD,
+dirty tracked tree, expected object eksik veya pinned commit artik `origin/main`
+soyunda degil. Basarili sonuc yalnız bu bounded source contract'ini kanitlar;
+servis health, mTLS/JWT ve Electron canli kabulunun yerine gecmez.
 
 ## Kaldırma / geri alma
 ```powershell

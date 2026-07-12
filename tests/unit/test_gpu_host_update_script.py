@@ -16,7 +16,6 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
     def _assert_ps51_safe_script(self, script: str) -> None:
         script.encode("ascii")
         self.assertIn('$originRef = "origin/{0}" -f $Branch', script)
-        self.assertIn('$unpushedRange = "{0}..HEAD" -f $originRef', script)
         self.assertIn('[string]$RepoRoot = ""', script)
         self.assertNotIn("Split-Path -Parent (Split-Path -Parent $PSScriptRoot)", script)
         self.assertNotIn("$Branch..HEAD", script)
@@ -28,13 +27,53 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
 
         self._assert_ps51_safe_script(script)
         self.assertIn("function Invoke-GitStream", script)
+        self.assertIn('$unpushedRange = "{0}..HEAD" -f $originRef', script)
+        self.assertIn('[string]$TargetCommit', script)
+        self.assertIn("exactly 40 hex characters", script)
+        self.assertIn('"merge-base", "--is-ancestor", $target, $originRef', script)
+        self.assertIn('"checkout", "--detach", $target', script)
+        self.assertIn('"symbolic-ref", "-q", "HEAD"', script)
+        self.assertIn("Read-DeploymentState", script)
+        self.assertIn("Write-DeploymentStateAtomic", script)
+        self.assertIn("SupportsShouldProcess", script)
+        self.assertIn("DeployExitRestartFailed = 3", script)
+        self.assertIn("DeployExitRollbackFailed = 4", script)
+        self.assertIn("[Console]::Error.WriteLine", script)
+        self.assertNotIn("Write-Error $Message", script)
+        self.assertIn('$env:CI -eq "true"', script)
+        self.assertIn("$StatePath -ne $script:DefaultDeploymentStatePath", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE", script)
+        self.assertNotIn("[switch]$Force", script)
+        self.assertNotIn('"checkout", "-B"', script)
         self.assertNotIn("2>&1 | Out-Host", script)
 
     def test_drift_guard_script_is_ps51_safe(self) -> None:
         script = self._read_script("drift-guard.ps1")
 
         self._assert_ps51_safe_script(script)
-        self.assertIn('$behindRange = "HEAD..{0}" -f $originRef', script)
+        self.assertIn("Read-DeploymentState", script)
+        self.assertIn("$state.currentCommit", script)
+        self.assertIn("git symbolic-ref -q HEAD", script)
+        self.assertIn("git merge-base --is-ancestor $expected $originRef", script)
+        self.assertNotIn("$behindRange", script)
+        self.assertNotIn("commit(s) behind", script)
+
+    def test_deployment_state_ledger_is_atomic_and_acl_hardened(self) -> None:
+        script = self._read_script("deployment-state.ps1")
+
+        script.encode("ascii")
+        self.assertIn("S-1-5-18", script)
+        self.assertIn("S-1-5-32-544", script)
+        self.assertIn("SetAccessRuleProtection($true, $false)", script)
+        self.assertIn("AreAccessRulesProtected", script)
+        self.assertIn("[IO.File]::Replace", script)
+        self.assertIn("New-DeploymentStateRecord", script)
+        self.assertIn("Read-DeploymentState", script)
+        self.assertIn("Write-DeploymentStateAtomic", script)
+        self.assertIn("previousCommit", script)
+        self.assertIn("lastAction", script)
+        self.assertIn("lastResult", script)
 
     def test_live_stt_start_sets_cold_load_timeout_before_local_overrides(self) -> None:
         script = self._read_script("start-live-stt.ps1")
