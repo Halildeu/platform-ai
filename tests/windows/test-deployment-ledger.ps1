@@ -43,12 +43,28 @@ function Invoke-Git {
 }
 
 function Invoke-ChildPowerShell {
-    param([string]$Script, [string[]]$ScriptArgs)
+    param(
+        [string]$Script,
+        [string[]]$ScriptArgs,
+        [switch]$SuppressConfirmation
+    )
+    $commandTokens = @()
+    foreach ($argument in $ScriptArgs) {
+        if ($argument.StartsWith("-", [StringComparison]::Ordinal)) {
+            $commandTokens += $argument
+        } else {
+            $commandTokens += ("'{0}'" -f $argument.Replace("'", "''"))
+        }
+    }
+    $confirmToken = ""
+    if ($SuppressConfirmation) { $confirmToken = " -Confirm:`$false" }
+    $command = "& '{0}' {1}{2}" -f `
+        $Script.Replace("'", "''"), ($commandTokens -join " "), $confirmToken
     $oldEap = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
         $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -File $Script @ScriptArgs 2>&1)
+            -Command $command 2>&1)
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output = $output
@@ -65,7 +81,8 @@ function Invoke-Update {
         "-StatePath", $statePath,
         "-Branch", "main"
     ) + $ExtraArgs
-    return Invoke-ChildPowerShell -Script $updateScript -ScriptArgs $arguments
+    return Invoke-ChildPowerShell -Script $updateScript -ScriptArgs $arguments `
+        -SuppressConfirmation
 }
 
 function Invoke-Drift {
@@ -116,7 +133,7 @@ Invoke-Git $deploy @("config", "user.email", "ci@example.invalid") | Out-Null
 Invoke-Git $deploy @("config", "user.name", "CI Fixture") | Out-Null
 
 $commitB = New-SourceCommit -Name "b.txt" -Content "B"
-$first = Invoke-Update @("-TargetCommit", $commitB, "-NoRestart", "-Confirm:`$false")
+$first = Invoke-Update @("-TargetCommit", $commitB, "-NoRestart")
 Assert-True ($first.ExitCode -eq 0) (
     "first immutable deploy failed: exit={0}; output={1}" -f `
     $first.ExitCode, ($first.Output -join " | ")
@@ -137,7 +154,7 @@ try {
 } finally { Pop-Location }
 
 $commitC = New-SourceCommit -Name "c.txt" -Content "C"
-$second = Invoke-Update @("-TargetCommit", $commitC, "-NoRestart", "-Confirm:`$false")
+$second = Invoke-Update @("-TargetCommit", $commitC, "-NoRestart")
 Assert-True ($second.ExitCode -eq 0) "second immutable deploy failed"
 $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitC) "second deploy currentCommit mismatch"
@@ -152,11 +169,11 @@ Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC)
     "WhatIf mutated HEAD"
 
 $short = Invoke-Update @("-TargetCommit", $commitD.Substring(0, 12), `
-    "-NoRestart", "-Confirm:`$false")
+    "-NoRestart")
 Assert-True ($short.ExitCode -eq 2) "short commit must fail with guard exit 2"
 
 [IO.File]::WriteAllText((Join-Path $deploy "c.txt"), "dirty")
-$dirty = Invoke-Update @("-TargetCommit", $commitD, "-NoRestart", "-Confirm:`$false")
+$dirty = Invoke-Update @("-TargetCommit", $commitD, "-NoRestart")
 Assert-True ($dirty.ExitCode -eq 2) "dirty tracked tree must fail with guard exit 2"
 Invoke-Git $deploy @("reset", "--hard", $commitC) | Out-Null
 
@@ -167,8 +184,7 @@ Invoke-Git $source @("commit", "-m", "side commit") | Out-Null
 $sideCommit = "$(Invoke-Git $source @('rev-parse', 'HEAD'))".Trim().ToLowerInvariant()
 Invoke-Git $source @("push", "origin", "side") | Out-Null
 Invoke-Git $source @("checkout", "main") | Out-Null
-$notAncestor = Invoke-Update @("-TargetCommit", $sideCommit, "-NoRestart", `
-    "-Confirm:`$false")
+$notAncestor = Invoke-Update @("-TargetCommit", $sideCommit, "-NoRestart")
 Assert-True ($notAncestor.ExitCode -eq 2) `
     "non-main-ancestor commit must fail with guard exit 2"
 
@@ -176,19 +192,18 @@ Invoke-Git $deploy @("checkout", "-b", "local-only", $commitC) | Out-Null
 [IO.File]::WriteAllText((Join-Path $deploy "local.txt"), "local")
 Invoke-Git $deploy @("add", "local.txt") | Out-Null
 Invoke-Git $deploy @("commit", "-m", "local only") | Out-Null
-$unpushed = Invoke-Update @("-TargetCommit", $commitD, "-NoRestart", `
-    "-Confirm:`$false")
+$unpushed = Invoke-Update @("-TargetCommit", $commitD, "-NoRestart")
 Assert-True ($unpushed.ExitCode -eq 2) "unpushed commit must fail with guard exit 2"
 Invoke-Git $deploy @("checkout", "--detach", $commitC) | Out-Null
 
-$rollback = Invoke-Update @("-Rollback", "-NoRestart", "-Confirm:`$false")
+$rollback = Invoke-Update @("-Rollback", "-NoRestart")
 Assert-True ($rollback.ExitCode -eq 0) "bounded rollback failed"
 $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitB) "rollback currentCommit mismatch"
 Assert-True ([string]::IsNullOrWhiteSpace($state.previousCommit)) `
     "rollback must consume previousCommit to prevent ping-pong"
 Assert-True ($state.lastAction -eq "rollback") "rollback lastAction mismatch"
-$secondRollback = Invoke-Update @("-Rollback", "-NoRestart", "-Confirm:`$false")
+$secondRollback = Invoke-Update @("-Rollback", "-NoRestart")
 Assert-True ($secondRollback.ExitCode -eq 2) `
     "second rollback must fail closed instead of ping-pong"
 
@@ -197,7 +212,7 @@ Assert-True ($secondRollback.ExitCode -eq 2) `
 $env:CI = "true"
 $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE = "1"
 $restoredFailure = Invoke-Update @(
-    "-TargetCommit", $commitD, "-NoRestart", "-Confirm:`$false"
+    "-TargetCommit", $commitD, "-NoRestart"
 )
 Assert-True ($restoredFailure.ExitCode -eq 2) `
     "ledger failure with successful source restoration must exit 2"
@@ -209,7 +224,7 @@ Assert-True ($state.currentCommit -eq $commitB) `
 
 $env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE = "1"
 $restoreFailure = Invoke-Update @(
-    "-TargetCommit", $commitD, "-NoRestart", "-Confirm:`$false"
+    "-TargetCommit", $commitD, "-NoRestart"
 )
 Assert-True ($restoreFailure.ExitCode -eq 4) `
     "ledger plus source-restore failure must exit 4"
@@ -248,7 +263,7 @@ Assert-DeploymentStateAcl -Path $statePath
 
 # Required tasks do not exist on the CI fixture host: the source pin must land,
 # ledger result must say restart-failed, and exit 3 must distinguish this state.
-$restartFailure = Invoke-Update @("-TargetCommit", $commitD, "-Confirm:`$false")
+$restartFailure = Invoke-Update @("-TargetCommit", $commitD)
 Assert-True ($restartFailure.ExitCode -eq 3) `
     "missing required tasks must return pin-landed/restart-failed exit 3"
 $state = Read-DeploymentState -StatePath $statePath
@@ -259,7 +274,7 @@ Assert-True ($state.lastResult -eq "restart-failed") `
     "restart failure ledger result mismatch"
 
 $postFailureRollback = Invoke-Update @(
-    "-Rollback", "-NoRestart", "-Confirm:`$false"
+    "-Rollback", "-NoRestart"
 )
 Assert-True ($postFailureRollback.ExitCode -eq 0) `
     "rollback after restart failure failed"
