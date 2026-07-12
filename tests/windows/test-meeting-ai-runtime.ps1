@@ -138,6 +138,9 @@ try {
         $env:MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI
     )) "DPAPI key blob must not be exported to the child environment."
 
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
+        "Mutual TLS runtime config import must be idempotent before launcher startup."
+
     Assert-ThrowsLike {
         & $startScript `
             -RepoRoot $startupProbeRoot `
