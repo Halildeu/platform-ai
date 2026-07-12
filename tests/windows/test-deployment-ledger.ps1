@@ -117,7 +117,10 @@ Invoke-Git $deploy @("config", "user.name", "CI Fixture") | Out-Null
 
 $commitB = New-SourceCommit -Name "b.txt" -Content "B"
 $first = Invoke-Update @("-TargetCommit", $commitB, "-NoRestart", "-Confirm:`$false")
-Assert-True ($first.ExitCode -eq 0) "first immutable deploy failed"
+Assert-True ($first.ExitCode -eq 0) (
+    "first immutable deploy failed: exit={0}; output={1}" -f `
+    $first.ExitCode, ($first.Output -join " | ")
+)
 . $stateModule
 $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitB) "first deploy currentCommit mismatch"
