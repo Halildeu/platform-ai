@@ -71,7 +71,9 @@ function Stop-Deploy {
     [Parameter(Mandatory = $true)][string]$Message,
     [Parameter(Mandatory = $true)][int]$Code
   )
-  Write-Error $Message
+  # Write-Error becomes terminating under this script's EAP=Stop and would
+  # collapse every explicit operational exit code to process exit 1.
+  [Console]::Error.WriteLine("[update] ERROR: {0}" -f $Message)
   if ($script:DeployMutex) {
     if ($script:DeployLockTaken) {
       try { $script:DeployMutex.ReleaseMutex() } catch { }

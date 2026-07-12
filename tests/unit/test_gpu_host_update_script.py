@@ -38,6 +38,8 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("SupportsShouldProcess", script)
         self.assertIn("DeployExitRestartFailed = 3", script)
         self.assertIn("DeployExitRollbackFailed = 4", script)
+        self.assertIn("[Console]::Error.WriteLine", script)
+        self.assertNotIn("Write-Error $Message", script)
         self.assertIn('$env:CI -eq "true"', script)
         self.assertIn("$StatePath -ne $script:DefaultDeploymentStatePath", script)
         self.assertIn("PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE", script)
