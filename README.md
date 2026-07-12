@@ -81,6 +81,24 @@ Tam liste: [CLAUDE.md](./CLAUDE.md) + global `~/.claude/CLAUDE.md` HARD RULE set
 - **No Closure Language** — sıradaki aksiyon her raporda
 - **Türkçe cevap default**
 
+## GPU Host Test Gateway Bootstrap
+
+Test GPU hostunun app-mTLS gateway SAN'ini private WireGuard adresine cozumlemesi
+icin hosts shim'i yalniz elevated Windows PowerShell 5.1 oturumunda ve acik test
+onayi ile yonetilir:
+
+```powershell
+Set-Location C:\platform-ai
+.\deploy\gpu-host\configure-private-gateway-host.ps1 `
+  -TestHostShim -Confirm:$false
+```
+
+Script managed block, aktif mapping conflict guard, ayni dizinde atomik replace,
+ACL koruma, backup/restore/remove ve DNS flush + exact IPv4 dogrulamasi uygular.
+Bu hosts shim'i yalniz test ortamindadir. Production `meeting-ai-gateway.internal`
+cozumlemesi split-horizon private DNS tarafindan saglanir; guvenlik siniri hosts
+dosyasi degil, server SAN/CA validation + client mTLS + WireGuard firewall'dir.
+
 ## Faz Yol Haritası — 3-AI Mutabakat (2026-06-02)
 
 Cross-AI consensus: Claude + Codex `019e879c` AGREE + Mavis `mvs_c922...` msg `78` AGREE. Canonical plan: [platform-k8s-gitops/docs/faz-24-meeting-intelligence-plan.md](https://github.com/Halildeu/platform-k8s-gitops/blob/main/docs/faz-24-meeting-intelligence-plan.md).

@@ -41,6 +41,7 @@ jobs:
             "deploy/gpu-host/start-meeting-ai.ps1",
             "deploy/gpu-host/meeting-ai-runtime-env.ps1",
             "deploy/gpu-host/configure-meeting-ai.ps1",
+            "deploy/gpu-host/configure-private-gateway-host.ps1",
             "deploy/gpu-host/install.ps1"
           )) {
             [scriptblock]::Create((Get-Content -Raw $script)) | Out-Null
@@ -242,8 +243,10 @@ jobs:
             "deploy/gpu-host/start-meeting-ai.ps1",
             "deploy/gpu-host/meeting-ai-runtime-env.ps1",
             "deploy/gpu-host/configure-meeting-ai.ps1",
+            "deploy/gpu-host/configure-private-gateway-host.ps1",
             "deploy/gpu-host/install.ps1",
-            "tests/windows/test-meeting-ai-runtime.ps1"
+            "tests/windows/test-meeting-ai-runtime.ps1",
+            "tests/windows/test-private-gateway-host.ps1"
           )) {
             [scriptblock]::Create((Get-Content -Raw $script)) | Out-Null
           }
@@ -251,3 +254,7 @@ jobs:
       - name: DPAPI ACL rotation and rollback contract
         shell: powershell
         run: .\tests\windows\test-meeting-ai-runtime.ps1
+
+      - name: Private gateway hosts shim atomicity and rollback contract
+        shell: powershell
+        run: .\tests\windows\test-private-gateway-host.ps1

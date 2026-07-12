@@ -101,6 +101,20 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Protect-MeetingAiSecret -PlainText $plainClientKey", script)
         self.assertNotIn("Get-Random", script)
 
+    def test_private_gateway_host_shim_is_explicit_atomic_and_test_only(self) -> None:
+        script = self._read_script("configure-private-gateway-host.ps1")
+
+        script.encode("ascii")
+        self.assertIn("TestHostShim", script)
+        self.assertIn("Production uses private DNS", script)
+        self.assertIn("IO.File]::Replace", script)
+        self.assertIn("Set-Acl -LiteralPath $tempPath -AclObject $OriginalAcl", script)
+        self.assertIn("Global\\platform-ai-private-gateway-host-v1", script)
+        self.assertIn("SupportsShouldProcess = $true", script)
+        self.assertIn("Assert-GatewayResolution", script)
+        self.assertIn("active mapping outside the managed block", script)
+        self.assertNotIn("Add-Content", script)
+
 
 if __name__ == "__main__":
     unittest.main()
