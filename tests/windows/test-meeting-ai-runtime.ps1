@@ -34,7 +34,10 @@ function Assert-ThrowsLike {
         & $Action
     } catch {
         if ($_.Exception.Message -notlike "*$Expected*") {
-            throw "Expected error containing '$Expected'."
+            throw ("Expected error containing '{0}', got {1}: {2}" -f `
+                $Expected,
+                $_.Exception.GetType().Name,
+                $_.Exception.Message)
         }
         return
     }
