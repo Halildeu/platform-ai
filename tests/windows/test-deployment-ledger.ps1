@@ -23,13 +23,21 @@ function Assert-True {
 function Invoke-Git {
     param([string]$WorkingDirectory, [string[]]$GitArgs)
     Push-Location $WorkingDirectory
+    $oldEap = $ErrorActionPreference
     try {
-        $output = @(& git @GitArgs 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            throw "git $($GitArgs -join ' ') failed: $($output -join ' ')"
+        # WinPS 5.1 promotes benign native stderr (for example checkout's
+        # "Switched to a new branch") to NativeCommandError when EAP=Stop.
+        # Keep stdout for assertions, discard stderr, and trust the exit code.
+        $ErrorActionPreference = "Continue"
+        $output = @(& git @GitArgs 2> $null)
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldEap
+        if ($exitCode -ne 0) {
+            throw "git $($GitArgs -join ' ') failed with exit $exitCode"
         }
         return $output
     } finally {
+        $ErrorActionPreference = $oldEap
         Pop-Location
     }
 }
