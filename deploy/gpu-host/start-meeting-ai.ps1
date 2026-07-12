@@ -28,14 +28,15 @@ if ([string]::IsNullOrWhiteSpace($RuntimeConfigPath)) {
     $RuntimeConfigPath = Join-Path $env:ProgramData "Acik\platform-ai\meeting-ai.env"
 }
 try {
-    $runtimeConfigLoaded = Import-MeetingAiRuntimeEnvironment `
-        -Path $RuntimeConfigPath -Optional
-} catch {
-    # Runtime-env errors are deliberately value-free. Keep the durable-delivery
-    # fail-closed boundary, but leave a useful Scheduled Task diagnosis.
-    Add-Content $log ("[startup] Runtime config rejected: {0}" -f $_.Exception.Message)
-    throw "Meeting-ai runtime config was rejected; inspect the transcript-free service log."
-}
+    try {
+        $runtimeConfigLoaded = Import-MeetingAiRuntimeEnvironment `
+            -Path $RuntimeConfigPath -Optional
+    } catch {
+        # Runtime-env errors are deliberately value-free. Keep the durable-delivery
+        # fail-closed boundary, but leave a useful Scheduled Task diagnosis.
+        Add-Content $log ("[startup] Runtime config rejected: {0}" -f $_.Exception.Message)
+        throw "Meeting-ai runtime config was rejected; inspect the transcript-free service log."
+    }
 
 if ($Backend -eq "mock") {
     throw "The mock meeting-ai backend is forbidden for the GPU-host stage/prod launcher."
@@ -70,4 +71,9 @@ Set-Location $svc
 # Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native
 # stderr lines in error records, which $ErrorActionPreference=Stop turns into
 # an immediate exit on the very first INFO line.
-& cmd.exe /c "`"$PythonExe`" -m uvicorn app.main:app --host 0.0.0.0 --port $Port >> `"$log`" 2>&1"
+    & cmd.exe /c "`"$PythonExe`" -m uvicorn app.main:app --host 0.0.0.0 --port $Port >> `"$log`" 2>&1"
+} finally {
+    # Bracket the entire post-import startup path: readiness or backend guard
+    # failures must not leave the materialized plaintext client key on disk.
+    Clear-MeetingAiRuntimeTlsKey
+}

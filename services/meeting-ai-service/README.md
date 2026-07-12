@@ -149,6 +149,11 @@ Required configuration when enabled:
 - `MAI_MEETING_SERVICE_CLIENT_SECRET` (Vault/ESO or host secret injection; on the
   Windows GPU host this is materialized only in process from a DPAPI LocalMachine
   blob by `deploy/gpu-host/meeting-ai-runtime-env.ps1`)
+- `MAI_MEETING_SERVICE_TLS_MODE` (`server` or `mutual`; production private delivery
+  uses `mutual`)
+- `MAI_MEETING_SERVICE_TLS_CA_PATH`; and in `mutual` mode,
+  `MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH` plus
+  `MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH`
 - `MAI_INGESTION_STORE_PATH` (absolute, local persistent disk; not NFS/SMB)
 - `MAI_INGESTION_ACTIVE_KEY_ID`
 - `MAI_INGESTION_ENCRYPTION_KEYS_JSON` — secret JSON keyring, values are base64
@@ -177,6 +182,16 @@ client secret through Vault/ESO (or the Windows host secret channel), restart th
 service so settings are refreshed, and monitor the queue/DLQ until delivery catches
 up. A revoked credential is never persisted; repeated `401` attempts retain the
 encrypted payload and eventually move it to DLQ for explicit operator requeue.
+
+Ingestion never accepts plaintext HTTP. The TLS client always verifies hostname and
+chain, uses TLS 1.2 or newer, and never exposes a `verify=False` mode. In mutual mode
+startup fails closed unless the pinned CA, client certificate, and client key are
+readable. Their metadata is checked on a bounded interval; an atomic certificate/key
+replacement creates a fresh `SSLContext` and closes the previous connection pool.
+An in-flight request keeps its retired pool until the request releases it, so rotation
+does not tear down an active delivery. Private service traffic also ignores ambient
+HTTP proxy environment variables. Certificate/key contents and paths are not included
+in delivery error codes or logs.
 
 The Windows host channel is non-executable and fail-closed. Use elevated
 `deploy/gpu-host/configure-meeting-ai.ps1`; it prompts with `SecureString`, stores

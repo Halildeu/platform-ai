@@ -78,6 +78,11 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("contains a duplicate key", script)
         self.assertIn("uses an unknown key", script)
         self.assertIn("must be an absolute HTTPS URL", script)
+        self.assertIn("MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI", script)
+        self.assertIn("Write-MeetingAiSecretFileAtomic", script)
+        self.assertIn("MoveFileEx", script)
+        self.assertIn("replaceExistingAndWriteThrough", script)
+        self.assertIn("Clear-MeetingAiRuntimeTlsKey", script)
         self.assertNotIn('"MAI_MEETING_SERVICE_CLIENT_SECRET" =', script)
         self.assertNotIn("Get-Random", script)
 
@@ -92,6 +97,8 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("foreach ($property in $oldKeyring.PSObject.Properties)", script)
         self.assertIn("RestoreBackup", script)
         self.assertIn("ShouldProcess", script)
+        self.assertIn('ValidateSet("", "server", "mutual")', script)
+        self.assertIn("Protect-MeetingAiSecret -PlainText $plainClientKey", script)
         self.assertNotIn("Get-Random", script)
 
 

@@ -20,7 +20,7 @@ from app.services.analysis_delivery import (
     AnalysisDeliveryRuntime,
     build_ingestion_payload,
 )
-from app.services.durable_outbox import PayloadCipher, SqliteOutboxStore
+from app.services.durable_outbox import ClaimedMessage, PayloadCipher, SqliteOutboxStore
 from app.services.meeting_service_client import DeliveryAttempt, DeliveryDisposition
 
 KEY = b"K" * 32
@@ -51,6 +51,7 @@ class BlockingTransport:
 def _settings(path: Path, **overrides: object) -> Settings:
     values: dict[str, object] = {
         "ingestion_enabled": True,
+        "meeting_service_base_url": "https://meeting.invalid",
         "meeting_service_token_url": "https://auth.invalid/token",
         "meeting_service_client_id": "meeting-ai",
         "meeting_service_client_secret": SecretStr("secret"),
@@ -349,6 +350,28 @@ def test_retry_limit_moves_payload_to_dead_letter(tmp_path: Path) -> None:
         assert store.summary().dead == 1
 
     asyncio.run(scenario())
+
+
+def test_retry_after_and_jitter_cannot_exceed_configured_backoff_cap(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path / "outbox.sqlite3",
+        ingestion_base_backoff_sec=1.0,
+        ingestion_max_backoff_sec=4.0,
+        ingestion_jitter_ratio=0.5,
+    )
+    runtime = AnalysisDeliveryRuntime(settings, transport=FakeTransport([]))
+    message = ClaimedMessage(
+        analysis_run_id="22222222-2222-4222-8222-222222222222",
+        meeting_id=MEETING_ID,
+        payload={},
+        attempt_count=99,
+        created_at=1.0,
+    )
+
+    assert runtime._retry_delay(
+        message,
+        DeliveryAttempt(DeliveryDisposition.RETRY, retry_after_sec=999_999_999.0),
+    ) == pytest.approx(4.0)
 
 
 def test_terminal_failure_enters_dead_letter_and_degrades_health(tmp_path: Path) -> None:

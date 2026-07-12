@@ -10,6 +10,10 @@ param(
     [Security.SecureString]$ClientSecret,
     [string]$Audience = "meeting-service",
     [string]$Permission = "meeting:analysis-result:write",
+    [ValidateSet("", "server", "mutual")][string]$TlsMode = "",
+    [string]$TlsCaPath = "",
+    [string]$TlsClientCertPath = "",
+    [string]$TlsClientKeyPath = "",
     [string]$StorePath = "",
     [string]$ConfigPath = "",
     [switch]$RotateEncryptionKey,
@@ -59,6 +63,33 @@ function Get-ExistingValue {
     throw "First-time provisioning requires $Name."
 }
 
+function Install-MeetingAiTlsPublicFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedMarker
+    )
+
+    $source = Resolve-FixedLocalPath -Path $SourcePath -Purpose "TLS source material"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "TLS source material does not exist."
+    }
+    $item = Get-Item -LiteralPath $source -Force
+    if ($item.Length -gt 262144) {
+        throw "TLS source material exceeds the 256 KiB limit."
+    }
+    $text = [IO.File]::ReadAllText(
+        $source,
+        (New-Object Text.UTF8Encoding($false, $true))
+    )
+    if (-not $text.Contains($ExpectedMarker)) {
+        throw "TLS source material has an unexpected PEM type."
+    }
+    Write-MeetingAiSecretFileAtomic -Path $DestinationPath -Content $text
+    return (Assert-MeetingAiRuntimePath -Path $DestinationPath `
+        -Purpose "Installed TLS material")
+}
+
 try {
     $lockTaken = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
     if (-not $lockTaken) { throw "Another meeting-ai configuration operation is in progress." }
@@ -92,6 +123,79 @@ try {
         -Name "MAI_MEETING_SERVICE_BASE_URL" -Supplied $MeetingServiceBaseUrl
     $tokenUrl = Get-ExistingValue -Existing $existing `
         -Name "MAI_MEETING_SERVICE_TOKEN_URL" -Supplied $MeetingServiceTokenUrl
+
+    $effectiveTlsMode = if (-not [string]::IsNullOrWhiteSpace($TlsMode)) {
+        $TlsMode.ToLowerInvariant()
+    } elseif ($null -ne $existing -and
+        $existing.ContainsKey("MAI_MEETING_SERVICE_TLS_MODE")) {
+        $existing["MAI_MEETING_SERVICE_TLS_MODE"].ToLowerInvariant()
+    } else {
+        "server"
+    }
+    $tlsRoot = Join-Path (Get-MeetingAiRuntimeRoot) "tls"
+    $tlsMaterialVersion = "{0}-{1}" -f `
+        (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ"),
+        ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $installedCaPath = ""
+    $installedCertPath = ""
+    $clientKeyBlob = ""
+
+    if (-not [string]::IsNullOrWhiteSpace($TlsCaPath)) {
+        $installedCaPath = Install-MeetingAiTlsPublicFile `
+            -SourcePath $TlsCaPath `
+            -DestinationPath (Join-Path $tlsRoot `
+                ("meeting-service-ca-{0}.pem" -f $tlsMaterialVersion)) `
+            -ExpectedMarker "-----BEGIN CERTIFICATE-----"
+    } elseif ($null -ne $existing -and
+        $existing.ContainsKey("MAI_MEETING_SERVICE_TLS_CA_PATH")) {
+        $installedCaPath = $existing["MAI_MEETING_SERVICE_TLS_CA_PATH"]
+    }
+
+    if ($effectiveTlsMode -eq "mutual") {
+        if (-not [string]::IsNullOrWhiteSpace($TlsClientCertPath)) {
+            $installedCertPath = Install-MeetingAiTlsPublicFile `
+                -SourcePath $TlsClientCertPath `
+                -DestinationPath (Join-Path $tlsRoot `
+                    ("meeting-service-client-{0}.pem" -f $tlsMaterialVersion)) `
+                -ExpectedMarker "-----BEGIN CERTIFICATE-----"
+        } elseif ($null -ne $existing -and
+            $existing.ContainsKey("MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH")) {
+            $installedCertPath = $existing["MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH"]
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($TlsClientKeyPath)) {
+            $sourceKey = Resolve-FixedLocalPath -Path $TlsClientKeyPath `
+                -Purpose "TLS client private key"
+            if (-not (Test-Path -LiteralPath $sourceKey -PathType Leaf)) {
+                throw "TLS client private key does not exist."
+            }
+            if ((Get-Item -LiteralPath $sourceKey -Force).Length -gt 262144) {
+                throw "TLS client private key exceeds the 256 KiB limit."
+            }
+            $plainClientKey = [IO.File]::ReadAllText(
+                $sourceKey,
+                (New-Object Text.UTF8Encoding($false, $true))
+            )
+            try {
+                if (-not $plainClientKey.Contains("-----BEGIN") -or
+                    -not $plainClientKey.Contains("PRIVATE KEY-----")) {
+                    throw "TLS client private key has an unexpected PEM type."
+                }
+                $clientKeyBlob = Protect-MeetingAiSecret -PlainText $plainClientKey
+            } finally {
+                $plainClientKey = $null
+            }
+        } elseif ($null -ne $existing -and
+            $existing.ContainsKey("MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI")) {
+            $clientKeyBlob = $existing["MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"]
+        }
+
+        if ([string]::IsNullOrWhiteSpace($installedCaPath) -or
+            [string]::IsNullOrWhiteSpace($installedCertPath) -or
+            [string]::IsNullOrWhiteSpace($clientKeyBlob)) {
+            throw "Mutual TLS provisioning requires CA, client certificate, and private key."
+        }
+    }
 
     $clientSecretBlob = ""
     if ($null -ne $ClientSecret) {
@@ -164,9 +268,18 @@ try {
         "MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI" = $clientSecretBlob
         "MAI_MEETING_SERVICE_AUDIENCE" = $Audience
         "MAI_MEETING_SERVICE_SCOPE" = $Permission
+        "MAI_MEETING_SERVICE_TLS_MODE" = $effectiveTlsMode
         "MAI_INGESTION_STORE_PATH" = $StorePath
         "MAI_INGESTION_ACTIVE_KEY_ID" = $activeKeyId
         "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI" = $keyringBlob
+    }
+    if (-not [string]::IsNullOrWhiteSpace($installedCaPath)) {
+        $config["MAI_MEETING_SERVICE_TLS_CA_PATH"] = $installedCaPath
+    }
+    if ($effectiveTlsMode -eq "mutual") {
+        $config["MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH"] = $installedCertPath
+        $config["MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"] = $clientKeyBlob
+        $config["MAI_MEETING_SERVICE_TLS_RELOAD_INTERVAL_SEC"] = "60"
     }
     $lines = @(
         "# platform-ai meeting-ai runtime config v1"

@@ -48,6 +48,7 @@ def test_redaction_disable_allowed_only_on_mock() -> None:
 def _ingestion_values(tmp_path: Path) -> dict[str, object]:
     return {
         "ingestion_enabled": True,
+        "meeting_service_base_url": "https://meeting.test",
         "meeting_service_token_url": "https://auth.test/token",
         "meeting_service_client_id": "meeting-ai",
         "meeting_service_client_secret": SecretStr("meeting-service-secret-value"),
@@ -95,4 +96,42 @@ def test_ingestion_lease_must_cover_token_and_ingestion_timeouts(tmp_path: Path)
     values["ingestion_timeout_sec"] = 10.0
     values["ingestion_lease_sec"] = 20.0
     with pytest.raises(ValidationError, match="two HTTP timeout windows"):
+        Settings(**values)
+
+
+def test_ingestion_requires_https_without_embedded_credentials(tmp_path: Path) -> None:
+    values = _ingestion_values(tmp_path)
+    values["meeting_service_base_url"] = "http://meeting.test"
+    with pytest.raises(ValidationError, match="absolute HTTPS URL"):
+        Settings(**values)
+
+    values = _ingestion_values(tmp_path)
+    values["meeting_service_token_url"] = "https://user:secret@auth.test/token"
+    with pytest.raises(ValidationError, match="without embedded credentials"):
+        Settings(**values)
+
+
+def test_mutual_tls_requires_readable_absolute_material(tmp_path: Path) -> None:
+    values = _ingestion_values(tmp_path)
+    values["meeting_service_tls_mode"] = "mutual"
+    with pytest.raises(ValidationError, match="requires CA, client certificate"):
+        Settings(**values)
+
+    ca_path = tmp_path / "ca.pem"
+    cert_path = tmp_path / "client.pem"
+    key_path = tmp_path / "client.key"
+    for path in (ca_path, cert_path, key_path):
+        path.write_text("test-material", encoding="utf-8")
+    values.update(
+        {
+            "meeting_service_tls_ca_path": ca_path,
+            "meeting_service_tls_client_cert_path": cert_path,
+            "meeting_service_tls_client_key_path": key_path,
+        }
+    )
+    settings = Settings(**values)
+    assert settings.meeting_service_tls_mode == "mutual"
+
+    values["meeting_service_tls_client_key_path"] = tmp_path / "missing.key"
+    with pytest.raises(ValidationError, match="readable file"):
         Settings(**values)

@@ -131,7 +131,8 @@ def test_analyze_nonmock_residual_pii_blocked_422(monkeypatch) -> None:  # type:
 def _configure_ingestion(monkeypatch, tmp_path: Path, *, max_rows: int = 10) -> None:  # type: ignore[no-untyped-def]
     keyring = json.dumps({"v1": base64.b64encode(b"K" * 32).decode()})
     monkeypatch.setenv("MAI_INGESTION_ENABLED", "true")
-    monkeypatch.setenv("MAI_MEETING_SERVICE_TOKEN_URL", "http://127.0.0.1:9/token")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_BASE_URL", "https://127.0.0.1:9")
+    monkeypatch.setenv("MAI_MEETING_SERVICE_TOKEN_URL", "https://127.0.0.1:9/token")
     monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_ID", "meeting-ai")
     monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_SECRET", "secret")
     monkeypatch.setenv("MAI_INGESTION_STORE_PATH", str(tmp_path / "outbox.sqlite3"))
