@@ -60,17 +60,39 @@ function Invoke-ChildPowerShell {
     if ($SuppressConfirmation) { $confirmToken = " -Confirm:`$false" }
     $command = "& '{0}' {1}{2}" -f `
         $Script.Replace("'", "''"), ($commandTokens -join " "), $confirmToken
-    $oldEap = $ErrorActionPreference
+    $invocationId = [Guid]::NewGuid().ToString("N")
+    $wrapperPath = Join-Path $tempRoot ("deploy-child-{0}.ps1" -f $invocationId)
+    $stdoutPath = Join-Path $tempRoot ("deploy-child-{0}.stdout" -f $invocationId)
+    $stderrPath = Join-Path $tempRoot ("deploy-child-{0}.stderr" -f $invocationId)
     try {
-        $ErrorActionPreference = "Continue"
-        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -Command $command 2>&1)
+        [IO.File]::WriteAllText(
+            $wrapperPath,
+            $command + [Environment]::NewLine,
+            (New-Object Text.UTF8Encoding($false))
+        )
+        $process = Start-Process powershell.exe -NoNewWindow -Wait -PassThru `
+            -ArgumentList @(
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", ('"{0}"' -f $wrapperPath)
+            ) `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+        $output = @()
+        if (Test-Path -LiteralPath $stdoutPath) {
+            $output += @(Get-Content -LiteralPath $stdoutPath)
+        }
+        if (Test-Path -LiteralPath $stderrPath) {
+            $output += @(Get-Content -LiteralPath $stderrPath)
+        }
         return [pscustomobject]@{
-            ExitCode = $LASTEXITCODE
+            ExitCode = $process.ExitCode
             Output = $output
         }
     } finally {
-        $ErrorActionPreference = $oldEap
+        foreach ($path in @($wrapperPath, $stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
