@@ -483,6 +483,83 @@ def test_direct_stream_service_filters_low_confidence_silence_decode() -> None:
     )
 
 
+def test_get_live_and_final_services_thread_decode_thresholds_from_settings() -> None:
+    # #237: the live path must read the same operator-tunable decode thresholds
+    # as the sync /transcribe worker path, not hardcoded module constants.
+    s = Settings(
+        no_speech_threshold=0.5,
+        log_prob_threshold=-2.0,
+        compression_ratio_threshold=3.0,
+        condition_on_previous_text=True,
+    )
+    for service in (get_live_service(s), get_final_service(s)):
+        assert service.no_speech_threshold == 0.5
+        assert service.log_prob_threshold == -2.0
+        assert service.compression_ratio_threshold == 3.0
+        assert service.condition_on_previous_text is True
+
+
+def test_transcribe_array_passes_configured_decode_thresholds_to_model() -> None:
+    service = DirectWhisperService(
+        model_name="test-model",
+        device="cpu",
+        compute_type="int8",
+        language="tr",
+        beam_size=1,
+        no_speech_threshold=0.5,
+        log_prob_threshold=-2.0,
+        compression_ratio_threshold=3.0,
+        condition_on_previous_text=True,
+    )
+
+    class FakeModel:
+        kwargs: dict[str, object] | None = None
+
+        def transcribe(self, _audio: object, **kwargs: object) -> tuple[list[object], object]:
+            self.kwargs = kwargs
+            return [SimpleNamespace(text="Merhaba", no_speech_prob=0.1, avg_logprob=-0.2)], object()
+
+    fake_model = FakeModel()
+    service._model = fake_model
+
+    service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
+
+    assert fake_model.kwargs is not None
+    assert fake_model.kwargs["no_speech_threshold"] == 0.5
+    assert fake_model.kwargs["log_prob_threshold"] == -2.0
+    assert fake_model.kwargs["compression_ratio_threshold"] == 3.0
+    assert fake_model.kwargs["condition_on_previous_text"] is True
+
+
+def test_raising_no_speech_threshold_keeps_segment_default_would_drop() -> None:
+    # A segment at no_speech_prob 0.8 is dropped at the default 0.75 threshold
+    # but kept once an operator raises the threshold to 0.9 — proving the
+    # post-decode filter honors the configured value, not a constant.
+    def _service(no_speech_threshold: float) -> DirectWhisperService:
+        svc = DirectWhisperService(
+            model_name="test-model",
+            device="cpu",
+            compute_type="int8",
+            language="tr",
+            beam_size=1,
+            no_speech_threshold=no_speech_threshold,
+        )
+
+        class FakeModel:
+            def transcribe(self, _a: object, **_k: object) -> tuple[list[object], object]:
+                return [
+                    SimpleNamespace(text="Devam edelim.", no_speech_prob=0.8, avg_logprob=-0.2)
+                ], object()
+
+        svc._model = FakeModel()
+        return svc
+
+    dropped = _service(0.75).transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
+    kept = _service(0.9).transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
+    assert dropped == ""
+    assert kept == "Devam edelim."
+
+
 def test_stream_router_importable_without_gpu() -> None:
     from app.api.stream import router
 
