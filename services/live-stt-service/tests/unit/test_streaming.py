@@ -36,6 +36,19 @@ def test_hallucination_filter_blocks_known_artifacts() -> None:
     assert is_hallucination("Neroba") is True
 
 
+def test_hallucination_filter_keeps_valid_short_turkish_utterances() -> None:
+    # #238: short acknowledgements / clarification responses are real speech.
+    for utterance in ("Ne?", "Ha?", "He.", "Yok.", "Evet", "Tamam", "Peki", "hı"):
+        assert is_hallucination(utterance) is False, utterance
+
+
+def test_hallucination_filter_still_blocks_short_artifacts() -> None:
+    # #238 regression: the allowlist must not re-admit the short artifact
+    # finals the length/pattern guards exist for.
+    for artifact in ("", ".", "..", "!?", "cis", "ces", "neroba"):
+        assert is_hallucination(artifact) is True, artifact
+
+
 def test_hallucination_filter_blocks_repeated_decode_loops() -> None:
     assert (
         is_hallucination(

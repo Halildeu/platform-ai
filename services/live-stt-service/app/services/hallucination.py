@@ -22,6 +22,36 @@ _HALLUCINATION_PATTERNS = [
     re.compile(r"^[.!?]*$", re.IGNORECASE),
 ]
 
+# Valid short Turkish utterances that the generic `len < 3` artifact guard
+# would otherwise drop (#238). Real meetings contain short acknowledgements and
+# clarification responses ("Ne?", "Ha?", "He.", "Yok."); suppressing them makes
+# the product feel like it swallows small but meaningful speech. Matched after
+# casefold + stripping trailing punctuation/whitespace, so the punctuated forms
+# are covered too. Kept deliberately narrow to interjections/yes-no/clarifiers
+# so it never re-admits the short artifact finals the guard exists for
+# (punctuation-only "..", "cis", "neroba" — none of which appear here).
+_SHORT_UTTERANCE_ALLOWLIST = frozenset(
+    {
+        "ne",
+        "ha",
+        "he",
+        "hı",
+        "hah",
+        "ya",
+        "yo",
+        "of",
+        "eh",
+        "hmm",
+        "evet",
+        "yok",
+        "olur",
+        "peki",
+        "tamam",
+        "hayır",
+    }
+)
+_ALLOWLIST_TRIM = " \t.,!?…"
+
 _WORD_RE = re.compile(r"[\wçğıöşüÇĞİÖŞÜ]+", re.UNICODE)
 _SOFT_SUFFIXES = (
     "siniz",
@@ -170,11 +200,29 @@ def _is_repeated_alternative_chain(text: str) -> bool:
     )
 
 
+def _is_allowlisted_short_utterance(normalized: str) -> bool:
+    """True for a curated valid short Turkish utterance (#238).
+
+    Checked before the `len < 3` artifact guard so genuine short responses
+    survive. A multi-word string never matches (the allowlist holds single
+    tokens), so it cannot rescue repeated-decode loops.
+    """
+    return normalized.casefold().strip(_ALLOWLIST_TRIM) in _SHORT_UTTERANCE_ALLOWLIST
+
+
 def is_hallucination(text: str) -> bool:
-    """True when the candidate transcript should be suppressed."""
+    """True when the candidate transcript should be suppressed.
+
+    Short-utterance handling (#238): the `len < 3` rule below is a deliberate
+    artifact guard, but it would also drop valid short Turkish responses. Those
+    are rescued first via `_SHORT_UTTERANCE_ALLOWLIST`; everything else shorter
+    than 3 chars stays suppressed as a documented product tradeoff.
+    """
     normalized = (text or "").strip()
     if not normalized:
         return True
+    if _is_allowlisted_short_utterance(normalized):
+        return False
     if len(normalized) < 3:
         return True
     if _is_low_information_repetition(normalized):
