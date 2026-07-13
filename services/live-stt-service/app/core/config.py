@@ -62,9 +62,11 @@ class Settings(BaseSettings):
     language: str = Field(default="tr", description="ISO 639-1 or 'auto'")
     beam_size: int = Field(default=5, ge=1, le=10)
     vad_filter: bool = Field(default=True)
-    # Sync /transcribe decode tuning. Defaults intentionally match the live
-    # WebSocket path so gateway-mediated recorder output does not regress into
-    # classic Whisper silence/repetition artefacts.
+    # Decode tuning shared by BOTH the sync /transcribe worker path and the
+    # live /ws/stream draft+final path (#237). Previously the live path hard-
+    # coded these as module constants, so tuning STT_NO_SPEECH_THRESHOLD et al.
+    # silently moved only the sync path; they now drive both. Defaults preserve
+    # the prior behavior (identical to the old live-path constants).
     condition_on_previous_text: bool = Field(default=False)
     no_speech_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
     log_prob_threshold: float = Field(default=-1.0, ge=-10.0, le=10.0)

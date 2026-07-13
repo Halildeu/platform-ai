@@ -25,8 +25,15 @@ from app.services.hallucination import is_hallucination
 
 logger = logging.getLogger(__name__)
 
-_NO_SPEECH_THRESHOLD = 0.75
-_LOG_PROB_THRESHOLD = -1.0
+# Defaults for direct construction (tests). Production callers pass the
+# operator-tunable values from Settings via get_live_service/get_final_service,
+# so the live path no longer drifts from the sync /transcribe worker path when
+# STT_NO_SPEECH_THRESHOLD / STT_LOG_PROB_THRESHOLD / STT_COMPRESSION_RATIO_THRESHOLD
+# are changed (#237). The values below equal the Settings defaults, so behavior
+# is unchanged at the default configuration.
+_DEFAULT_NO_SPEECH_THRESHOLD = 0.75
+_DEFAULT_LOG_PROB_THRESHOLD = -1.0
+_DEFAULT_COMPRESSION_RATIO_THRESHOLD = 2.4
 
 
 def _finite_float(value: object) -> float | None:
@@ -36,17 +43,19 @@ def _finite_float(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def _usable_stream_segment(segment: object) -> bool:
+def _usable_stream_segment(
+    segment: object, no_speech_threshold: float, log_prob_threshold: float
+) -> bool:
     text = str(getattr(segment, "text", "")).strip()
     if is_hallucination(text):
         return False
 
     no_speech_prob = _finite_float(getattr(segment, "no_speech_prob", None))
-    if no_speech_prob is not None and no_speech_prob > _NO_SPEECH_THRESHOLD:
+    if no_speech_prob is not None and no_speech_prob > no_speech_threshold:
         return False
 
     avg_logprob = _finite_float(getattr(segment, "avg_logprob", None))
-    return avg_logprob is None or avg_logprob >= _LOG_PROB_THRESHOLD
+    return avg_logprob is None or avg_logprob >= log_prob_threshold
 
 
 class DirectWhisperService:
@@ -60,6 +69,11 @@ class DirectWhisperService:
         language: str,
         beam_size: int,
         role: str = "stream",
+        *,
+        no_speech_threshold: float = _DEFAULT_NO_SPEECH_THRESHOLD,
+        log_prob_threshold: float = _DEFAULT_LOG_PROB_THRESHOLD,
+        compression_ratio_threshold: float = _DEFAULT_COMPRESSION_RATIO_THRESHOLD,
+        condition_on_previous_text: bool = False,
     ) -> None:
         self.model_name = model_name
         self.device = device
@@ -67,6 +81,10 @@ class DirectWhisperService:
         self.language = language
         self.beam_size = beam_size
         self.role = role
+        self.no_speech_threshold = no_speech_threshold
+        self.log_prob_threshold = log_prob_threshold
+        self.compression_ratio_threshold = compression_ratio_threshold
+        self.condition_on_previous_text = condition_on_previous_text
         self._model: object | None = None
         self._lock = threading.Lock()
 
@@ -101,8 +119,11 @@ class DirectWhisperService:
     ) -> str:
         """Transcribe a float32 PCM buffer; returns joined text.
 
-        Decode thresholds follow the GPU demo tuning: no cross-window prompt
-        conditioning (rolling buffer), aggressive no-speech suppression.
+        Decode thresholds come from Settings (#237) so the live stream path
+        stays aligned with the sync /transcribe worker path when an operator
+        tunes them; the defaults preserve the GPU demo tuning (no cross-window
+        prompt conditioning over the rolling buffer, aggressive no-speech
+        suppression).
         """
         self.ensure_model()
         assert self._model is not None
@@ -112,13 +133,17 @@ class DirectWhisperService:
                 language=self.language,
                 beam_size=self.beam_size,
                 vad_filter=vad,
-                condition_on_previous_text=False,
-                no_speech_threshold=_NO_SPEECH_THRESHOLD,
-                log_prob_threshold=_LOG_PROB_THRESHOLD,
-                compression_ratio_threshold=2.4,
+                condition_on_previous_text=self.condition_on_previous_text,
+                no_speech_threshold=self.no_speech_threshold,
+                log_prob_threshold=self.log_prob_threshold,
+                compression_ratio_threshold=self.compression_ratio_threshold,
             )
             return " ".join(
-                str(segment.text).strip() for segment in segments if _usable_stream_segment(segment)
+                str(segment.text).strip()
+                for segment in segments
+                if _usable_stream_segment(
+                    segment, self.no_speech_threshold, self.log_prob_threshold
+                )
             ).strip()
 
 
@@ -127,9 +152,34 @@ _services_lock = threading.Lock()
 
 
 def _named(
-    key: str, model_name: str, device: str, compute_type: str, language: str, beam_size: int
+    key: str,
+    model_name: str,
+    device: str,
+    compute_type: str,
+    language: str,
+    beam_size: int,
+    *,
+    no_speech_threshold: float,
+    log_prob_threshold: float,
+    compression_ratio_threshold: float,
+    condition_on_previous_text: bool,
 ) -> DirectWhisperService:
-    service_key = "\u0000".join([key, model_name, device, compute_type, language, str(beam_size)])
+    # Decode thresholds are part of the cache identity so a settings change
+    # yields a fresh service rather than a stale cached one (#237).
+    service_key = "\u0000".join(
+        [
+            key,
+            model_name,
+            device,
+            compute_type,
+            language,
+            str(beam_size),
+            str(no_speech_threshold),
+            str(log_prob_threshold),
+            str(compression_ratio_threshold),
+            str(condition_on_previous_text),
+        ]
+    )
     with _services_lock:
         if service_key not in _services:
             _services[service_key] = DirectWhisperService(
@@ -139,6 +189,10 @@ def _named(
                 language,
                 beam_size,
                 role=key,
+                no_speech_threshold=no_speech_threshold,
+                log_prob_threshold=log_prob_threshold,
+                compression_ratio_threshold=compression_ratio_threshold,
+                condition_on_previous_text=condition_on_previous_text,
             )
         return _services[service_key]
 
@@ -152,6 +206,10 @@ def get_live_service(settings: Settings) -> DirectWhisperService:
         settings.live_compute_type,
         settings.language,
         settings.live_beam_size,
+        no_speech_threshold=settings.no_speech_threshold,
+        log_prob_threshold=settings.log_prob_threshold,
+        compression_ratio_threshold=settings.compression_ratio_threshold,
+        condition_on_previous_text=settings.condition_on_previous_text,
     )
 
 
@@ -164,4 +222,8 @@ def get_final_service(settings: Settings) -> DirectWhisperService:
         settings.final_compute_type,
         settings.language,
         settings.final_beam_size,
+        no_speech_threshold=settings.no_speech_threshold,
+        log_prob_threshold=settings.log_prob_threshold,
+        compression_ratio_threshold=settings.compression_ratio_threshold,
+        condition_on_previous_text=settings.condition_on_previous_text,
     )
