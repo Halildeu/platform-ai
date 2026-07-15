@@ -155,6 +155,43 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("active mapping outside the managed block", script)
         self.assertNotIn("Add-Content", script)
 
+    def test_task_action_contract_is_exact_and_shared_by_installer(self) -> None:
+        contract = self._read_script("task-action-contract.ps1")
+        installer = self._read_script("install.ps1")
+
+        contract.encode("ascii")
+        self.assertIn("CommandLineToArgvW", contract)
+        self.assertIn("New-GpuHostTaskActionArguments", contract)
+        self.assertIn("Get-GpuHostTaskActionContract", contract)
+        self.assertIn("legacy-user-repo", contract)
+        self.assertIn("canonical-repo", contract)
+        self.assertIn("WorkingDirectory", contract)
+        self.assertNotIn("-replace", contract)
+        self.assertIn("task-action-contract.ps1", installer)
+        self.assertIn("New-GpuHostTaskActionArguments @actionParams", installer)
+        self.assertNotIn('$arg = "-NoProfile -ExecutionPolicy', installer)
+
+    def test_task_action_migration_preserves_processes_and_rolls_back(self) -> None:
+        script = self._read_script("migrate-task-actions.ps1")
+
+        script.encode("ascii")
+        self.assertIn("SupportsShouldProcess = $true", script)
+        self.assertIn("RegisterTaskDefinition", script)
+        self.assertIn("RegisterTask(", script)
+        self.assertIn("GetInstances(0)", script)
+        self.assertIn("EnginePID", script)
+        self.assertIn("TASK_PROCESS_CHANGED", script)
+        self.assertIn("rollbackAttempted", script)
+        self.assertIn("rollbackSucceeded", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_TASK_MIGRATION_AFTER_FIRST", script)
+        self.assertIn('$env:CI -eq "true"', script)
+        self.assertIn("containsTaskArguments = $false", script)
+        self.assertIn("containsTaskXml = $false", script)
+        self.assertNotIn("Stop-ScheduledTask", script)
+        self.assertNotIn("Start-ScheduledTask", script)
+        self.assertNotIn("Unregister-ScheduledTask", script)
+        self.assertNotIn("Stop-Process", script)
+
 
 if __name__ == "__main__":
     unittest.main()
