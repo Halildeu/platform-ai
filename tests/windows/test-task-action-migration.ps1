@@ -267,7 +267,9 @@ Start-Sleep -Seconds 300
 
     $whatIf = Invoke-Migration -WhatIf
     Assert-True ($whatIf.ExitCode -eq 0 -and $whatIf.Evidence.status -eq "ready") `
-        "WhatIf did not produce ready evidence."
+        ("WhatIf did not produce ready evidence: exit={0} status={1} failure={2} " +
+            "output={3}" -f $whatIf.ExitCode, $whatIf.Evidence.status,
+            $whatIf.Evidence.failureClass, $whatIf.Output)
     foreach ($taskName in $taskNames) {
         Assert-True ((Get-RegisteredContract -Folder $folder `
             -TaskName $taskName).RepoClass -eq "legacy-user-repo") `
