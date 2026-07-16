@@ -530,7 +530,10 @@ try {
             "WhatIf changed an independently measured invariant."
     }
 
-    $unwritableEvidenceTarget = Join-Path $backupRoot "evidence-target-directory"
+    # Keep the fixture outside BackupRoot: creating an arbitrary child there before
+    # the migration hardens the root would correctly trip BACKUP_ACL_INVALID instead
+    # of reaching the intended evidence-write failure path.
+    $unwritableEvidenceTarget = Join-Path $fixtureRoot "evidence-target-directory"
     New-Item -ItemType Directory -Path $unwritableEvidenceTarget -Force | Out-Null
     $evidenceWriteFailed = Invoke-Migration -WhatIf -AllowMissingEvidence `
         -EvidenceTarget $unwritableEvidenceTarget
