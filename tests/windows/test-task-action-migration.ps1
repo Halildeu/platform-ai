@@ -481,9 +481,13 @@ try {
         $blockedByMutex = Invoke-Migration -WhatIf
         Assert-True ($blockedByMutex.ExitCode -ne 0 -and
             $blockedByMutex.Evidence.status -eq "no-go" -and
-            $blockedByMutex.Evidence.failureClass -eq "migration-already-running" -and
+            $blockedByMutex.Evidence.failureClass -eq "migration_already_running" -and
             -not $blockedByMutex.Evidence.mutationApplied) `
-            "Concurrent migration did not fail closed."
+            ("Concurrent migration did not fail closed. exit={0} status={1} failureClass={2} mutationApplied={3}" -f `
+                $blockedByMutex.ExitCode,
+                $blockedByMutex.Evidence.status,
+                $blockedByMutex.Evidence.failureClass,
+                $blockedByMutex.Evidence.mutationApplied)
     } finally {
         # Force-kill intentionally leaves an abandoned kernel mutex. The next
         # invocation below must acquire it and continue through normal checks.
