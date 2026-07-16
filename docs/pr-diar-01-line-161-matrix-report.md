@@ -6,10 +6,11 @@
 **Skor:** DER = pyannote.metrics (Hungarian eşleme; anonim SPEAKER_xx → optimal map),
 **collar = 0.25 s** (dscore standardı), skip_overlap = false
 
-> **Durum:** pyannote + speechbrain **GPU'da ölçüldü** (aynı 6 fixture, collar=0.25,
-> apples-to-apples). Bu bir **synthetic-smoke** ölçümüdür — baseline DER DEĞİL,
-> backend sıralaması için kullanılamaz (ADR-0033). Tek kalan: gerçek toplantı
-> (pilot) DER — go-live #59'a bağlı.
+> **Tarihsel durum:** pyannote + speechbrain **GPU'da ölçüldü** (aynı 6 fixture,
+> collar=0.25, apples-to-apples). Bu bölümdeki 2026-06-17 sonuçları
+> **synthetic-smoke** ölçümüdür; baseline DER veya backend seçimi değildir.
+> Gerçek pilot ve overlap kararı 2026-07-03 kanıtlarıyla aşağıdaki güncellemede
+> kaydedildi; canonical karar ADR-0033'te **ACCEPTED** durumundadır.
 
 ## Matris (RTX 4070, aynı 6 sentetik fixture, collar=0.25 — apples-to-apples)
 
@@ -37,15 +38,15 @@ Per-fixture DER (n=6, 2-konuşmacı TR sentetik, collar=0.25):
 
 | Eksen | Gözlem (synthetic-smoke) |
 |---|---|
-| **Doğruluk (DER)** | pyannote bu sette daha düşük DER (47.8% vs 54.6%) — **ama backend UNDECIDED**; sentetik smoke sıralama kanıtı değil (örtüşme yok, klipler birebir tekrar → speaker confusion ölçülmüyor) |
+| **Doğruluk (DER)** | pyannote bu tarihsel sentetik sette daha düşük DER (47.8% vs 54.6%); bu smoke tek başına backend sıralama kanıtı değildir (örtüşme yok, klipler birebir tekrar → speaker confusion ölçülmüyor) |
 | **VRAM** | speechbrain **7× az** (307 MB vs 2155 MB) — 8 GB sınırında kritik |
 | **Hız (p50/RTF)** | speechbrain **~9× hızlı** (140ms vs 1293ms; RTF 0.003 vs 0.024) |
 | Model yükleme | ~eşit (3.3s vs 7.3s; ilk indirme/cache etkisi) |
 
 Okuma: bu **synthetic-smoke** sette pyannote daha düşük DER, speechbrain çok daha
-hafif/hızlı. **Hiçbir backend seçilmedi** (ADR-0033: UNDECIDED). Mutlak DER ve
-göreli sıralama, gerçekçi fixture (örtüşme + farklı/birebir-olmayan ses) +
-pilotla belirlenecek — sentetik-smoke yalnızca harness'in çalıştığını kanıtlar.
+hafif/hızlı. Bu tarihsel bölüm backend seçimi üretmedi; yalnız harness'in
+çalıştığını kanıtladı. Sonraki gerçek pilot + overlap ölçümü pyannote 3.1'i ana,
+SpeechBrain'i kaynak-kısıtlı yedek olarak seçti; canonical karar ADR-0033'tedir.
 
 ## Bulgular (şu ana kadar)
 
@@ -62,8 +63,9 @@ pilotla belirlenecek — sentetik-smoke yalnızca harness'in çalıştığını 
 ## Reproducibility & CI notları
 
 - **Model pin:** `diar_matrix.py --revision <commit>` HF model sürümünü pinler.
-  Bu koşuda revision pinlenmedi (`revision: null`); **promote-grade koşuda commit
-  pinlenmeli** ki sonuçlar yeniden üretilebilsin.
+  Bu tarihsel sentetik koşuda revision pinlenmedi (`revision: null`). Kabul
+  kanıtları gerçek `resolved_revision` taşır; production packaging yine explicit
+  revision/hash pin'i gerektirir.
 - **CI:** `pyannote.metrics` artık `requirements-dev.txt`'te (#189) → **DER scorer
   unit testleri (`compute_der`, identical/miss/exact-overlap) CI'da KOŞAR**,
   VAD/clustering/RTTM ile birlikte. Yeşil CI artık DER-scorer mantığını kanıtlar.
@@ -72,9 +74,10 @@ pilotla belirlenecek — sentetik-smoke yalnızca harness'in çalıştığını 
 
 ## Karar girdisi
 
-- Backend kararı **veriyle** alınacak (ADR-0033 Promote-to-ACCEPTED tetikleyicileri:
-  collar=0.25 ✅, gerçekçi fixture ⬜, pilot ⬜).
-- Mutlak DER ve diarization hedefi **pilot** ayağına bağlı; go-live #59 / consent'e bağımlı.
+- Backend kararı veriyle alındı (ADR-0033 kabul tetikleyicileri: collar=0.25,
+  gerçek pilot ve gerçek-voice overlap kanıtları tamamlandı).
+- Bu source kalite kararı go-live değildir; runtime rollout, production model
+  pin'i ve consent/legal kapıları kendi acceptance yüzeylerinde kalır.
 
 ## Çalıştırma (GPU host — `.venv-diar` içinde)
 
@@ -119,7 +122,7 @@ Decision reading:
 - Only pyannote passes the same ceiling on the overlap set.
 - SpeechBrain is substantially faster and lighter, so it remains a measured
   resource-constrained fallback.
-- Accuracy is the #161 product wedge; therefore pyannote is the proposed
+- Accuracy is the #161 product wedge; therefore pyannote is the accepted
   primary self-hosted post-processing backend.
 
 The selected pilot row is stored at

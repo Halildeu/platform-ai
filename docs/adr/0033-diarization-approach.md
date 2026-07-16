@@ -1,8 +1,9 @@
 # ADR-0033: Diarization approach
 
-- Status: **PROPOSED - OWNER REVIEW**
+- Status: **ACCEPTED**
 - Date: 2026-06-17
-- Decision evidence updated: 2026-07-03 (revision-pinned re-measurement, #235)
+- Decision evidence updated: 2026-07-03 (revision-resolved re-measurement, #235)
+- Accepted: 2026-07-16 (owner re-review and source acceptance)
 - Issue: `#161 [Faz24 T-B] STT quality evidence - Turkish WER + diarization`
 - Amended by: ADR-0035 (voiceprint remains legal-gated)
 
@@ -216,8 +217,16 @@ The prior promotion triggers are now satisfied:
   machine-gated (`--backend pyannote`) in CI, not just documented;
 - the canonical G-WER/DER gate passed with WER 6.47% and pyannote DER 17.88%.
 
-Owner review is the final step before changing this ADR status from PROPOSED to
-ACCEPTED and closing #161.
+Owner re-review approved PR #235 at head `45863413` after every blocking
+evidence, CI, and revision-resolution finding was addressed. This ADR therefore
+accepts pyannote 3.1 as the measured primary post-processing backend and
+SpeechBrain as the resource-constrained fallback for the source-side #161
+quality decision.
+
+This acceptance does not enable production, direct STT, voiceprint or biometric
+identity, or legal approval. Production packaging must still pin the resolved
+model revision/hash, and runtime rollout keeps its own GitOps and live-evidence
+gates.
 
 ## Cross-AI Consensus
 
@@ -232,7 +241,8 @@ GPU host with the fixed `diar_matrix.py`. `resolved_revision` now populates
 for both backends (pyannote resolved via the `~/.cache/torch/pyannote`
 fallback added for this fix). `diar_decision_gate.py` re-run against
 `docs/evidence/diar-decision-pilot-2026-07-03.jsonl` returns `status=pass`,
-`findingCount=0`, selected backend `pyannote`. Awaiting Halil's re-review.
+`findingCount=0`, selected backend `pyannote`. Halil's subsequent re-review
+approved the revised head.
 
 Re-review (2026-07-03, Codex cross-AI, thread 019f2877): REVISE — 3 new
 blocking findings + 1 non-blocking:
@@ -256,5 +266,15 @@ blocking findings + 1 non-blocking:
    requested revision and prefers an exact match; doesn't change today's
    evidence (`revision` is null on all committed rows).
 
-All four addressed in commit `7995e8a` (code/CI) plus the pilot-comparison
-evidence commit above. Awaiting Halil's re-review.
+All four were addressed in commit `7995e8a` (code/CI) plus the
+pilot-comparison evidence commit above.
+
+Owner re-review (2026-07-07, PR #235, head `45863413`): **APPROVE**. The
+cross-root requested-revision lookup was verified, the two-root regression test
+was present, all five CI jobs passed, and the PR was mergeable. PR #235 then
+merged as `8abc74dfaa0ecad49ea69593299a3a766879010a`.
+
+Owner acceptance (2026-07-16): **ACCEPTED** for the source-side #161
+G-WER/DER and diarization backend decision. The production model pin, runtime
+deployment, direct-STT, voiceprint/biometric processing, and legal approval
+remain separate gates and are not implied by this status transition.
