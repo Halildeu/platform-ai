@@ -22,6 +22,9 @@ $script:Tasks = @("platform-ai-live-stt", "platform-ai-meeting-ai")
 $script:TransactionSchemaVersion = 1
 $script:ActiveTransactionFile = "active-transaction.json"
 $script:TransactionFile = "transaction.json"
+$script:MigrationMutexName = "Global\platform-ai-task-action-migration-v1"
+$script:MigrationMutex = $null
+$script:MigrationLockTaken = $false
 
 function Enable-SeSecurityPrivilege {
     if (-not ("PlatformAi.TokenPrivilege" -as [type])) {
@@ -876,7 +879,8 @@ function Get-FailureClass {
         "TASK_PROCESS_NOT_STABLE", "TASK_LISTENER_INVALID",
         "TASK_READBACK_INVALID",
         "TASK_INVARIANT_CHANGED", "TASK_SECURITY_CHANGED",
-        "TASK_PROCESS_CHANGED", "TEST_INJECTED_FAILURE", "ROLLBACK_FAILED"
+        "TASK_PROCESS_CHANGED", "MIGRATION_ALREADY_RUNNING",
+        "TEST_INJECTED_FAILURE", "ROLLBACK_FAILED"
     )) {
         if ($Message -like "${known}*") { return $known.ToLowerInvariant() }
     }
@@ -897,6 +901,21 @@ $transactionRecovered = $false
 $isCiFixture = $false
 
 try {
+    $script:MigrationMutex = New-Object Threading.Mutex(
+        $false, $script:MigrationMutexName
+    )
+    try {
+        $script:MigrationLockTaken = $script:MigrationMutex.WaitOne(0)
+    } catch [Threading.AbandonedMutexException] {
+        $script:MigrationLockTaken = $true
+        Write-Warning (
+            "Previous migration process abandoned its lock; " +
+            "durable transaction state will be reconciled before mutation."
+        )
+    }
+    if (-not $script:MigrationLockTaken) {
+        throw "MIGRATION_ALREADY_RUNNING"
+    }
     if ($RepoRoot -ine $script:CanonicalRepoRoot) {
         throw "REPO_ROOT_INVALID"
     }
@@ -1047,38 +1066,49 @@ try {
         }
     }
 } finally {
-    $taskEvidence = @()
-    foreach ($taskName in $script:Tasks) {
-        if ($before.ContainsKey($taskName)) {
-            $afterSnapshot = $null
-            if ($after.ContainsKey($taskName)) { $afterSnapshot = $after[$taskName] }
-            $taskEvidence += New-TaskEvidence -Before $before[$taskName] `
-                -After $afterSnapshot -Changed ([bool]$changed[$taskName])
+    try {
+        $taskEvidence = @()
+        foreach ($taskName in $script:Tasks) {
+            if ($before.ContainsKey($taskName)) {
+                $afterSnapshot = $null
+                if ($after.ContainsKey($taskName)) { $afterSnapshot = $after[$taskName] }
+                $taskEvidence += New-TaskEvidence -Before $before[$taskName] `
+                    -After $afterSnapshot -Changed ([bool]$changed[$taskName])
+            }
+        }
+        $evidence = [ordered]@{
+            schemaVersion = 1
+            timestampUtc = [DateTime]::UtcNow.ToString("o")
+            status = $status
+            failureClass = $failureClass
+            mutationApplied = $mutationApplied
+            rollbackAttempted = $rollbackAttempted
+            rollbackSucceeded = $rollbackSucceeded
+            backupCreated = $backupCreated
+            transactionRecovered = $transactionRecovered
+            transactionPhase = $(if ($null -ne $transaction) {
+                [string]$transaction.phase
+            } else { $null })
+            tasks = $taskEvidence
+            privacy = [ordered]@{
+                containsTaskArguments = $false
+                containsTaskXml = $false
+                containsAudio = $false
+                containsTranscript = $false
+                containsSecrets = $false
+            }
+        }
+        Write-MigrationEvidence -Evidence $evidence
+    } finally {
+        if ($null -ne $script:MigrationMutex) {
+            if ($script:MigrationLockTaken) {
+                [void]$script:MigrationMutex.ReleaseMutex()
+            }
+            $script:MigrationMutex.Dispose()
+            $script:MigrationMutex = $null
+            $script:MigrationLockTaken = $false
         }
     }
-    $evidence = [ordered]@{
-        schemaVersion = 1
-        timestampUtc = [DateTime]::UtcNow.ToString("o")
-        status = $status
-        failureClass = $failureClass
-        mutationApplied = $mutationApplied
-        rollbackAttempted = $rollbackAttempted
-        rollbackSucceeded = $rollbackSucceeded
-        backupCreated = $backupCreated
-        transactionRecovered = $transactionRecovered
-        transactionPhase = $(if ($null -ne $transaction) {
-            [string]$transaction.phase
-        } else { $null })
-        tasks = $taskEvidence
-        privacy = [ordered]@{
-            containsTaskArguments = $false
-            containsTaskXml = $false
-            containsAudio = $false
-            containsTranscript = $false
-            containsSecrets = $false
-        }
-    }
-    Write-MigrationEvidence -Evidence $evidence
 }
 
 if ($status -eq "no-go") { exit 1 }

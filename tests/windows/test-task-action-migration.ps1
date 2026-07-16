@@ -21,6 +21,8 @@ $evidencePath = Join-Path $fixtureRoot "evidence.json"
 $wrapperPath = Join-Path $fixtureRoot "invoke-migration.ps1"
 $stdoutPath = Join-Path $fixtureRoot "stdout.log"
 $stderrPath = Join-Path $fixtureRoot "stderr.log"
+$mutexHolderPath = Join-Path $fixtureRoot "hold-migration-mutex.ps1"
+$mutexReadyPath = Join-Path $fixtureRoot "migration-mutex-ready"
 $createdCanonicalRoot = -not (Test-Path -LiteralPath $canonicalRoot)
 $createdLegacyRoot = -not (Test-Path -LiteralPath $legacyRoot)
 $folder = $null
@@ -440,6 +442,56 @@ $child.WaitForExit()
             "Test fixture did not separate task and listener processes."
         $invariantsBefore[$taskName] = Get-IndependentTaskInvariantHash `
             -Folder $folder -TaskName $taskName
+    }
+
+    $escapedReadyPath = $mutexReadyPath.Replace("'", "''")
+    $mutexHolder = @"
+`$ErrorActionPreference = "Stop"
+`$mutex = New-Object Threading.Mutex(
+    `$false, "Global\platform-ai-task-action-migration-v1"
+)
+`$taken = `$false
+try {
+    `$taken = `$mutex.WaitOne(0)
+    if (-not `$taken) { throw "fixture-lock-unavailable" }
+    [IO.File]::WriteAllText('$escapedReadyPath', "ready")
+    Start-Sleep -Seconds 60
+} finally {
+    if (`$taken) { [void]`$mutex.ReleaseMutex() }
+    `$mutex.Dispose()
+}
+"@
+    [IO.File]::WriteAllText(
+        $mutexHolderPath, $mutexHolder, (New-Object Text.UTF8Encoding($false))
+    )
+    Remove-Item -LiteralPath $mutexReadyPath -Force -ErrorAction SilentlyContinue
+    $mutexProcess = Start-Process powershell.exe -PassThru -WindowStyle Hidden `
+        -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            ('"{0}"' -f $mutexHolderPath)
+        )
+    try {
+        $mutexDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $mutexReadyPath -PathType Leaf) -and
+            [DateTime]::UtcNow -lt $mutexDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        Assert-True (Test-Path -LiteralPath $mutexReadyPath -PathType Leaf) `
+            "Migration mutex fixture did not become ready."
+        $blockedByMutex = Invoke-Migration -WhatIf
+        Assert-True ($blockedByMutex.ExitCode -ne 0 -and
+            $blockedByMutex.Evidence.status -eq "no-go" -and
+            $blockedByMutex.Evidence.failureClass -eq "migration-already-running" -and
+            -not $blockedByMutex.Evidence.mutationApplied) `
+            "Concurrent migration did not fail closed."
+    } finally {
+        # Force-kill intentionally leaves an abandoned kernel mutex. The next
+        # invocation below must acquire it and continue through normal checks.
+        if (-not $mutexProcess.HasExited) {
+            Stop-Process -Id $mutexProcess.Id -Force
+        }
+        [void]$mutexProcess.WaitForExit(10000)
+        Remove-Item -LiteralPath $mutexReadyPath -Force -ErrorAction SilentlyContinue
     }
 
     $whatIf = Invoke-Migration -WhatIf
