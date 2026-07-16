@@ -241,12 +241,18 @@ function Set-RegisteredActionArguments {
 }
 
 function Invoke-Migration {
-    param([switch]$InjectFailure, [switch]$Crash, [switch]$WhatIf)
+    param(
+        [switch]$InjectFailure,
+        [switch]$Crash,
+        [switch]$WhatIf,
+        [switch]$AllowMissingEvidence,
+        [string]$EvidenceTarget = $evidencePath
+    )
 
     $whatIfToken = ""
     if ($WhatIf) { $whatIfToken = " -WhatIf" }
     $command = @"
-& '$($migrationPath.Replace("'", "''"))' -BackupRoot '$($backupRoot.Replace("'", "''"))' -EvidencePath '$($evidencePath.Replace("'", "''"))' -Confirm:`$false$whatIfToken
+& '$($migrationPath.Replace("'", "''"))' -BackupRoot '$($backupRoot.Replace("'", "''"))' -EvidencePath '$($EvidenceTarget.Replace("'", "''"))' -Confirm:`$false$whatIfToken
 exit `$LASTEXITCODE
 "@
     [IO.File]::WriteAllText(
@@ -301,6 +307,14 @@ exit `$LASTEXITCODE
     if ($Crash) {
         Assert-True (-not (Test-Path -LiteralPath $evidencePath)) `
             "Abrupt process exit unexpectedly wrote final evidence."
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Evidence = $null
+            Output = $output
+        }
+    }
+    if ($AllowMissingEvidence -and
+        -not (Test-Path -LiteralPath $evidencePath -PathType Leaf)) {
         return [pscustomobject]@{
             ExitCode = $process.ExitCode
             Evidence = $null
@@ -489,8 +503,8 @@ try {
                 $blockedByMutex.Evidence.failureClass,
                 $blockedByMutex.Evidence.mutationApplied)
     } finally {
-        # Force-kill intentionally leaves an abandoned kernel mutex. The next
-        # invocation below must acquire it and continue through normal checks.
+        # Killing the only owner destroys the named kernel object once all handles
+        # close. The next invocation must create/acquire the same name successfully.
         if (-not $mutexProcess.HasExited) {
             Stop-Process -Id $mutexProcess.Id -Force
         }
@@ -515,6 +529,17 @@ try {
             -TaskName $taskName) -eq $invariantsBefore[$taskName]) `
             "WhatIf changed an independently measured invariant."
     }
+
+    $unwritableEvidenceTarget = Join-Path $backupRoot "evidence-target-directory"
+    New-Item -ItemType Directory -Path $unwritableEvidenceTarget -Force | Out-Null
+    $evidenceWriteFailed = Invoke-Migration -WhatIf -AllowMissingEvidence `
+        -EvidenceTarget $unwritableEvidenceTarget
+    Assert-True ($evidenceWriteFailed.ExitCode -ne 0) `
+        "Evidence write failure fixture unexpectedly succeeded."
+    $afterEvidenceFailure = Invoke-Migration -WhatIf
+    Assert-True ($afterEvidenceFailure.ExitCode -eq 0 -and
+        $afterEvidenceFailure.Evidence.status -eq "ready") `
+        "Evidence write failure left the migration mutex locked."
 
     $applied = Invoke-Migration
     Assert-True ($applied.ExitCode -eq 0 -and $applied.Evidence.status -eq "go") `
@@ -604,6 +629,24 @@ try {
     Assert-True (Test-Path -LiteralPath `
         (Join-Path $backupRoot "active-transaction.json") -PathType Leaf) `
         "Abrupt process exit did not leave a recovery pointer."
+
+    $recoveryWhatIf = Invoke-Migration -WhatIf
+    Assert-True ($recoveryWhatIf.ExitCode -eq 1 -and
+        $recoveryWhatIf.Evidence.status -eq "no-go" -and
+        $recoveryWhatIf.Evidence.failureClass -eq `
+            "interrupted_transaction_recovery_required" -and
+        -not $recoveryWhatIf.Evidence.mutationApplied -and
+        -not $recoveryWhatIf.Evidence.rollbackAttempted) `
+        "WhatIf did not fail closed on an interrupted transaction."
+    Assert-True (Test-Path -LiteralPath `
+        (Join-Path $backupRoot "active-transaction.json") -PathType Leaf) `
+        "WhatIf removed the interrupted transaction recovery pointer."
+    Assert-True ((Get-RegisteredContract -Folder $folder `
+        -TaskName "platform-ai-live-stt").RepoClass -eq "canonical-repo") `
+        "WhatIf recovered the first partially migrated task."
+    Assert-True ((Get-RegisteredContract -Folder $folder `
+        -TaskName "platform-ai-meeting-ai").RepoClass -eq "legacy-user-repo") `
+        "WhatIf changed the second task during recovery inspection."
 
     $recovered = Invoke-Migration
     Assert-True ($recovered.ExitCode -eq 2 -and
