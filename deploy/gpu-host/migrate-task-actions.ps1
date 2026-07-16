@@ -443,12 +443,16 @@ function Get-RunningInstancePids {
 }
 
 function Get-ProcessIdentityProof {
-    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][int[]]$ExpectedAncestorPids
+    )
 
     $chain = @()
     $currentId = $ProcessId
-    for ($depth = 0; $depth -lt 6 -and $currentId -gt 0; $depth++) {
-        $process = Get-CimInstance -ClassName Win32_Process `
+    $ancestorMatched = $false
+    for ($depth = 0; $depth -lt 8 -and $currentId -gt 0; $depth++) {
+        $process = Get-WmiObject -Class Win32_Process `
             -Filter ("ProcessId = {0}" -f $currentId) -ErrorAction Stop
         if ($null -eq $process -or
             [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath) -or
@@ -464,10 +468,16 @@ function Get-ProcessIdentityProof {
             parentPid = $parentId
             identitySha256 = Get-StringSha256 -Value $identityValue
         }
+        if ($ExpectedAncestorPids -contains $currentId) {
+            $ancestorMatched = $true
+            break
+        }
         if ($parentId -eq $currentId -or $parentId -le 4) { break }
         $currentId = $parentId
     }
-    if ($chain.Count -eq 0) { throw "TASK_LISTENER_INVALID" }
+    if ($chain.Count -eq 0 -or -not $ancestorMatched) {
+        throw "TASK_LISTENER_INVALID"
+    }
     $chainJson = $chain | ConvertTo-Json -Depth 4 -Compress
     return [pscustomobject]@{
         Pid = [int]$chain[0].pid
@@ -478,7 +488,10 @@ function Get-ProcessIdentityProof {
 }
 
 function Get-ListenerProcessProof {
-    param([Parameter(Mandatory = $true)][int]$Port)
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][int[]]$TaskPids
+    )
 
     try {
         $listenerPids = @(Get-NetTCPConnection -State Listen -LocalPort $Port `
@@ -489,7 +502,8 @@ function Get-ListenerProcessProof {
     if ($listenerPids.Count -ne 1 -or [int]$listenerPids[0] -le 0) {
         throw "TASK_LISTENER_INVALID"
     }
-    return Get-ProcessIdentityProof -ProcessId ([int]$listenerPids[0])
+    return Get-ProcessIdentityProof -ProcessId ([int]$listenerPids[0]) `
+        -ExpectedAncestorPids $TaskPids
 }
 
 function Test-ProcessProofEqual {
@@ -543,7 +557,7 @@ function Get-TaskSnapshot {
         throw "TASK_PROCESS_NOT_STABLE"
     }
     $spec = Get-GpuHostTaskSpec -TaskName $TaskName
-    $listener = Get-ListenerProcessProof -Port ([int]$spec.Port)
+    $listener = Get-ListenerProcessProof -Port ([int]$spec.Port) -TaskPids $pids
     $xml = [string]$task.Xml
     $sddl = [string]$task.GetSecurityDescriptor($script:SecurityInformation)
     return [pscustomobject]@{

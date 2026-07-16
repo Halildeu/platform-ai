@@ -184,6 +184,8 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("GetInstances(0)", script)
         self.assertIn("EnginePID", script)
         self.assertIn("Get-NetTCPConnection", script)
+        self.assertIn("Get-WmiObject -Class Win32_Process", script)
+        self.assertNotIn("Get-CimInstance -ClassName Win32_Process", script)
         self.assertIn("Win32_Process", script)
         self.assertIn("ListenerIdentitySha256", script)
         self.assertIn("active-transaction.json", script)
