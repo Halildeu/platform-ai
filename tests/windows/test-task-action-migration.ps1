@@ -30,6 +30,82 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Get-IndependentStringSha256 {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes($Value)
+        ))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-IndependentInvariantHash {
+    param([Parameter(Mandatory = $true)][string]$Xml)
+
+    $document = New-Object Xml.XmlDocument
+    $document.PreserveWhitespace = $true
+    $document.LoadXml($Xml)
+    $namespace = New-Object Xml.XmlNamespaceManager($document.NameTable)
+    $namespace.AddNamespace("t", $document.DocumentElement.NamespaceURI)
+    foreach ($xpath in @("/t:Task/t:Actions", "/t:Task/t:RegistrationInfo")) {
+        $node = $document.SelectSingleNode($xpath, $namespace)
+        if ($null -ne $node) { [void]$node.ParentNode.RemoveChild($node) }
+    }
+    return Get-IndependentStringSha256 -Value $document.OuterXml
+}
+
+function Convert-TestIdentityToSid {
+    param([Parameter(Mandatory = $true)][string]$Identity)
+
+    try {
+        return (New-Object Security.Principal.SecurityIdentifier($Identity)).Value
+    } catch {
+        return (New-Object Security.Principal.NTAccount($Identity)).Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+    }
+}
+
+function Assert-HardenedAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $acl = Get-Acl -LiteralPath $Path
+    Assert-True $acl.AreAccessRulesProtected "Backup ACL inheritance is enabled."
+    $allowed = @("S-1-5-18", "S-1-5-32-544")
+    $seen = @{}
+    foreach ($rule in @($acl.Access)) {
+        $sid = Convert-TestIdentityToSid -Identity $rule.IdentityReference.Value
+        Assert-True (-not $rule.IsInherited -and $allowed -contains $sid -and
+            $rule.AccessControlType -eq `
+                [Security.AccessControl.AccessControlType]::Allow) `
+            "Backup ACL contains an unexpected rule."
+        $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+        Assert-True (($rule.FileSystemRights -band $fullControl) -eq $fullControl) `
+            "Backup ACL principal lacks FullControl."
+        $seen[$sid] = $true
+    }
+    foreach ($sid in $allowed) {
+        Assert-True $seen.ContainsKey($sid) "Backup ACL misses a required SID."
+    }
+}
+
+function Assert-PropertySet {
+    param(
+        [Parameter(Mandatory = $true)]$Value,
+        [Parameter(Mandatory = $true)][string[]]$Expected,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $actual = @($Value.PSObject.Properties.Name | Sort-Object)
+    $wanted = @($Expected | Sort-Object)
+    Assert-True (($actual -join "|") -eq ($wanted -join "|")) `
+        "$Label schema changed unexpectedly."
+}
+
 function Assert-ContractInvalid {
     param(
         [string]$TaskName,
@@ -104,6 +180,36 @@ function Wait-TaskRunning {
     return [int]$instances[0].EnginePID
 }
 
+function Get-TestTaskPort {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    if ($TaskName -eq "platform-ai-live-stt") { return 8200 }
+    if ($TaskName -eq "platform-ai-meeting-ai") { return 8300 }
+    throw "Unsupported test task."
+}
+
+function Wait-ListenerPid {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    $port = Get-TestTaskPort -TaskName $TaskName
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 250
+        $pids = @(Get-NetTCPConnection -State Listen -LocalPort $port `
+            -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty OwningProcess -Unique)
+    } while ($pids.Count -ne 1 -and [DateTime]::UtcNow -lt $deadline)
+    Assert-True ($pids.Count -eq 1) "Test listener did not start."
+    return [int]$pids[0]
+}
+
+function Get-IndependentTaskInvariantHash {
+    param([Parameter(Mandatory = $true)]$Folder, [string]$TaskName)
+
+    return Get-IndependentInvariantHash `
+        -Xml ([string]$Folder.GetTask($TaskName).Xml)
+}
+
 function Get-RegisteredContract {
     param([Parameter(Mandatory = $true)]$Folder, [string]$TaskName)
 
@@ -126,14 +232,14 @@ function Set-RegisteredActionArguments {
     $definition.Actions.Item(1).Path = "powershell.exe"
     $definition.Actions.Item(1).Arguments = $Arguments
     $definition.Actions.Item(1).WorkingDirectory = ""
-    $sddl = [string]$task.GetSecurityDescriptor(7)
+    $sddl = [string]$task.GetSecurityDescriptor(15)
     [void]$Folder.RegisterTaskDefinition(
         $TaskName, $definition, 4, "SYSTEM", $null, 5, $sddl
     )
 }
 
 function Invoke-Migration {
-    param([switch]$InjectFailure, [switch]$WhatIf)
+    param([switch]$InjectFailure, [switch]$Crash, [switch]$WhatIf)
 
     $whatIfToken = ""
     if ($WhatIf) { $whatIfToken = " -WhatIf" }
@@ -149,14 +255,19 @@ exit `$LASTEXITCODE
     Remove-Item -LiteralPath $evidencePath, $stdoutPath, $stderrPath `
         -Force -ErrorAction SilentlyContinue
     $process = $null
-    $oldCi = $env:CI
     $oldInjection = $env:PLATFORM_AI_TEST_INJECT_TASK_MIGRATION_AFTER_FIRST
+    $oldCrash = $env:PLATFORM_AI_TEST_CRASH_TASK_MIGRATION_AFTER_FIRST
     try {
-        $env:CI = "true"
         if ($InjectFailure) {
             $env:PLATFORM_AI_TEST_INJECT_TASK_MIGRATION_AFTER_FIRST = "1"
         } else {
             Remove-Item Env:PLATFORM_AI_TEST_INJECT_TASK_MIGRATION_AFTER_FIRST `
+                -ErrorAction SilentlyContinue
+        }
+        if ($Crash) {
+            $env:PLATFORM_AI_TEST_CRASH_TASK_MIGRATION_AFTER_FIRST = "1"
+        } else {
+            Remove-Item Env:PLATFORM_AI_TEST_CRASH_TASK_MIGRATION_AFTER_FIRST `
                 -ErrorAction SilentlyContinue
         }
         $process = Start-Process powershell.exe -NoNewWindow -Wait -PassThru `
@@ -165,13 +276,17 @@ exit `$LASTEXITCODE
                 ('"{0}"' -f $wrapperPath)
             ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     } finally {
-        if ($null -eq $oldCi) { Remove-Item Env:CI -ErrorAction SilentlyContinue }
-        else { $env:CI = $oldCi }
         if ($null -eq $oldInjection) {
             Remove-Item Env:PLATFORM_AI_TEST_INJECT_TASK_MIGRATION_AFTER_FIRST `
                 -ErrorAction SilentlyContinue
         } else {
             $env:PLATFORM_AI_TEST_INJECT_TASK_MIGRATION_AFTER_FIRST = $oldInjection
+        }
+        if ($null -eq $oldCrash) {
+            Remove-Item Env:PLATFORM_AI_TEST_CRASH_TASK_MIGRATION_AFTER_FIRST `
+                -ErrorAction SilentlyContinue
+        } else {
+            $env:PLATFORM_AI_TEST_CRASH_TASK_MIGRATION_AFTER_FIRST = $oldCrash
         }
     }
     $output = ""
@@ -181,16 +296,50 @@ exit `$LASTEXITCODE
     if (Test-Path -LiteralPath $stderrPath) {
         $output += [IO.File]::ReadAllText($stderrPath)
     }
+    if ($Crash) {
+        Assert-True (-not (Test-Path -LiteralPath $evidencePath)) `
+            "Abrupt process exit unexpectedly wrote final evidence."
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Evidence = $null
+            Output = $output
+        }
+    }
     Assert-True (Test-Path -LiteralPath $evidencePath -PathType Leaf) `
         "Migration did not write evidence. Output: $output"
     $evidenceJson = [IO.File]::ReadAllText($evidencePath)
-    Assert-True (-not $evidenceJson.Contains("C:\")) `
-        "Uploaded evidence contains a Windows path."
-    Assert-True (-not $evidenceJson.Contains("-RepoRoot")) `
-        "Uploaded evidence contains task arguments."
+    foreach ($forbidden in @("C:\", "-RepoRoot", "<Task", "powershell.exe")) {
+        Assert-True ($evidenceJson.IndexOf(
+            $forbidden, [StringComparison]::OrdinalIgnoreCase
+        ) -lt 0) `
+            "Uploaded evidence contains forbidden task data."
+    }
+    $evidence = $evidenceJson | ConvertFrom-Json
+    Assert-PropertySet -Value $evidence -Label "Evidence" -Expected @(
+        "schemaVersion", "timestampUtc", "status", "failureClass",
+        "mutationApplied", "rollbackAttempted", "rollbackSucceeded",
+        "backupCreated", "transactionRecovered", "transactionPhase",
+        "tasks", "privacy"
+    )
+    Assert-PropertySet -Value $evidence.privacy -Label "Privacy" -Expected @(
+        "containsTaskArguments", "containsTaskXml", "containsAudio",
+        "containsTranscript", "containsSecrets"
+    )
+    foreach ($taskEvidence in @($evidence.tasks)) {
+        Assert-PropertySet -Value $taskEvidence -Label "Task evidence" -Expected @(
+            "taskName", "beforeRepoClass", "afterRepoClass", "changeRequired",
+            "actionChanged", "backupXmlSha256", "invariantBeforeSha256",
+            "invariantAfterSha256", "securityBeforeSha256",
+            "securityAfterSha256", "runningPidsBefore", "runningPidsAfter",
+            "sameRunningProcess", "listenerPidBefore", "listenerPidAfter",
+            "listenerParentPidsBefore", "listenerParentPidsAfter",
+            "listenerIdentityBeforeSha256", "listenerIdentityAfterSha256",
+            "sameListenerProcess"
+        )
+    }
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
-        Evidence = ($evidenceJson | ConvertFrom-Json)
+        Evidence = $evidence
         Output = $output
     }
 }
@@ -212,6 +361,8 @@ try {
         $deployDir = Join-Path $root "deploy\gpu-host"
         New-Item -ItemType Directory -Path $deployDir -Force | Out-Null
         foreach ($scriptName in @("start-live-stt.ps1", "start-meeting-ai.ps1")) {
+            $port = 8300
+            if ($scriptName -eq "start-live-stt.ps1") { $port = 8200 }
             $dummy = @'
 param(
     [string]$RepoRoot,
@@ -219,8 +370,25 @@ param(
     [string]$HfHome,
     [string]$CudaBin
 )
-Start-Sleep -Seconds 300
+$childCode = @"
+`$listener = New-Object Net.Sockets.TcpListener(
+    [Net.IPAddress]::Loopback, __PORT__
+)
+`$listener.Start()
+try {
+    while (`$true) { Start-Sleep -Seconds 1 }
+} finally {
+    `$listener.Stop()
+}
+"@
+$encoded = [Convert]::ToBase64String(
+    [Text.Encoding]::Unicode.GetBytes($childCode)
+)
+$child = Start-Process powershell.exe -PassThru -WindowStyle Hidden `
+    -ArgumentList @("-NoProfile", "-EncodedCommand", $encoded)
+$child.WaitForExit()
 '@
+            $dummy = $dummy.Replace("__PORT__", [string]$port)
             [IO.File]::WriteAllText(
                 (Join-Path $deployDir $scriptName),
                 $dummy,
@@ -246,6 +414,8 @@ Start-Sleep -Seconds 300
     }
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "cmd.exe" `
         -Arguments $liveLegacy
+    Assert-ContractInvalid -TaskName "platform-ai-live-stt" `
+        -Execute "C:\untrusted\powershell.exe" -Arguments $liveLegacy
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
         -Arguments ($liveLegacy + " -Unexpected value")
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
@@ -261,21 +431,33 @@ Start-Sleep -Seconds 300
     Register-TestTask -Service $service -Folder $folder `
         -TaskName "platform-ai-meeting-ai" -Arguments $meetingLegacy
     $pidsBefore = @{}
+    $listenerPidsBefore = @{}
+    $invariantsBefore = @{}
     foreach ($taskName in $taskNames) {
         $pidsBefore[$taskName] = Wait-TaskRunning -Folder $folder -TaskName $taskName
+        $listenerPidsBefore[$taskName] = Wait-ListenerPid -TaskName $taskName
+        Assert-True ($listenerPidsBefore[$taskName] -ne $pidsBefore[$taskName]) `
+            "Test fixture did not separate task and listener processes."
+        $invariantsBefore[$taskName] = Get-IndependentTaskInvariantHash `
+            -Folder $folder -TaskName $taskName
     }
 
     $whatIf = Invoke-Migration -WhatIf
     Assert-True ($whatIf.ExitCode -eq 0 -and $whatIf.Evidence.status -eq "ready") `
-        ("WhatIf did not produce ready evidence: exit={0} status={1} failure={2} " +
-            "output={3}" -f $whatIf.ExitCode, $whatIf.Evidence.status,
-            $whatIf.Evidence.failureClass, $whatIf.Output)
+        (("WhatIf did not produce ready evidence: exit={0} status={1} " +
+            "failure={2} output={3}") -f $whatIf.ExitCode,
+            $whatIf.Evidence.status, $whatIf.Evidence.failureClass, $whatIf.Output)
     foreach ($taskName in $taskNames) {
         Assert-True ((Get-RegisteredContract -Folder $folder `
             -TaskName $taskName).RepoClass -eq "legacy-user-repo") `
             "WhatIf mutated a task action."
         Assert-True ((Get-RunningPid -Folder $folder -TaskName $taskName) -eq `
             $pidsBefore[$taskName]) "WhatIf changed a running process."
+        Assert-True ((Wait-ListenerPid -TaskName $taskName) -eq `
+            $listenerPidsBefore[$taskName]) "WhatIf changed a listener process."
+        Assert-True ((Get-IndependentTaskInvariantHash -Folder $folder `
+            -TaskName $taskName) -eq $invariantsBefore[$taskName]) `
+            "WhatIf changed an independently measured invariant."
     }
 
     $applied = Invoke-Migration
@@ -290,7 +472,39 @@ Start-Sleep -Seconds 300
             "Task action did not migrate to the canonical repository."
         Assert-True ((Get-RunningPid -Folder $folder -TaskName $taskName) -eq `
             $pidsBefore[$taskName]) "Migration restarted a running process."
+        Assert-True ((Wait-ListenerPid -TaskName $taskName) -eq `
+            $listenerPidsBefore[$taskName]) "Migration replaced a listener process."
+        Assert-True ((Get-IndependentTaskInvariantHash -Folder $folder `
+            -TaskName $taskName) -eq $invariantsBefore[$taskName]) `
+            "Migration changed an independently measured invariant."
+        $taskEvidence = @($applied.Evidence.tasks | Where-Object {
+            $_.taskName -eq $taskName
+        })[0]
+        Assert-True ($taskEvidence.sameRunningProcess -and
+            $taskEvidence.sameListenerProcess) `
+            "Evidence did not prove both process identities stayed stable."
     }
+
+    $appliedBatch = @(Get-ChildItem -LiteralPath $backupRoot -Directory |
+        Sort-Object LastWriteTimeUtc -Descending)[0]
+    Assert-HardenedAcl -Path $backupRoot
+    Assert-HardenedAcl -Path $appliedBatch.FullName
+    foreach ($taskName in $taskNames) {
+        $taskEvidence = @($applied.Evidence.tasks | Where-Object {
+            $_.taskName -eq $taskName
+        })[0]
+        $xmlPath = Join-Path $appliedBatch.FullName ("{0}.xml" -f $taskName)
+        $sddlPath = Join-Path $appliedBatch.FullName ("{0}.sddl" -f $taskName)
+        foreach ($path in @($xmlPath, $sddlPath)) { Assert-HardenedAcl -Path $path }
+        Assert-True ((Get-IndependentStringSha256 -Value `
+            ([IO.File]::ReadAllText($xmlPath, [Text.Encoding]::UTF8))
+        ) -eq $taskEvidence.backupXmlSha256) `
+            "Backup XML hash does not match independent verification."
+    }
+    Assert-HardenedAcl -Path (Join-Path $appliedBatch.FullName "transaction.json")
+    Assert-True (-not (Test-Path -LiteralPath `
+        (Join-Path $backupRoot "active-transaction.json"))) `
+        "Committed transaction left an active pointer."
 
     $idempotent = Invoke-Migration
     Assert-True ($idempotent.ExitCode -eq 0 -and $idempotent.Evidence.status -eq "go") `
@@ -315,13 +529,62 @@ Start-Sleep -Seconds 300
             "Rollback did not restore the legacy task definition."
         Assert-True ((Get-RunningPid -Folder $folder -TaskName $taskName) -eq `
             $pidsBefore[$taskName]) "Rollback changed a running process."
+        Assert-True ((Wait-ListenerPid -TaskName $taskName) -eq `
+            $listenerPidsBefore[$taskName]) "Rollback changed a listener process."
+        Assert-True ((Get-IndependentTaskInvariantHash -Folder $folder `
+            -TaskName $taskName) -eq $invariantsBefore[$taskName]) `
+            "Rollback changed an independently measured invariant."
     }
+
+    $crashed = Invoke-Migration -Crash
+    Assert-True ($crashed.ExitCode -eq 9) `
+        "Crash injection did not terminate the migration process abruptly."
+    Assert-True ((Get-RegisteredContract -Folder $folder `
+        -TaskName "platform-ai-live-stt").RepoClass -eq "canonical-repo") `
+        "Crash fixture did not stop after the first mutation."
+    Assert-True ((Get-RegisteredContract -Folder $folder `
+        -TaskName "platform-ai-meeting-ai").RepoClass -eq "legacy-user-repo") `
+        "Crash fixture unexpectedly applied the second mutation."
+    Assert-True (Test-Path -LiteralPath `
+        (Join-Path $backupRoot "active-transaction.json") -PathType Leaf) `
+        "Abrupt process exit did not leave a recovery pointer."
+
+    $recovered = Invoke-Migration
+    Assert-True ($recovered.ExitCode -eq 2 -and
+        $recovered.Evidence.status -eq "recovered" -and
+        $recovered.Evidence.transactionRecovered -and
+        $recovered.Evidence.rollbackSucceeded) `
+        "The next invocation did not recover the interrupted transaction."
+    foreach ($taskName in $taskNames) {
+        Assert-True ((Get-RegisteredContract -Folder $folder `
+            -TaskName $taskName).RepoClass -eq "legacy-user-repo") `
+            "Crash recovery did not restore the legacy task definition."
+        Assert-True ((Get-RunningPid -Folder $folder -TaskName $taskName) -eq `
+            $pidsBefore[$taskName]) "Crash recovery changed a task process."
+        Assert-True ((Wait-ListenerPid -TaskName $taskName) -eq `
+            $listenerPidsBefore[$taskName]) "Crash recovery changed a listener process."
+        Assert-True ((Get-IndependentTaskInvariantHash -Folder $folder `
+            -TaskName $taskName) -eq $invariantsBefore[$taskName]) `
+            "Crash recovery changed an independently measured invariant."
+    }
+    Assert-True (-not (Test-Path -LiteralPath `
+        (Join-Path $backupRoot "active-transaction.json"))) `
+        "Crash recovery left an active transaction pointer."
 
     Write-Host "GPU-host Scheduled Task action migration contract: PASS"
 } finally {
     try {
         if ($null -ne $folder) {
             foreach ($taskName in $taskNames) {
+                try {
+                    $port = Get-TestTaskPort -TaskName $taskName
+                    Get-NetTCPConnection -State Listen -LocalPort $port `
+                        -ErrorAction SilentlyContinue |
+                        Select-Object -ExpandProperty OwningProcess -Unique |
+                        ForEach-Object {
+                            Stop-Process -Id ([int]$_) -Force -ErrorAction SilentlyContinue
+                        }
+                } catch {}
                 try { $folder.GetTask($taskName).Stop(0) } catch {}
                 try { $folder.DeleteTask($taskName, 0) } catch {}
             }

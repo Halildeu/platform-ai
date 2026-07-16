@@ -101,10 +101,18 @@ function Get-GpuHostTaskSpec {
 
     switch ($TaskName) {
         'platform-ai-live-stt' {
-            return [ordered]@{ Script = 'start-live-stt.ps1'; LiveStt = $true }
+            return [ordered]@{
+                Script = 'start-live-stt.ps1'
+                LiveStt = $true
+                Port = 8200
+            }
         }
         'platform-ai-meeting-ai' {
-            return [ordered]@{ Script = 'start-meeting-ai.ps1'; LiveStt = $false }
+            return [ordered]@{
+                Script = 'start-meeting-ai.ps1'
+                LiveStt = $false
+                Port = 8300
+            }
         }
         default { throw "Unsupported GPU-host task name." }
     }
@@ -175,7 +183,12 @@ function Get-GpuHostTaskActionContract {
     }
     try {
         $spec = Get-GpuHostTaskSpec -TaskName $TaskName
-        if ([IO.Path]::GetFileName($Execute) -ine 'powershell.exe') { return $result }
+        $trustedPowerShell = @('powershell.exe')
+        if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+            $trustedPowerShell += (Join-Path $env:SystemRoot `
+                'System32\WindowsPowerShell\v1.0\powershell.exe')
+        }
+        if ($trustedPowerShell -inotcontains $Execute) { return $result }
         if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) { return $result }
 
         $tokens = @([PlatformAi.NativeCommandLine]::Split(

@@ -15,10 +15,103 @@ $script:MigrationMarker = "PLATFORM_AI_TASK_ACTION_MIGRATION_EVIDENCE_B64="
 $script:CanonicalRepoRoot = "C:\platform-ai"
 $script:DefaultBackupRoot = "C:\ProgramData\Acik\platform-ai\task-action-migration"
 $script:TaskUpdate = 4
-$script:SecurityInformation = 7
+$script:SecurityInformation = 15
 $script:SystemSid = "S-1-5-18"
 $script:AdministratorsSid = "S-1-5-32-544"
 $script:Tasks = @("platform-ai-live-stt", "platform-ai-meeting-ai")
+$script:TransactionSchemaVersion = 1
+$script:ActiveTransactionFile = "active-transaction.json"
+$script:TransactionFile = "transaction.json"
+
+function Enable-SeSecurityPrivilege {
+    if (-not ("PlatformAi.TokenPrivilege" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace PlatformAi {
+    public static class TokenPrivilege {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Luid {
+            public uint LowPart;
+            public int HighPart;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenPrivileges {
+            public uint PrivilegeCount;
+            public Luid Luid;
+            public uint Attributes;
+        }
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(
+            IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle
+        );
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool LookupPrivilegeValue(
+            string systemName, string name, out Luid luid
+        );
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool AdjustTokenPrivileges(
+            IntPtr tokenHandle,
+            bool disableAllPrivileges,
+            ref TokenPrivileges newState,
+            uint bufferLength,
+            IntPtr previousState,
+            IntPtr returnLength
+        );
+
+        public static void Enable(string name) {
+            const uint TokenAdjustPrivileges = 0x20;
+            const uint TokenQuery = 0x8;
+            const uint PrivilegeEnabled = 0x2;
+            IntPtr token;
+            if (!OpenProcessToken(
+                GetCurrentProcess(), TokenAdjustPrivileges | TokenQuery, out token
+            )) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            try {
+                Luid luid;
+                if (!LookupPrivilegeValue(null, name, out luid)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                TokenPrivileges privileges = new TokenPrivileges {
+                    PrivilegeCount = 1,
+                    Luid = luid,
+                    Attributes = PrivilegeEnabled
+                };
+                if (!AdjustTokenPrivileges(
+                    token, false, ref privileges, 0, IntPtr.Zero, IntPtr.Zero
+                )) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                int error = Marshal.GetLastWin32Error();
+                if (error != 0) { throw new Win32Exception(error); }
+            } finally {
+                CloseHandle(token);
+            }
+        }
+    }
+}
+"@
+    }
+    try {
+        [PlatformAi.TokenPrivilege]::Enable("SeSecurityPrivilege")
+    } catch {
+        throw "PRIVILEGE_NOT_HELD"
+    }
+}
 
 function Get-StringSha256 {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
@@ -63,7 +156,138 @@ function New-MigrationAcl {
     return $acl
 }
 
-function Initialize-BackupDirectory {
+function Convert-MigrationIdentityToSid {
+    param([Parameter(Mandatory = $true)][string]$Identity)
+
+    try {
+        return (New-Object Security.Principal.SecurityIdentifier($Identity)).Value
+    } catch {
+        return (New-Object Security.Principal.NTAccount($Identity)).Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+    }
+}
+
+function Assert-MigrationAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$Directory
+    )
+
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if (-not $acl.AreAccessRulesProtected) { throw "BACKUP_ACL_INVALID" }
+    $ownerSid = Convert-MigrationIdentityToSid -Identity $acl.Owner
+    if ($ownerSid -notin @($script:SystemSid, $script:AdministratorsSid)) {
+        throw "BACKUP_ACL_INVALID"
+    }
+    $allowed = @($script:SystemSid, $script:AdministratorsSid)
+    $seen = @{}
+    foreach ($rule in @($acl.Access)) {
+        $sid = Convert-MigrationIdentityToSid -Identity `
+            $rule.IdentityReference.Value
+        if ($rule.IsInherited -or $allowed -notcontains $sid -or
+            $rule.AccessControlType -ne `
+                [Security.AccessControl.AccessControlType]::Allow) {
+            throw "BACKUP_ACL_INVALID"
+        }
+        $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+        if (($rule.FileSystemRights -band $fullControl) -ne $fullControl) {
+            throw "BACKUP_ACL_INVALID"
+        }
+        $seen[$sid] = $true
+    }
+    foreach ($sid in $allowed) {
+        if (-not $seen.ContainsKey($sid)) { throw "BACKUP_ACL_INVALID" }
+    }
+}
+
+function Assert-MigrationPathUnderRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    if (-not $fullPath.StartsWith($fullRoot, `
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw "BACKUP_PATH_INVALID"
+    }
+    return $fullPath
+}
+
+function Write-DurableText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
+    )
+
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Value)
+    $stream = New-Object IO.FileStream(
+        $Path,
+        [IO.FileMode]::Create,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None,
+        4096,
+        [IO.FileOptions]::WriteThrough
+    )
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Write-DurableFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
+    )
+
+    Write-DurableText -Path $Path -Value $Value
+    Set-Acl -LiteralPath $Path -AclObject (New-MigrationAcl)
+    Assert-MigrationAcl -Path $Path
+}
+
+function Write-DurableJsonAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    $directory = Split-Path -Parent ([IO.Path]::GetFullPath($Path))
+    $tempPath = Join-Path $directory (
+        ".{0}.{1}.tmp" -f [IO.Path]::GetFileName($Path),
+        [Guid]::NewGuid().ToString("N")
+    )
+    $rollbackPath = Join-Path $directory (
+        ".{0}.{1}.rollback" -f [IO.Path]::GetFileName($Path),
+        [Guid]::NewGuid().ToString("N")
+    )
+    try {
+        $json = $Value | ConvertTo-Json -Depth 10
+        Write-DurableFile -Path $tempPath `
+            -Value ($json + [Environment]::NewLine)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            Assert-MigrationAcl -Path $Path
+            [IO.File]::Replace($tempPath, $Path, $rollbackPath, $true)
+        } else {
+            [IO.File]::Move($tempPath, $Path)
+        }
+        Set-Acl -LiteralPath $Path -AclObject (New-MigrationAcl)
+        Assert-MigrationAcl -Path $Path
+    } finally {
+        foreach ($candidate in @($tempPath, $rollbackPath)) {
+            if (Test-Path -LiteralPath $candidate) {
+                Remove-Item -LiteralPath $candidate -Force `
+                    -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+function Initialize-MigrationRoot {
     param([Parameter(Mandatory = $true)][string]$Root)
 
     $fullRoot = [IO.Path]::GetFullPath($Root)
@@ -78,6 +302,14 @@ function Initialize-BackupDirectory {
         throw "BACKUP_PATH_INVALID"
     }
     Set-Acl -LiteralPath $fullRoot -AclObject (New-MigrationAcl -Directory)
+    Assert-MigrationAcl -Path $fullRoot -Directory
+    return $fullRoot
+}
+
+function New-BackupDirectory {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $fullRoot = Initialize-MigrationRoot -Root $Root
 
     $batch = Join-Path $fullRoot (
         "{0}-{1}" -f [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ"),
@@ -85,24 +317,102 @@ function Initialize-BackupDirectory {
     )
     New-Item -ItemType Directory -Path $batch -Force | Out-Null
     Set-Acl -LiteralPath $batch -AclObject (New-MigrationAcl -Directory)
+    Assert-MigrationAcl -Path $batch -Directory
     return $batch
 }
 
-function Write-BackupXml {
+function Write-BackupFile {
     param(
         [Parameter(Mandatory = $true)][string]$Directory,
         [Parameter(Mandatory = $true)][string]$TaskName,
-        [Parameter(Mandatory = $true)][string]$Xml
+        [Parameter(Mandatory = $true)][ValidateSet("xml", "sddl")]
+        [string]$Extension,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
     )
 
-    $path = Join-Path $Directory ("{0}.xml" -f $TaskName)
-    [IO.File]::WriteAllText(
-        $path,
-        $Xml,
-        (New-Object Text.UTF8Encoding($false))
-    )
-    Set-Acl -LiteralPath $path -AclObject (New-MigrationAcl)
+    $path = Join-Path $Directory ("{0}.{1}" -f $TaskName, $Extension)
+    Write-DurableFile -Path $path -Value $Value
     return $path
+}
+
+function Write-MigrationTransaction {
+    param(
+        [Parameter(Mandatory = $true)]$Transaction,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $batchPath = Assert-MigrationPathUnderRoot `
+        -Path ([string]$Transaction.batchDirectory) -Root $Root
+    Assert-MigrationAcl -Path $batchPath -Directory
+    Write-DurableJsonAtomic -Path (Join-Path $batchPath $script:TransactionFile) `
+        -Value $Transaction
+    Write-DurableJsonAtomic -Path (Join-Path $Root $script:ActiveTransactionFile) `
+        -Value $Transaction
+}
+
+function Read-MigrationJson {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    Assert-MigrationAcl -Path $Path
+    try {
+        return ([IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8) |
+            ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        throw "TRANSACTION_INVALID"
+    }
+}
+
+function Read-ActiveMigrationTransaction {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $fullRoot = [IO.Path]::GetFullPath($Root)
+    if (-not (Test-Path -LiteralPath $fullRoot -PathType Container)) {
+        return $null
+    }
+    if ((Get-Item -LiteralPath $fullRoot -Force).Attributes -band
+        [IO.FileAttributes]::ReparsePoint) {
+        throw "BACKUP_PATH_INVALID"
+    }
+    Assert-MigrationAcl -Path $fullRoot -Directory
+    $activePath = Join-Path $fullRoot $script:ActiveTransactionFile
+    if (-not (Test-Path -LiteralPath $activePath -PathType Leaf)) {
+        return $null
+    }
+    $transaction = Read-MigrationJson -Path $activePath
+    if ([int]$transaction.schemaVersion -ne $script:TransactionSchemaVersion -or
+        [string]$transaction.transactionId -notmatch '^[0-9a-f]{32}$' -or
+        [string]$transaction.phase -notin @(
+            "prepared", "first-applied", "second-applied", "committed",
+            "rolled-back", "recovered"
+        ) -or @($transaction.tasks).Count -ne $script:Tasks.Count) {
+        throw "TRANSACTION_INVALID"
+    }
+    $batchPath = Assert-MigrationPathUnderRoot `
+        -Path ([string]$transaction.batchDirectory) -Root $fullRoot
+    if (-not (Test-Path -LiteralPath $batchPath -PathType Container) -or
+        (Get-Item -LiteralPath $batchPath -Force).Attributes -band
+            [IO.FileAttributes]::ReparsePoint) {
+        throw "TRANSACTION_INVALID"
+    }
+    Assert-MigrationAcl -Path $batchPath -Directory
+    $batchTransaction = Read-MigrationJson `
+        -Path (Join-Path $batchPath $script:TransactionFile)
+    if ([string]$batchTransaction.transactionId -ne
+        [string]$transaction.transactionId) {
+        throw "TRANSACTION_INVALID"
+    }
+    return $transaction
+}
+
+function Remove-ActiveMigrationTransaction {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $activePath = Join-Path ([IO.Path]::GetFullPath($Root)) `
+        $script:ActiveTransactionFile
+    if (Test-Path -LiteralPath $activePath -PathType Leaf) {
+        Assert-MigrationAcl -Path $activePath
+        Remove-Item -LiteralPath $activePath -Force
+    }
 }
 
 function Get-TaskInvariantHash {
@@ -130,6 +440,64 @@ function Get-RunningInstancePids {
         $pids += [int]$instance.EnginePID
     }
     return @($pids | Sort-Object)
+}
+
+function Get-ProcessIdentityProof {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $chain = @()
+    $currentId = $ProcessId
+    for ($depth = 0; $depth -lt 6 -and $currentId -gt 0; $depth++) {
+        $process = Get-CimInstance -ClassName Win32_Process `
+            -Filter ("ProcessId = {0}" -f $currentId) -ErrorAction Stop
+        if ($null -eq $process -or
+            [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath) -or
+            $null -eq $process.CreationDate) {
+            throw "TASK_LISTENER_INVALID"
+        }
+        $parentId = [int]$process.ParentProcessId
+        $identityValue = "{0}|{1}|{2}" -f (
+            [string]$process.ExecutablePath
+        ).ToLowerInvariant(), ([string]$process.CreationDate), $parentId
+        $chain += [ordered]@{
+            pid = $currentId
+            parentPid = $parentId
+            identitySha256 = Get-StringSha256 -Value $identityValue
+        }
+        if ($parentId -eq $currentId -or $parentId -le 4) { break }
+        $currentId = $parentId
+    }
+    if ($chain.Count -eq 0) { throw "TASK_LISTENER_INVALID" }
+    $chainJson = $chain | ConvertTo-Json -Depth 4 -Compress
+    return [pscustomobject]@{
+        Pid = [int]$chain[0].pid
+        ParentPids = @($chain | ForEach-Object { [int]$_.parentPid })
+        Chain = $chain
+        ChainHash = Get-StringSha256 -Value $chainJson
+    }
+}
+
+function Get-ListenerProcessProof {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    try {
+        $listenerPids = @(Get-NetTCPConnection -State Listen -LocalPort $Port `
+            -ErrorAction Stop | Select-Object -ExpandProperty OwningProcess -Unique)
+    } catch {
+        throw "TASK_LISTENER_INVALID"
+    }
+    if ($listenerPids.Count -ne 1 -or [int]$listenerPids[0] -le 0) {
+        throw "TASK_LISTENER_INVALID"
+    }
+    return Get-ProcessIdentityProof -ProcessId ([int]$listenerPids[0])
+}
+
+function Test-ProcessProofEqual {
+    param($Left, $Right)
+
+    return $null -ne $Left -and $null -ne $Right -and
+        [int]$Left.Pid -eq [int]$Right.Pid -and
+        [string]$Left.ChainHash -eq [string]$Right.ChainHash
 }
 
 function Test-IntArrayEqual {
@@ -174,6 +542,8 @@ function Get-TaskSnapshot {
     if ($pids.Count -ne 1 -or [int]$task.State -ne 4) {
         throw "TASK_PROCESS_NOT_STABLE"
     }
+    $spec = Get-GpuHostTaskSpec -TaskName $TaskName
+    $listener = Get-ListenerProcessProof -Port ([int]$spec.Port)
     $xml = [string]$task.Xml
     $sddl = [string]$task.GetSecurityDescriptor($script:SecurityInformation)
     return [pscustomobject]@{
@@ -190,6 +560,8 @@ function Get-TaskSnapshot {
         PrincipalUser = $principalUser
         LogonType = [int]$principal.LogonType
         Pids = $pids
+        Listener = $listener
+        Port = [int]$spec.Port
         State = [int]$task.State
     }
 }
@@ -217,15 +589,191 @@ function Restore-TaskSnapshot {
         [Parameter(Mandatory = $true)]$Snapshot
     )
 
+    Assert-MigrationAcl -Path ([string]$Snapshot.XmlPath)
+    Assert-MigrationAcl -Path ([string]$Snapshot.SddlPath)
+    $xml = [IO.File]::ReadAllText(
+        [string]$Snapshot.XmlPath, [Text.Encoding]::UTF8
+    )
+    $sddl = [IO.File]::ReadAllText(
+        [string]$Snapshot.SddlPath, [Text.Encoding]::UTF8
+    )
+    if ((Get-StringSha256 -Value $xml) -ne [string]$Snapshot.XmlHash -or
+        (Get-StringSha256 -Value $sddl) -ne [string]$Snapshot.SddlHash) {
+        throw "BACKUP_HASH_INVALID"
+    }
+
     [void]$Folder.RegisterTask(
         $Snapshot.Name,
-        $Snapshot.Xml,
+        $xml,
         $script:TaskUpdate,
         $Snapshot.PrincipalUser,
         $null,
         $Snapshot.LogonType,
-        $Snapshot.Sddl
+        $sddl
     )
+}
+
+function Get-TransactionSnapshots {
+    param(
+        [Parameter(Mandatory = $true)]$Transaction,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $snapshots = @{}
+    $batchPath = Assert-MigrationPathUnderRoot `
+        -Path ([string]$Transaction.batchDirectory) -Root $Root
+    foreach ($entry in @($Transaction.tasks)) {
+        $name = [string]$entry.taskName
+        if ($script:Tasks -notcontains $name -or $snapshots.ContainsKey($name)) {
+            throw "TRANSACTION_INVALID"
+        }
+        $xmlPath = Assert-MigrationPathUnderRoot `
+            -Path (Join-Path $batchPath ([string]$entry.xmlFileName)) -Root $Root
+        $sddlPath = Assert-MigrationPathUnderRoot `
+            -Path (Join-Path $batchPath ([string]$entry.sddlFileName)) -Root $Root
+        foreach ($path in @($xmlPath, $sddlPath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                (Get-Item -LiteralPath $path -Force).Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) {
+                throw "TRANSACTION_INVALID"
+            }
+            Assert-MigrationAcl -Path $path
+        }
+        $snapshots[$name] = [pscustomobject]@{
+            Name = $name
+            XmlPath = $xmlPath
+            SddlPath = $sddlPath
+            XmlHash = [string]$entry.xmlSha256
+            SddlHash = [string]$entry.sddlSha256
+            InvariantHash = [string]$entry.invariantSha256
+            PrincipalUser = [string]$entry.principalUser
+            LogonType = [int]$entry.logonType
+            Pids = @($entry.runningPids | ForEach-Object { [int]$_ })
+            ListenerPid = [int]$entry.listenerPid
+            ListenerIdentitySha256 = [string]$entry.listenerIdentitySha256
+        }
+    }
+    if ($snapshots.Count -ne $script:Tasks.Count) { throw "TRANSACTION_INVALID" }
+    return $snapshots
+}
+
+function Restore-MigrationTransaction {
+    param(
+        [Parameter(Mandatory = $true)]$Folder,
+        [Parameter(Mandatory = $true)]$Transaction,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $snapshots = Get-TransactionSnapshots -Transaction $Transaction -Root $Root
+    foreach ($taskName in $script:Tasks) {
+        Restore-TaskSnapshot -Folder $Folder -Snapshot $snapshots[$taskName]
+    }
+    $restored = @{}
+    foreach ($taskName in $script:Tasks) {
+        $expected = $snapshots[$taskName]
+        $actual = Get-TaskSnapshot -Folder $Folder -TaskName $taskName
+        if ($actual.XmlHash -ne $expected.XmlHash -or
+            $actual.InvariantHash -ne $expected.InvariantHash -or
+            $actual.SddlHash -ne $expected.SddlHash) {
+            throw "ROLLBACK_FAILED"
+        }
+        $restored[$taskName] = $actual
+    }
+    return $restored
+}
+
+function New-MigrationTransaction {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Snapshots,
+        [Parameter(Mandatory = $true)][string]$BatchDirectory
+    )
+
+    $entries = @()
+    foreach ($taskName in $script:Tasks) {
+        $snapshot = $Snapshots[$taskName]
+        $xmlPath = Write-BackupFile -Directory $BatchDirectory `
+            -TaskName $taskName -Extension "xml" -Value $snapshot.Xml
+        $sddlPath = Write-BackupFile -Directory $BatchDirectory `
+            -TaskName $taskName -Extension "sddl" -Value $snapshot.Sddl
+        if ((Get-StringSha256 -Value ([IO.File]::ReadAllText(
+            $xmlPath, [Text.Encoding]::UTF8
+        ))) -ne $snapshot.XmlHash -or
+            (Get-StringSha256 -Value ([IO.File]::ReadAllText(
+                $sddlPath, [Text.Encoding]::UTF8
+            ))) -ne $snapshot.SddlHash) {
+            throw "BACKUP_HASH_INVALID"
+        }
+        $entries += [ordered]@{
+            taskName = $taskName
+            xmlFileName = [IO.Path]::GetFileName($xmlPath)
+            xmlSha256 = $snapshot.XmlHash
+            sddlFileName = [IO.Path]::GetFileName($sddlPath)
+            sddlSha256 = $snapshot.SddlHash
+            invariantSha256 = $snapshot.InvariantHash
+            principalUser = $snapshot.PrincipalUser
+            logonType = $snapshot.LogonType
+            runningPids = @($snapshot.Pids)
+            listenerPid = [int]$snapshot.Listener.Pid
+            listenerIdentitySha256 = [string]$snapshot.Listener.ChainHash
+        }
+    }
+    return [ordered]@{
+        schemaVersion = $script:TransactionSchemaVersion
+        transactionId = [Guid]::NewGuid().ToString("N")
+        createdUtc = [DateTime]::UtcNow.ToString("o")
+        updatedUtc = [DateTime]::UtcNow.ToString("o")
+        phase = "prepared"
+        batchDirectory = $BatchDirectory
+        appliedTasks = @()
+        tasks = $entries
+    }
+}
+
+function Set-MigrationTransactionPhase {
+    param(
+        [Parameter(Mandatory = $true)]$Transaction,
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [string]$AppliedTask = ""
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($AppliedTask)) {
+        $Transaction.appliedTasks = @($Transaction.appliedTasks) + $AppliedTask
+    }
+    $Transaction.phase = $Phase
+    $Transaction.updatedUtc = [DateTime]::UtcNow.ToString("o")
+    Write-MigrationTransaction -Transaction $Transaction -Root $Root
+}
+
+function Test-GitHubHostedCiFixture {
+    param(
+        [Parameter(Mandatory = $true)]$Identity,
+        [Parameter(Mandatory = $true)]$Folder
+    )
+
+    if ($env:GITHUB_ACTIONS -ne "true" -or
+        $env:RUNNER_ENVIRONMENT -ne "github-hosted" -or
+        [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -or
+        [string]$Identity.Name -notmatch '\\runneradmin$') {
+        return $false
+    }
+    try {
+        [void](Assert-MigrationPathUnderRoot -Path $BackupRoot `
+            -Root $env:RUNNER_TEMP)
+        if ([string]::IsNullOrWhiteSpace($EvidencePath)) { return $false }
+        [void](Assert-MigrationPathUnderRoot -Path $EvidencePath `
+            -Root $env:RUNNER_TEMP)
+        foreach ($taskName in $script:Tasks) {
+            $task = $Folder.GetTask($taskName)
+            if ([string]$task.Definition.RegistrationInfo.Description -ne
+                "platform-ai CI migration contract") {
+                return $false
+            }
+        }
+    } catch {
+        return $false
+    }
+    return $true
 }
 
 function New-TaskEvidence {
@@ -239,13 +787,22 @@ function New-TaskEvidence {
     $afterInvariantHash = $null
     $afterSddlHash = $null
     $afterPids = @()
+    $afterListenerPid = $null
+    $afterListenerIdentity = $null
+    $afterListenerParentPids = @()
     $sameProcess = $false
+    $sameListenerProcess = $false
     if ($null -ne $After) {
         $afterRepoClass = $After.Contract.RepoClass
         $afterInvariantHash = $After.InvariantHash
         $afterSddlHash = $After.SddlHash
         $afterPids = @($After.Pids)
         $sameProcess = Test-IntArrayEqual -Left $Before.Pids -Right $After.Pids
+        $afterListenerPid = [int]$After.Listener.Pid
+        $afterListenerIdentity = [string]$After.Listener.ChainHash
+        $afterListenerParentPids = @($After.Listener.ParentPids)
+        $sameListenerProcess = Test-ProcessProofEqual `
+            -Left $Before.Listener -Right $After.Listener
     }
     $actionChanged = $null -ne $After -and
         $Before.Contract.RepoClass -ne $After.Contract.RepoClass
@@ -263,6 +820,13 @@ function New-TaskEvidence {
         runningPidsBefore = @($Before.Pids)
         runningPidsAfter = $afterPids
         sameRunningProcess = $sameProcess
+        listenerPidBefore = [int]$Before.Listener.Pid
+        listenerPidAfter = $afterListenerPid
+        listenerParentPidsBefore = @($Before.Listener.ParentPids)
+        listenerParentPidsAfter = $afterListenerParentPids
+        listenerIdentityBeforeSha256 = [string]$Before.Listener.ChainHash
+        listenerIdentityAfterSha256 = $afterListenerIdentity
+        sameListenerProcess = $sameListenerProcess
     }
 }
 
@@ -282,17 +846,21 @@ function Write-MigrationEvidence {
         )
     }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-    [Console]::Out.WriteLine("{0}{1}" -f $script:MigrationMarker, $encoded)
+    [Console]::Out.WriteLine((
+        "{0}{1}" -f $script:MigrationMarker, $encoded
+    ))
 }
 
 function Get-FailureClass {
     param([Parameter(Mandatory = $true)][string]$Message)
 
     foreach ($known in @(
-        "IDENTITY_NOT_APPROVED", "REPO_ROOT_INVALID", "BACKUP_ROOT_INVALID",
-        "BACKUP_PATH_INVALID", "TASK_MISSING", "TASK_ACTION_COUNT_INVALID",
+        "IDENTITY_NOT_APPROVED", "PRIVILEGE_NOT_HELD", "REPO_ROOT_INVALID",
+        "BACKUP_PATH_INVALID", "BACKUP_ACL_INVALID", "BACKUP_HASH_INVALID",
+        "TRANSACTION_INVALID", "TASK_MISSING", "TASK_ACTION_COUNT_INVALID",
         "TASK_PRINCIPAL_INVALID", "TASK_ACTION_UNRECOGNIZED",
-        "TASK_PROCESS_NOT_STABLE", "TASK_READBACK_INVALID",
+        "TASK_PROCESS_NOT_STABLE", "TASK_LISTENER_INVALID",
+        "TASK_READBACK_INVALID",
         "TASK_INVARIANT_CHANGED", "TASK_SECURITY_CHANGED",
         "TASK_PROCESS_CHANGED", "TEST_INJECTED_FAILURE", "ROLLBACK_FAILED"
     )) {
@@ -310,25 +878,21 @@ $mutationApplied = $false
 $backupCreated = $false
 $failureClass = $null
 $status = "no-go"
+$transaction = $null
+$transactionRecovered = $false
+$isCiFixture = $false
 
 try {
     if ($RepoRoot -ine $script:CanonicalRepoRoot) {
         throw "REPO_ROOT_INVALID"
     }
-    $isCiEscape = $env:CI -eq "true" -and
-        $BackupRoot -ine $script:DefaultBackupRoot
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     $isAdministrator = $principal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator
     )
     if (-not $isAdministrator) { throw "IDENTITY_NOT_APPROVED" }
-    if (-not $isCiEscape -and $identity.Name -notmatch '\\denetimpc$') {
-        throw "IDENTITY_NOT_APPROVED"
-    }
-    if (-not $isCiEscape -and $BackupRoot -ine $script:DefaultBackupRoot) {
-        throw "BACKUP_ROOT_INVALID"
-    }
+    Enable-SeSecurityPrivilege
 
     $contractPath = Join-Path $PSScriptRoot "task-action-contract.ps1"
     if (-not (Test-Path -LiteralPath $contractPath -PathType Leaf)) {
@@ -339,86 +903,129 @@ try {
     $service = New-Object -ComObject "Schedule.Service"
     $service.Connect()
     $folder = $service.GetFolder("\")
-    foreach ($taskName in $script:Tasks) {
-        $before[$taskName] = Get-TaskSnapshot -Folder $folder -TaskName $taskName
-        $changed[$taskName] = $before[$taskName].Contract.RepoClass -ne "canonical-repo"
+    $isCiFixture = Test-GitHubHostedCiFixture -Identity $identity -Folder $folder
+    if (-not $isCiFixture -and $identity.Name -notmatch '\\denetimpc$') {
+        throw "IDENTITY_NOT_APPROVED"
+    }
+    if (-not $isCiFixture -and $BackupRoot -ine $script:DefaultBackupRoot) {
+        throw "BACKUP_ROOT_INVALID"
     }
 
-    $needsMutation = @($script:Tasks | Where-Object { $changed[$_] }).Count -gt 0
-    if (-not $needsMutation) {
+    $activeTransaction = Read-ActiveMigrationTransaction -Root $BackupRoot
+    if ($null -ne $activeTransaction -and
+        [string]$activeTransaction.phase -in @("committed", "rolled-back", "recovered")) {
+        Remove-ActiveMigrationTransaction -Root $BackupRoot
+        $activeTransaction = $null
+    }
+    if ($null -ne $activeTransaction) {
+        $rollbackAttempted = $true
+        $restoredSnapshots = Restore-MigrationTransaction -Folder $folder `
+            -Transaction $activeTransaction -Root $BackupRoot
         foreach ($taskName in $script:Tasks) {
-            $after[$taskName] = Get-TaskSnapshot -Folder $folder -TaskName $taskName
+            $before[$taskName] = $restoredSnapshots[$taskName]
+            $after[$taskName] = $restoredSnapshots[$taskName]
+            $changed[$taskName] = $false
         }
-        $status = "go"
-    } elseif (-not $PSCmdlet.ShouldProcess(
-        "platform-ai GPU-host Scheduled Tasks",
-        "replace only the two task actions and preserve running processes"
-    )) {
-        foreach ($taskName in $script:Tasks) {
-            $after[$taskName] = $before[$taskName]
-        }
-        $status = "ready"
+        $transaction = $activeTransaction
+        Set-MigrationTransactionPhase -Transaction $transaction -Phase "recovered" `
+            -Root $BackupRoot
+        Remove-ActiveMigrationTransaction -Root $BackupRoot
+        $rollbackSucceeded = $true
+        $transactionRecovered = $true
+        $failureClass = "interrupted-transaction-recovered"
+        $status = "recovered"
     } else {
-        $backupDirectory = Initialize-BackupDirectory -Root $BackupRoot
-        $backupCreated = $true
         foreach ($taskName in $script:Tasks) {
-            [void](Write-BackupXml -Directory $backupDirectory -TaskName $taskName `
-                -Xml $before[$taskName].Xml)
+            $before[$taskName] = Get-TaskSnapshot -Folder $folder -TaskName $taskName
+            $changed[$taskName] = `
+                $before[$taskName].Contract.RepoClass -ne "canonical-repo"
         }
 
-        $mutationIndex = 0
-        foreach ($taskName in $script:Tasks) {
-            if (-not $changed[$taskName]) { continue }
-            $snapshot = $before[$taskName]
-            $snapshot.Action.Path = "powershell.exe"
-            $snapshot.Action.Arguments = $snapshot.Contract.CanonicalArguments
-            $snapshot.Action.WorkingDirectory = ""
-            Register-TaskDefinitionPreservingSecurity -Folder $folder -Snapshot $snapshot
-            $mutationApplied = $true
-            $mutationIndex += 1
-            if ($isCiEscape -and $mutationIndex -eq 1 -and
-                $env:PLATFORM_AI_TEST_INJECT_TASK_MIGRATION_AFTER_FIRST -eq "1") {
-                throw "TEST_INJECTED_FAILURE"
+        $needsMutation = @($script:Tasks | Where-Object { $changed[$_] }).Count -gt 0
+        if (-not $needsMutation) {
+            foreach ($taskName in $script:Tasks) {
+                $after[$taskName] = Get-TaskSnapshot -Folder $folder -TaskName $taskName
             }
-        }
+            $status = "go"
+        } elseif (-not $PSCmdlet.ShouldProcess(
+            "platform-ai GPU-host Scheduled Tasks",
+            "replace only the two task actions and preserve running processes"
+        )) {
+            foreach ($taskName in $script:Tasks) {
+                $after[$taskName] = $before[$taskName]
+            }
+            $status = "ready"
+        } else {
+            $backupDirectory = New-BackupDirectory -Root $BackupRoot
+            $transaction = New-MigrationTransaction -Snapshots $before `
+                -BatchDirectory $backupDirectory
+            Write-MigrationTransaction -Transaction $transaction -Root $BackupRoot
+            $backupCreated = $true
 
-        foreach ($taskName in $script:Tasks) {
-            $after[$taskName] = Get-TaskSnapshot -Folder $folder -TaskName $taskName
-            if ($after[$taskName].Contract.RepoClass -ne "canonical-repo") {
-                throw "TASK_READBACK_INVALID"
+            $mutationIndex = 0
+            foreach ($taskName in $script:Tasks) {
+                if (-not $changed[$taskName]) { continue }
+                $snapshot = $before[$taskName]
+                $snapshot.Action.Path = "powershell.exe"
+                $snapshot.Action.Arguments = $snapshot.Contract.CanonicalArguments
+                $snapshot.Action.WorkingDirectory = ""
+                Register-TaskDefinitionPreservingSecurity `
+                    -Folder $folder -Snapshot $snapshot
+                $mutationApplied = $true
+                $mutationIndex += 1
+                $phase = "first-applied"
+                if ($mutationIndex -gt 1) { $phase = "second-applied" }
+                Set-MigrationTransactionPhase -Transaction $transaction `
+                    -Phase $phase -Root $BackupRoot -AppliedTask $taskName
+                if ($isCiFixture -and $mutationIndex -eq 1 -and
+                    $env:PLATFORM_AI_TEST_CRASH_TASK_MIGRATION_AFTER_FIRST -eq "1") {
+                    [Environment]::Exit(9)
+                }
+                if ($isCiFixture -and $mutationIndex -eq 1 -and
+                    $env:PLATFORM_AI_TEST_INJECT_TASK_MIGRATION_AFTER_FIRST -eq "1") {
+                    throw "TEST_INJECTED_FAILURE"
+                }
             }
-            if ($after[$taskName].InvariantHash -ne $before[$taskName].InvariantHash) {
-                throw "TASK_INVARIANT_CHANGED"
+
+            foreach ($taskName in $script:Tasks) {
+                $after[$taskName] = Get-TaskSnapshot -Folder $folder -TaskName $taskName
+                if ($after[$taskName].Contract.RepoClass -ne "canonical-repo") {
+                    throw "TASK_READBACK_INVALID"
+                }
+                if ($after[$taskName].InvariantHash -ne `
+                    $before[$taskName].InvariantHash) {
+                    throw "TASK_INVARIANT_CHANGED"
+                }
+                if ($after[$taskName].SddlHash -ne $before[$taskName].SddlHash) {
+                    throw "TASK_SECURITY_CHANGED"
+                }
+                if (-not (Test-IntArrayEqual -Left $before[$taskName].Pids `
+                    -Right $after[$taskName].Pids) -or
+                    -not (Test-ProcessProofEqual `
+                        -Left $before[$taskName].Listener `
+                        -Right $after[$taskName].Listener)) {
+                    throw "TASK_PROCESS_CHANGED"
+                }
             }
-            if ($after[$taskName].SddlHash -ne $before[$taskName].SddlHash) {
-                throw "TASK_SECURITY_CHANGED"
-            }
-            if (-not (Test-IntArrayEqual -Left $before[$taskName].Pids `
-                -Right $after[$taskName].Pids)) {
-                throw "TASK_PROCESS_CHANGED"
-            }
+            Set-MigrationTransactionPhase -Transaction $transaction `
+                -Phase "committed" -Root $BackupRoot
+            Remove-ActiveMigrationTransaction -Root $BackupRoot
+            $status = "go"
         }
-        $status = "go"
     }
 } catch {
     $failureClass = Get-FailureClass -Message $_.Exception.Message
-    if ($mutationApplied -and $before.Count -eq $script:Tasks.Count) {
+    if ($mutationApplied -and $null -ne $transaction) {
         $rollbackAttempted = $true
         try {
+            $restoredSnapshots = Restore-MigrationTransaction -Folder $folder `
+                -Transaction $transaction -Root $BackupRoot
             foreach ($taskName in $script:Tasks) {
-                Restore-TaskSnapshot -Folder $folder -Snapshot $before[$taskName]
+                $after[$taskName] = $restoredSnapshots[$taskName]
             }
-            foreach ($taskName in $script:Tasks) {
-                $restored = Get-TaskSnapshot -Folder $folder -TaskName $taskName
-                if ($restored.XmlHash -ne $before[$taskName].XmlHash -or
-                    $restored.InvariantHash -ne $before[$taskName].InvariantHash -or
-                    $restored.SddlHash -ne $before[$taskName].SddlHash -or
-                    -not (Test-IntArrayEqual -Left $restored.Pids `
-                        -Right $before[$taskName].Pids)) {
-                    throw "ROLLBACK_FAILED"
-                }
-                $after[$taskName] = $restored
-            }
+            Set-MigrationTransactionPhase -Transaction $transaction `
+                -Phase "rolled-back" -Root $BackupRoot
+            Remove-ActiveMigrationTransaction -Root $BackupRoot
             $rollbackSucceeded = $true
         } catch {
             $failureClass = "rollback-failed"
@@ -444,6 +1051,10 @@ try {
         rollbackAttempted = $rollbackAttempted
         rollbackSucceeded = $rollbackSucceeded
         backupCreated = $backupCreated
+        transactionRecovered = $transactionRecovered
+        transactionPhase = $(if ($null -ne $transaction) {
+            [string]$transaction.phase
+        } else { $null })
         tasks = $taskEvidence
         privacy = [ordered]@{
             containsTaskArguments = $false
@@ -457,3 +1068,4 @@ try {
 }
 
 if ($status -eq "no-go") { exit 1 }
+if ($status -eq "recovered") { exit 2 }
