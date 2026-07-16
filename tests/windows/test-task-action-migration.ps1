@@ -539,7 +539,11 @@ try {
     $afterEvidenceFailure = Invoke-Migration -WhatIf
     Assert-True ($afterEvidenceFailure.ExitCode -eq 0 -and
         $afterEvidenceFailure.Evidence.status -eq "ready") `
-        "Evidence write failure left the migration mutex locked."
+        (("Evidence write failure follow-up was not ready. exit={0} status={1} " +
+            "failureClass={2} output={3}") -f $afterEvidenceFailure.ExitCode,
+            $afterEvidenceFailure.Evidence.status,
+            $afterEvidenceFailure.Evidence.failureClass,
+            $afterEvidenceFailure.Output)
 
     $applied = Invoke-Migration
     Assert-True ($applied.ExitCode -eq 0 -and $applied.Evidence.status -eq "go") `
