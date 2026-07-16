@@ -14,6 +14,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$contractPath = Join-Path $PSScriptRoot "task-action-contract.ps1"
+if (-not (Test-Path -LiteralPath $contractPath -PathType Leaf)) {
+    throw "Missing task-action-contract.ps1 next to install.ps1."
+}
+. $contractPath
+
 $tasks = @(
     @{ Name = "platform-ai-live-stt";   Script = "start-live-stt.ps1" },
     @{ Name = "platform-ai-meeting-ai"; Script = "start-meeting-ai.ps1" }
@@ -89,12 +95,16 @@ foreach ($port in 8200, 8300) {
 }
 
 foreach ($t in $tasks) {
-    $scriptPath = Join-Path $deployDir $t.Script
-    $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RepoRoot `"$RepoRoot`" -PythonExe `"$pythonExe`""
-    if ($t.Name -eq "platform-ai-live-stt") {
-        $arg += " -HfHome `"$hfHome`""
-        if ($cudaBin) { $arg += " -CudaBin `"$cudaBin`"" }
+    $actionParams = @{
+        TaskName = $t.Name
+        RepoRoot = $RepoRoot
+        PythonExe = $pythonExe
     }
+    if ($t.Name -eq "platform-ai-live-stt") {
+        $actionParams.HfHome = $hfHome
+        $actionParams.CudaBin = $cudaBin
+    }
+    $arg = New-GpuHostTaskActionArguments @actionParams
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
