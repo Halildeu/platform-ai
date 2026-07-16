@@ -947,26 +947,39 @@ try {
     $activeTransaction = Read-ActiveMigrationTransaction -Root $BackupRoot
     if ($null -ne $activeTransaction -and
         [string]$activeTransaction.phase -in @("committed", "rolled-back", "recovered")) {
-        Remove-ActiveMigrationTransaction -Root $BackupRoot
+        if ($PSCmdlet.ShouldProcess(
+            "terminal migration transaction pointer",
+            "remove durable active-transaction pointer"
+        )) {
+            Remove-ActiveMigrationTransaction -Root $BackupRoot
+        }
         $activeTransaction = $null
     }
     if ($null -ne $activeTransaction) {
-        $rollbackAttempted = $true
-        $restoredSnapshots = Restore-MigrationTransaction -Folder $folder `
-            -Transaction $activeTransaction -Root $BackupRoot
-        foreach ($taskName in $script:Tasks) {
-            $before[$taskName] = $restoredSnapshots[$taskName]
-            $after[$taskName] = $restoredSnapshots[$taskName]
-            $changed[$taskName] = $false
-        }
         $transaction = $activeTransaction
-        Set-MigrationTransactionPhase -Transaction $transaction -Phase "recovered" `
-            -Root $BackupRoot
-        Remove-ActiveMigrationTransaction -Root $BackupRoot
-        $rollbackSucceeded = $true
-        $transactionRecovered = $true
-        $failureClass = "interrupted-transaction-recovered"
-        $status = "recovered"
+        if (-not $PSCmdlet.ShouldProcess(
+            "interrupted task-action migration transaction",
+            "restore Scheduled Task definitions from durable snapshots"
+        )) {
+            $failureClass = "interrupted_transaction_recovery_required"
+            $status = "no-go"
+        } else {
+            $rollbackAttempted = $true
+            $restoredSnapshots = Restore-MigrationTransaction -Folder $folder `
+                -Transaction $activeTransaction -Root $BackupRoot
+            foreach ($taskName in $script:Tasks) {
+                $before[$taskName] = $restoredSnapshots[$taskName]
+                $after[$taskName] = $restoredSnapshots[$taskName]
+                $changed[$taskName] = $false
+            }
+            Set-MigrationTransactionPhase -Transaction $transaction -Phase "recovered" `
+                -Root $BackupRoot
+            Remove-ActiveMigrationTransaction -Root $BackupRoot
+            $rollbackSucceeded = $true
+            $transactionRecovered = $true
+            $failureClass = "interrupted-transaction-recovered"
+            $status = "recovered"
+        }
     } else {
         foreach ($taskName in $script:Tasks) {
             $before[$taskName] = Get-TaskSnapshot -Folder $folder -TaskName $taskName

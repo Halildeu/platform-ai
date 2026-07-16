@@ -199,6 +199,12 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("AbandonedMutexException", script)
         self.assertIn("Previous migration process abandoned its lock", script)
         self.assertIn("ReleaseMutex", script)
+        recovery_guard = script.index('"interrupted task-action migration transaction"')
+        recovery_restore = script.index(
+            "Restore-MigrationTransaction -Folder $folder", recovery_guard
+        )
+        self.assertLess(recovery_guard, recovery_restore)
+        self.assertIn("interrupted_transaction_recovery_required", script)
         self.assertIn("GetSecurityDescriptor($script:SecurityInformation)", script)
         self.assertIn("$script:SecurityInformation = 15", script)
         self.assertIn("Enable-SeSecurityPrivilege", script)
