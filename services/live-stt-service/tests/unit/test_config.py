@@ -15,6 +15,10 @@ def reset_settings_cache() -> None:
 def test_defaults() -> None:
     s = cfg.Settings()
     assert s.model_name == "medium"
+    assert s.environment == "local"
+    assert s.model_revision == "unversioned"
+    assert s.model_sha256 == ""
+    assert s.model_path is None
     assert s.compute_type == "int8"
     assert s.device == "cpu"
     assert s.language == "tr"
@@ -120,3 +124,31 @@ def test_settings_cached() -> None:
     s1 = cfg.get_settings()
     s2 = cfg.get_settings()
     assert s1 is s2
+
+
+def test_production_requires_content_addressed_local_model() -> None:
+    with pytest.raises(ValueError, match="model_revision"):
+        cfg.Settings(environment="production")
+    with pytest.raises(ValueError, match="model_sha256"):
+        cfg.Settings(environment="production", model_revision="a" * 40)
+    with pytest.raises(ValueError, match="model_path"):
+        cfg.Settings(
+            environment="production",
+            model_revision="a" * 40,
+            model_sha256="b" * 64,
+        )
+    settings = cfg.Settings(
+        environment="production",
+        model_name="Systran/faster-whisper-medium",
+        model_revision="a" * 40,
+        model_sha256="sha256:" + "b" * 64,
+        model_path="/models/faster-whisper-medium",
+    )
+    assert settings.model_revision == "a" * 40
+
+
+def test_model_sha256_rejects_malformed_value() -> None:
+    with pytest.raises(ValueError, match="model_sha256"):
+        cfg.Settings(model_sha256="sha256:not-a-digest")
+    with pytest.raises(ValueError, match="model_sha256"):
+        cfg.Settings(model_sha256="A" * 64)

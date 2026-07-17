@@ -26,6 +26,8 @@ async def health(
         status="ok" if service.model_loaded else "loading",
         version=__version__,
         model=settings.model_name,
+        model_revision=settings.model_revision,
+        model_sha256=settings.model_sha256,
         device=settings.device,
         compute_type=settings.compute_type,
     )

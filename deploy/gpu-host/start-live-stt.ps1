@@ -47,17 +47,33 @@ $env:STT_REQUEST_TIMEOUT = "180"
 if ($HfHome) {
     $env:HF_HOME = $HfHome
     $env:HUGGINGFACE_HUB_CACHE = Join-Path $HfHome "hub"
+} else {
+    throw "HfHome is required for the production pinned live-stt model"
 }
 
 # Host-local overrides (SECRETS LIVE HERE, never in the repo): if
 # deploy\gpu-host\env.local.ps1 exists it is dot-sourced last, so it can set
-# or override any STT_* env (e.g. STT_CHUNK_CONSUMER_ENABLED + STT_REDIS_URL
+# or override runtime tuning/secret STT_* env (e.g. STT_CHUNK_CONSUMER_ENABLED + STT_REDIS_URL
 # with the Vault redis_password for the Stage-2 staging run, #151/#57).
-# The file is gitignored; template: env.local.ps1.example.
+# Model identity/path pins are source-controlled and re-asserted below. The file
+# is gitignored; template: env.local.ps1.example.
 $envLocal = Join-Path (Split-Path $PSCommandPath -Parent) "env.local.ps1"
 if (Test-Path $envLocal) {
     . $envLocal
 }
+
+# The synchronous ATS path uses the canonical Systran CTranslate2 medium
+# artifact. Re-assert the source-controlled identity AFTER host-local config so
+# env.local cannot silently replace an approved model. Pin the upstream
+# snapshot and verify the actual model.bin bytes; neither the floating name
+# "medium" nor the live-stt service version is a model version. Values are
+# public artifact metadata, not credentials.
+$env:STT_ENVIRONMENT = "production"
+$env:STT_MODEL_NAME = "Systran/faster-whisper-medium"
+$env:STT_MODEL_REVISION = "08e178d48790749d25932bbc082711ddcfdfbc4f"
+$env:STT_MODEL_SHA256 = "sha256:9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae"
+$env:STT_MODEL_PATH = Join-Path $HfHome `
+    "hub\models--Systran--faster-whisper-medium\snapshots\$($env:STT_MODEL_REVISION)"
 
 # CUDA runtime DLLs (cublas/cudnn) are resolved via the user's PATH at inference
 # time; SYSTEM's PATH lacks them ("Library cublas64_12.dll is not found").

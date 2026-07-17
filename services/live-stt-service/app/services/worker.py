@@ -10,6 +10,7 @@ PR-stt-03 / #20 scope:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import math
 import multiprocessing as mp
@@ -20,6 +21,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
 from app.core.config import Settings, resolve_worker_count
@@ -53,6 +55,9 @@ class WorkerPool(Protocol):
 @dataclass(frozen=True)
 class _WorkerConfig:
     model_name: str
+    model_revision: str
+    model_sha256: str
+    model_path: str | None
     compute_type: str
     device: str
     language: str
@@ -67,6 +72,9 @@ class _WorkerConfig:
     def from_settings(cls, settings: Settings) -> _WorkerConfig:
         return cls(
             model_name=settings.model_name,
+            model_revision=settings.model_revision,
+            model_sha256=settings.model_sha256,
+            model_path=str(settings.model_path) if settings.model_path is not None else None,
             compute_type=settings.compute_type,
             device=settings.device,
             language=settings.language,
@@ -77,6 +85,30 @@ class _WorkerConfig:
             log_prob_threshold=settings.log_prob_threshold,
             compression_ratio_threshold=settings.compression_ratio_threshold,
         )
+
+
+def _resolve_model_source(cfg: _WorkerConfig) -> str:
+    """Return the model load path after content verification.
+
+    A configured local artifact is the only production path. Hash the exact
+    model.bin bytes before passing the directory to faster-whisper; a declared
+    digest without byte verification would be self-attestation, not a pin.
+    """
+    if cfg.model_path is None:
+        return cfg.model_name
+    resolved = Path(cfg.model_path).resolve()
+    model_bin = resolved / "model.bin"
+    if not model_bin.is_file():
+        raise FileNotFoundError("pinned model directory does not contain model.bin")
+    expected = cfg.model_sha256.removeprefix("sha256:").lower()
+    if expected:
+        digest = hashlib.sha256()
+        with model_bin.open("rb") as model_file:
+            for block in iter(lambda: model_file.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != expected:
+            raise ValueError("pinned model SHA-256 mismatch")
+    return str(resolved)
 
 
 def _audio_payload(audio: BinaryIO | str) -> dict[str, bytes | str | None]:
@@ -156,6 +188,8 @@ def _transcribe_with_model(
         "duration": info.duration,
         "elapsed_ms": elapsed_ms,
         "model": cfg.model_name,
+        "model_revision": cfg.model_revision,
+        "model_sha256": cfg.model_sha256,
         "compute_type": cfg.compute_type,
         "device": cfg.device,
         "segments": segments,
@@ -197,9 +231,10 @@ def _worker_main(
                     },
                 )
                 model = WhisperModel(
-                    cfg.model_name,
+                    _resolve_model_source(cfg),
                     device=cfg.device,
                     compute_type=cfg.compute_type,
+                    local_files_only=cfg.model_path is not None,
                 )
             payload = task["audio"]
             assert isinstance(payload, dict)
@@ -232,9 +267,10 @@ class InlineWorkerPool:
             from faster_whisper import WhisperModel
 
             self._model = WhisperModel(
-                self._cfg.model_name,
+                _resolve_model_source(self._cfg),
                 device=self._cfg.device,
                 compute_type=self._cfg.compute_type,
+                local_files_only=self._cfg.model_path is not None,
             )
         return self._model
 
@@ -463,10 +499,11 @@ def _supervisor_main(
             # num_workers=K -> CTranslate2 runs K concurrent inference workers,
             # each on its own CUDA stream, over the SHARED model weights.
             model = WhisperModel(
-                cfg.model_name,
+                _resolve_model_source(cfg),
                 device=cfg.device,
                 compute_type=cfg.compute_type,
                 num_workers=num_streams,
+                local_files_only=cfg.model_path is not None,
             )
             executor = ThreadPoolExecutor(max_workers=num_streams)
         assert executor is not None

@@ -327,6 +327,10 @@ Approved GPU live PoC note:
 | Variable | Default | Anlam |
 |---|---|---|
 | `STT_MODEL_NAME` | `medium` | Whisper model — `tiny`/`base`/`small`/`medium`/`large-v3`/`large-v3-turbo` |
+| `STT_ENVIRONMENT` | `local` | `local`/`test`/`staging`/`production`; staging/prod artifact pinlerini zorunlu kılar |
+| `STT_MODEL_REVISION` | `unversioned` | Upstream model repository immutable revision; staging/prod'da lowercase 40-hex |
+| `STT_MODEL_SHA256` | boş | Yüklenen `model.bin` SHA-256; staging/prod'da zorunlu ve byte'lardan doğrulanır |
+| `STT_MODEL_PATH` | boş | Pinli yerel snapshot dizini; staging/prod'da zorunlu, ağdan floating download kapalıdır |
 | `STT_COMPUTE_TYPE` | `int8` | Quantization — `int8`/`int8_float16`/`float16`/`float32` |
 | `STT_DEVICE` | `cpu` | `cpu`/`cuda`/`auto` |
 | `STT_LANGUAGE` | `tr` | ISO 639-1 veya `auto` |

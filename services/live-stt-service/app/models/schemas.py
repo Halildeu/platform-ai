@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TranscriptSegment(BaseModel):
@@ -19,6 +19,8 @@ class TranscriptSegment(BaseModel):
 class TranscribeResponse(BaseModel):
     """Synchronous transcribe response."""
 
+    model_config = ConfigDict(protected_namespaces=())
+
     text: str = Field(description="Concatenated transcript")
     language: str = Field(description="Detected/forced language code (ISO 639-1)")
     language_probability: float = Field(
@@ -27,6 +29,8 @@ class TranscribeResponse(BaseModel):
     duration: float = Field(description="Audio duration (seconds)", ge=0.0)
     elapsed_ms: int = Field(description="Whisper inference wall-clock", ge=0)
     model: str = Field(description="Whisper model used")
+    model_revision: str = Field(description="Immutable upstream model revision")
+    model_sha256: str = Field(description="Verified SHA-256 of the loaded model.bin")
     compute_type: str = Field(description="Quantization (int8/float16/...)")
     device: str = Field(description="cpu / cuda")
     segments: list[TranscriptSegment] = Field(default_factory=list)
@@ -35,9 +39,13 @@ class TranscribeResponse(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response."""
 
+    model_config = ConfigDict(protected_namespaces=())
+
     status: str = Field(description="ok / degraded / loading")
     version: str
     model: str
+    model_revision: str
+    model_sha256: str
     device: str
     compute_type: str
 

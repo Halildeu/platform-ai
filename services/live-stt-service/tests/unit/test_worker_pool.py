@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 from types import MethodType
 
@@ -15,9 +16,37 @@ from app.services.worker import (
     ProcessWorkerPool,
     WorkerCrashedError,
     WorkerTimeoutError,
+    _resolve_model_source,
+    _WorkerConfig,
     _WorkerSlot,
     build_worker_pool,
 )
+
+
+def test_pinned_model_artifact_hash_is_verified(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    model_bytes = b"verified-model-artifact"
+    (model_path / "model.bin").write_bytes(model_bytes)
+    settings = Settings(
+        model_revision="a" * 40,
+        model_sha256=hashlib.sha256(model_bytes).hexdigest(),
+        model_path=model_path,
+    )
+    assert _resolve_model_source(_WorkerConfig.from_settings(settings)) == str(model_path.resolve())
+
+
+def test_pinned_model_artifact_hash_mismatch_fails_closed(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    (model_path / "model.bin").write_bytes(b"unexpected")
+    settings = Settings(
+        model_revision="a" * 40,
+        model_sha256="0" * 64,
+        model_path=model_path,
+    )
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        _resolve_model_source(_WorkerConfig.from_settings(settings))
 
 
 def test_process_backend_is_default() -> None:
@@ -52,6 +81,8 @@ def test_transcribe_service_delegates_to_worker_pool() -> None:
                 duration=1.0,
                 elapsed_ms=3,
                 model="tiny",
+                model_revision="unversioned",
+                model_sha256="",
                 compute_type="int8",
                 device="cpu",
                 segments=[],

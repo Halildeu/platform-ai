@@ -17,6 +17,8 @@ def test_health_loading_before_first_request(client) -> None:  # type: ignore[no
     body = r.json()
     assert body["status"] == "loading"
     assert body["model"] == "tiny"
+    assert body["model_revision"] == "unversioned"
+    assert body["model_sha256"] == ""
     assert body["device"] == "cpu"
 
 
@@ -32,6 +34,8 @@ def test_transcribe_happy_path(client) -> None:  # type: ignore[no-untyped-def]
     assert body["language"] == "tr"
     assert body["duration"] == 2.5
     assert body["model"] == "tiny"
+    assert body["model_revision"] == "unversioned"
+    assert body["model_sha256"] == ""
     assert body["device"] == "cpu"
     assert len(body["segments"]) == 2
     assert body["segments"][0]["start"] == 0.0
