@@ -7,8 +7,10 @@ consensus gerektirir.
 
 from __future__ import annotations
 
+import re
 import socket
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Self
 
 from pydantic import Field, model_validator
@@ -57,6 +59,14 @@ class Settings(BaseSettings):
     )
 
     model_name: str = Field(default="medium", description="Whisper model")
+    # Model artifact identity is separate from the service version. Production
+    # pins the upstream repository revision and verifies the actual model.bin
+    # bytes before Whisper can load them. Local/test keeps the historical
+    # floating-name convenience, but can opt into the same contract.
+    environment: str = Field(default="local", pattern="^(local|test|staging|production)$")
+    model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
+    model_sha256: str = Field(default="", max_length=71)
+    model_path: Path | None = None
     compute_type: str = Field(default="int8", description="quantization")
     device: str = Field(default="cpu", description="cpu / cuda / auto")
     language: str = Field(default="tr", description="ISO 639-1 or 'auto'")
@@ -140,7 +150,21 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_stream_tuning(self) -> Self:
-        """Keep low-latency streaming knobs internally consistent."""
+        """Keep model provenance and low-latency knobs internally consistent."""
+        if self.model_sha256 and not re.fullmatch(
+            r"(?:sha256:)?[0-9a-f]{64}", self.model_sha256
+        ):
+            raise ValueError("model_sha256 must be a lowercase full SHA-256 digest")
+        if self.environment in {"staging", "production"}:
+            if not re.fullmatch(r"[0-9a-f]{40}", self.model_revision):
+                raise ValueError(
+                    "model_revision must be a lowercase 40-hex immutable revision "
+                    "in staging/production"
+                )
+            if not self.model_sha256:
+                raise ValueError("model_sha256 is required in staging/production")
+            if self.model_path is None:
+                raise ValueError("model_path is required in staging/production")
         if self.min_speech_rms < self.silence_rms:
             raise ValueError("min_speech_rms must be >= silence_rms")
         if self.min_infer_sec > self.live_window_sec:
