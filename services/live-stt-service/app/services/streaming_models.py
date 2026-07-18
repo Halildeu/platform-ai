@@ -18,7 +18,7 @@ import queue
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -154,16 +154,20 @@ def _supervised_final_worker_main(
     config: dict[str, object], task_queue: Any, result_queue: Any
 ) -> None:
     service = DirectWhisperService(
-        str(config["model_name"]),
-        str(config["device"]),
-        str(config["compute_type"]),
-        str(config["language"]),
-        int(config["beam_size"]),
+        cast(str, config["model_name"]),
+        cast(str, config["device"]),
+        cast(str, config["compute_type"]),
+        cast(str, config["language"]),
+        cast(int, config["beam_size"]),
         role="final",
-        no_speech_threshold=float(config["no_speech_threshold"]),
-        log_prob_threshold=float(config["log_prob_threshold"]),
-        compression_ratio_threshold=float(config["compression_ratio_threshold"]),
-        condition_on_previous_text=bool(config["condition_on_previous_text"]),
+        no_speech_threshold=cast(float, config["no_speech_threshold"]),
+        log_prob_threshold=cast(float, config["log_prob_threshold"]),
+        compression_ratio_threshold=cast(
+            float, config["compression_ratio_threshold"]
+        ),
+        condition_on_previous_text=cast(
+            bool, config["condition_on_previous_text"]
+        ),
     )
     while True:
         task = task_queue.get()
@@ -243,12 +247,13 @@ class SupervisedFinalWhisperService:
     def _terminate_and_restart(self) -> None:
         task_queue = self._task_queue
         result_queue = self._result_queue
-        if self._is_alive():
-            self._process.terminate()
-            self._process.join(timeout=self._kill_grace_sec)
-            if self._process.is_alive():
-                self._process.kill()
-                self._process.join(timeout=self._kill_grace_sec)
+        process = self._process
+        if process is not None and process.is_alive():
+            process.terminate()
+            process.join(timeout=self._kill_grace_sec)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=self._kill_grace_sec)
         self._close_queue(task_queue)
         self._close_queue(result_queue)
         self._process = None
