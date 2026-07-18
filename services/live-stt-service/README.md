@@ -111,7 +111,8 @@ Transcript-free canlı stream smoke:
 
 ```bash
 python scripts/live_stream_smoke.py \
-  --url ws://127.0.0.1:18220/ws/stream \
+  --url 'ws://127.0.0.1:18220/ws/stream?protocol=source-ranges-v1' \
+  --final-wait-sec 90 \
   --wav tests/fixtures/sample-tr-cv17-001.wav
 ```
 

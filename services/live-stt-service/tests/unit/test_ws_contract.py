@@ -88,6 +88,7 @@ def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ready["protocol"] == "source-ranges-v1"
     assert ready["capabilities"] == ["eof", "source-ranges-v1"]
     assert ready["supports_eof"] is True
+    assert ready["terminal_timeout_ms"] == 60_000
 
 
 def test_partial_and_final_payload_shapes_match_contract() -> None:

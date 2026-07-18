@@ -463,7 +463,6 @@ def test_supervised_final_worker_timeout_terminates_and_respawns(
 
         def terminate(self) -> None:
             self.terminated = True
-            self.alive = False
 
         def kill(self) -> None:
             self.killed = True
@@ -488,8 +487,25 @@ def test_supervised_final_worker_timeout_terminates_and_respawns(
         process = FakeProcess()
         restarts.append(process)
         service._process = process
-        service._task_queue = queue.Queue(maxsize=1)
         service._result_queue = queue.Queue(maxsize=1)
+
+        class ResponsiveTaskQueue(queue.Queue[dict[str, object]]):
+            def put(  # type: ignore[override]
+                self,
+                item: dict[str, object],
+                block: bool = True,
+                timeout: float | None = None,
+            ) -> None:
+                del block, timeout
+                service._result_queue.put(
+                    {
+                        "job_id": item["job_id"],
+                        "ok": True,
+                        "text": "Yeniden başlayan worker yanıtı",
+                    }
+                )
+
+        service._task_queue = ResponsiveTaskQueue(maxsize=1)
         service._model_loaded = False
 
     monkeypatch.setattr(service, "_start", fake_start)
@@ -498,10 +514,15 @@ def test_supervised_final_worker_timeout_terminates_and_respawns(
         service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
 
     assert old_process.terminated is True
-    assert old_process.killed is False
+    assert old_process.killed is True
     assert len(restarts) == 1
     assert service._process is restarts[0]
     assert service.model_loaded is False
+
+    recovered = service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+
+    assert recovered == "Yeniden başlayan worker yanıtı"
+    assert service.model_loaded is True
 
 
 def test_direct_stream_service_passes_role_specific_beam_size() -> None:

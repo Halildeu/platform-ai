@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import time
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = ROOT / "scripts" / "live_stream_smoke.py"
@@ -22,6 +25,117 @@ def _load_smoke_module() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_default_url_negotiates_source_range_protocol() -> None:
+    smoke = _load_smoke_module()
+
+    args = smoke.parse_args([])
+
+    assert args.url.endswith("/ws/stream?protocol=source-ranges-v1")
+    assert args.final_wait_sec == 90.0
+
+
+def test_ready_contract_requires_exact_protocol_and_terminal_budget() -> None:
+    smoke = _load_smoke_module()
+    ready = {
+        "type": "ready",
+        "sample_rate": 16_000,
+        "live_model": "fixture-live",
+        "final_model": "fixture-final",
+        "partial_mode": "stable-v1",
+        "protocol": "source-ranges-v1",
+        "capabilities": ["eof", "source-ranges-v1"],
+        "supports_eof": True,
+        "terminal_timeout_ms": 60_000,
+    }
+
+    smoke.validate_ready_event(ready)
+
+    for key, invalid in (
+        ("protocol", "legacy"),
+        ("capabilities", ["eof"]),
+        ("supports_eof", False),
+        ("terminal_timeout_ms", 0),
+    ):
+        incompatible = {**ready, key: invalid}
+        with pytest.raises(smoke.SmokeError, match="ready event"):
+            smoke.validate_ready_event(incompatible)
+
+
+def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
+    smoke = _load_smoke_module()
+    events = [
+        {"type": "loading", "stage": "live_model"},
+        {"type": "loading", "stage": "final_model"},
+        {
+            "type": "ready",
+            "sample_rate": 16_000,
+            "live_model": "fixture-live",
+            "final_model": "fixture-final",
+            "partial_mode": "stable-v1",
+            "protocol": "source-ranges-v1",
+            "capabilities": ["eof", "source-ranges-v1"],
+            "supports_eof": True,
+            "terminal_timeout_ms": 60_000,
+        },
+        {
+            "type": "partial",
+            "seq": 0,
+            "confirmed": "Kelime akışı",
+            "tentative": "aktif",
+            "elapsed_ms": 100,
+            "rms": 0.02,
+        },
+        {
+            "type": "final",
+            "seq": 0,
+            "text": "Kelime akışı aktif ve doğru",
+            "elapsed_ms": 200,
+            "rms": 0.02,
+        },
+        {"type": "eof_ack"},
+        {"type": "drained"},
+    ]
+
+    class FakeWebsocket:
+        def __init__(self) -> None:
+            self.sent: list[bytes | str] = []
+
+        async def recv(self) -> str:
+            assert events, "fake websocket event queue exhausted"
+            return json.dumps(events.pop(0))
+
+        async def send(self, payload: bytes | str) -> None:
+            self.sent.append(payload)
+
+    websocket = FakeWebsocket()
+
+    class FakeConnection:
+        async def __aenter__(self) -> FakeWebsocket:
+            return websocket
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(smoke.websockets, "connect", lambda *_args, **_kwargs: FakeConnection())
+    monkeypatch.setattr(smoke, "audio_frames", lambda *_args, **_kwargs: [])
+    args = smoke.parse_args(
+        [
+            "--wav",
+            str(FIXTURE),
+            "--tail-silence-sec",
+            "0",
+            "--final-wait-sec",
+            "1",
+        ]
+    )
+
+    summary = asyncio.run(smoke.run_smoke(args))
+
+    assert summary["ok"] is True
+    assert summary["events"]["terminal_sequence"] == ["eof_ack", "drained"]
+    assert websocket.sent == ['{"type":"eof"}']
 
 
 def test_wav_loader_resamples_common_voice_fixture_to_16khz_float32() -> None:

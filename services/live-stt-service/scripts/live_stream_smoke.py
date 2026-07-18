@@ -18,6 +18,7 @@ import wave
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import websockets
@@ -31,15 +32,46 @@ TARGET_SAMPLE_RATE = 16_000
 DEFAULT_FRAME_MS = 200
 DEFAULT_TAIL_SILENCE_SEC = 1.2
 DEFAULT_TIMEOUT_SEC = 90.0
+DEFAULT_FINAL_WAIT_SEC = 90.0
 DEFAULT_MIN_FINAL_WORD_COVERAGE = 0.5
 DEFAULT_MIN_PARTIAL_EVENTS = 1
 DEFAULT_MIN_FINAL_EVENTS = 1
 DEFAULT_MAX_TRANSCRIPT_GAP_MS = 6000
+STREAM_PROTOCOL = "source-ranges-v1"
+READY_CAPABILITIES = ["eof", STREAM_PROTOCOL]
 AudioArray = NDArray[np.float32]
 
 
 class SmokeError(RuntimeError):
     """Expected smoke failure with a redacted message."""
+
+
+def validate_stream_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+        raise SmokeError("stream URL must be an absolute ws/wss URL")
+    if parse_qs(parsed.query).get("protocol") != [STREAM_PROTOCOL]:
+        raise SmokeError(f"stream URL must negotiate protocol={STREAM_PROTOCOL}")
+
+
+def validate_ready_event(event: dict[str, Any]) -> None:
+    expected_terminal_timeout_ms = event.get("terminal_timeout_ms")
+    if (
+        event.get("type") != "ready"
+        or event.get("sample_rate") != TARGET_SAMPLE_RATE
+        or event.get("partial_mode") != "stable-v1"
+        or event.get("protocol") != STREAM_PROTOCOL
+        or event.get("capabilities") != READY_CAPABILITIES
+        or event.get("supports_eof") is not True
+        or not isinstance(event.get("live_model"), str)
+        or not event.get("live_model")
+        or not isinstance(event.get("final_model"), str)
+        or not event.get("final_model")
+        or isinstance(expected_terminal_timeout_ms, bool)
+        or not isinstance(expected_terminal_timeout_ms, int)
+        or not 1_000 <= expected_terminal_timeout_ms <= 120_000
+    ):
+        raise SmokeError("ready event does not satisfy source-ranges-v1 contract")
 
 
 def _word_count(text: str) -> int:
@@ -267,6 +299,7 @@ def final_event_count(transcript_events: list[dict[str, Any]]) -> int:
 
 
 async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
+    validate_stream_url(args.url)
     wav_path = Path(args.wav).expanduser().resolve()
     reference_text_path = resolve_reference_text(wav_path, args.reference_text)
     audio = load_wav_float32(wav_path)
@@ -292,6 +325,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                 stage = event.get("stage", "-")
                 loading_events.append(f"loading:{stage}")
             elif event_type == "ready":
+                validate_ready_event(event)
                 ready_at = time.perf_counter()
             elif event_type == "error":
                 errors.append(str(event.get("msg", "error")))
@@ -350,7 +384,10 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run transcript-free /ws/stream smoke")
-    parser.add_argument("--url", default="ws://127.0.0.1:18220/ws/stream")
+    parser.add_argument(
+        "--url",
+        default="ws://127.0.0.1:18220/ws/stream?protocol=source-ranges-v1",
+    )
     parser.add_argument(
         "--wav",
         default=str(Path(__file__).resolve().parents[1] / "tests/fixtures/sample-tr-cv17-001.wav"),
@@ -358,7 +395,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--frame-ms", type=int, default=DEFAULT_FRAME_MS)
     parser.add_argument("--tail-silence-sec", type=float, default=DEFAULT_TAIL_SILENCE_SEC)
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
-    parser.add_argument("--final-wait-sec", type=float, default=10.0)
+    parser.add_argument("--final-wait-sec", type=float, default=DEFAULT_FINAL_WAIT_SEC)
     parser.add_argument(
         "--reference-text",
         default=None,

@@ -326,6 +326,11 @@ class SupervisedFinalWhisperService:
     def transcribe_array(
         self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
     ) -> str:
+        # A timeout recycles the child process. Reload the pinned model under the
+        # separate cold-load budget before applying the much shorter inference
+        # budget; otherwise the first post-timeout request can repeatedly kill a
+        # healthy replacement while it is still loading the model.
+        self.ensure_model()
         contiguous = np.ascontiguousarray(audio, dtype=np.float32)
         return self._invoke(
             "transcribe",

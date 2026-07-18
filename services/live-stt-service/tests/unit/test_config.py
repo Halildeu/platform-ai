@@ -125,6 +125,9 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
     with pytest.raises(ValueError, match="must be process"):
         cfg.Settings(
             environment="staging",
+            model_revision="a" * 40,
+            model_sha256="b" * 64,
+            model_path="/models/immutable",
             stream_final_worker_backend="inline",
         )
 

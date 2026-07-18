@@ -578,6 +578,10 @@ async def stream_endpoint(
             "protocol": STREAM_PROTOCOL,
             "capabilities": ["eof", STREAM_PROTOCOL],
             "supports_eof": True,
+            # EOF can first wait for an in-flight periodic final and then flush
+            # the remaining tail. Consumers combine this declared upper bound
+            # with their own durable-persistence budget before admitting audio.
+            "terminal_timeout_ms": int(settings.stream_final_timeout_sec * 2 * 1_000),
         }
     )
     logger.info(
