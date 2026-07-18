@@ -43,7 +43,7 @@ def _stores(path: Path) -> tuple[SqliteOutboxStore, SqliteReadyEventInbox]:
         PayloadCipher({"v1": KEY}, "v1"),
         max_rows=10,
     )
-    return outbox, SqliteReadyEventInbox(outbox, max_rows=20)
+    return outbox, SqliteReadyEventInbox(outbox, max_rows=20, max_failures=3)
 
 
 def _identity(*, payload_hash: str = HASH_A, run_id: str = "run-1") -> ReadyEventIdentity:
@@ -245,7 +245,7 @@ def test_key_rotation_finds_existing_encrypted_identity(tmp_path: Path) -> None:
         PayloadCipher({"v1": KEY}, "v1"),
         max_rows=10,
     )
-    first_inbox = SqliteReadyEventInbox(first_store, max_rows=20)
+    first_inbox = SqliteReadyEventInbox(first_store, max_rows=20, max_failures=3)
     first_inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=1.0)
     first_inbox.mark_dead(
         event_key=_identity().event_key,
@@ -260,7 +260,7 @@ def test_key_rotation_finds_existing_encrypted_identity(tmp_path: Path) -> None:
         PayloadCipher({"v1": KEY, "v2": b"N" * 32}, "v2"),
         max_rows=10,
     )
-    rotated_inbox = SqliteReadyEventInbox(rotated_store, max_rows=20)
+    rotated_inbox = SqliteReadyEventInbox(rotated_store, max_rows=20, max_failures=3)
     replay = rotated_inbox.register_and_claim(
         _identity(),
         owner="worker-2",
@@ -279,7 +279,7 @@ def test_key_rotation_finds_existing_encrypted_identity(tmp_path: Path) -> None:
         )
 
 
-def test_stale_lease_recovery_does_not_consume_failure_budget(tmp_path: Path) -> None:
+def test_stale_lease_recovery_consumes_failure_budget(tmp_path: Path) -> None:
     _, inbox = _stores(tmp_path / "delivery.sqlite3")
     first = inbox.register_and_claim(_identity(), owner="worker-a", lease_sec=10.0, now=100.0)
     busy = inbox.register_and_claim(_identity(), owner="worker-b", lease_sec=10.0, now=105.0)
@@ -288,7 +288,7 @@ def test_stale_lease_recovery_does_not_consume_failure_budget(tmp_path: Path) ->
     assert first.disposition is ReadyClaimDisposition.CLAIMED
     assert busy.disposition is ReadyClaimDisposition.BUSY
     assert recovered.disposition is ReadyClaimDisposition.CLAIMED
-    assert recovered.failure_count == 0
+    assert recovered.failure_count == 1
     assert recovered.lease_recovery_count == 1
 
     failed = inbox.mark_failure(
@@ -300,7 +300,32 @@ def test_stale_lease_recovery_does_not_consume_failure_budget(tmp_path: Path) ->
         now=112.0,
     )
     assert failed.state is ReadyInboxState.RECEIVED
-    assert failed.failure_count == 1
+    assert failed.failure_count == 2
+
+
+def test_repeated_stale_leases_stop_at_failure_budget(tmp_path: Path) -> None:
+    path = tmp_path / "delivery.sqlite3"
+    _, inbox = _stores(path)
+
+    first = inbox.register_and_claim(_identity(), owner="worker-a", lease_sec=10.0, now=100.0)
+    second = inbox.register_and_claim(_identity(), owner="worker-b", lease_sec=10.0, now=111.0)
+    third = inbox.register_and_claim(_identity(), owner="worker-c", lease_sec=10.0, now=122.0)
+    exhausted = inbox.register_and_claim(_identity(), owner="worker-d", lease_sec=10.0, now=133.0)
+
+    assert first.disposition is ReadyClaimDisposition.CLAIMED
+    assert second.disposition is ReadyClaimDisposition.CLAIMED
+    assert second.failure_count == 1
+    assert third.disposition is ReadyClaimDisposition.CLAIMED
+    assert third.failure_count == 2
+    assert exhausted.disposition is ReadyClaimDisposition.DEAD
+    assert exhausted.failure_count == 3
+    assert exhausted.lease_recovery_count == 3
+
+    dead = inbox.list_dead(limit=10)
+    assert len(dead) == 1
+    assert dead[0].failure_count == 3
+    assert dead[0].dead_reason is ReadyDeadReason.RETRY_EXHAUSTED
+    assert dead[0].last_error_code == "lease_recovery_exhausted"
 
 
 def test_not_due_exact_replay_uses_read_only_busy_fast_path(tmp_path: Path) -> None:
@@ -482,6 +507,7 @@ def test_retry_exhaustion_can_be_audit_rearmed_for_exact_producer_replay(tmp_pat
     )
     assert replay.disposition is ReadyClaimDisposition.CLAIMED
     assert replay.failure_count == 0
+    assert replay.lease_recovery_count == 0
     with sqlite3.connect(path) as connection:
         audit = connection.execute(
             """

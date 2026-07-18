@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
+from typing import Protocol
 
 import httpx
 from pydantic import SecretStr
@@ -31,6 +32,16 @@ class DeliveryAttempt:
     disposition: DeliveryDisposition
     error_code: str = ""
     retry_after_sec: float | None = None
+
+
+class AnalysisJobCapabilityProvider(Protocol):
+    """Issue one ephemeral capability for the exact outboxed analysis tuple."""
+
+    async def capability_for(
+        self, message: ClaimedMessage
+    ) -> tuple[SecretStr | None, DeliveryAttempt | None]: ...
+
+    async def aclose(self) -> None: ...
 
 
 @dataclass
@@ -320,28 +331,47 @@ class ServiceTokenClient:
 class MeetingServiceClient:
     """Classify delivery outcomes without logging response bodies or credentials."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        capability_provider: AnalysisJobCapabilityProvider | None = None,
+        owns_capability_provider: bool = False,
+    ) -> None:
         self._settings = settings
         self._client = ReloadingHttpClient(settings, client)
         self._tokens = ServiceTokenClient(settings, self._client)
+        self._capability_provider = capability_provider
+        self._owns_capability_provider = owns_capability_provider
 
     async def deliver(self, message: ClaimedMessage) -> DeliveryAttempt:
         token, token_error = await self._tokens.get_token()
         if token_error is not None:
             return token_error
         assert token is not None
+        capability: SecretStr | None = None
+        if self._capability_provider is not None:
+            capability, capability_error = await self._capability_provider.capability_for(message)
+            if capability_error is not None:
+                return capability_error
+            assert capability is not None
         url = (
             self._settings.meeting_service_base_url.rstrip("/")
             + f"/api/v1/internal/meetings/{message.meeting_id}/analysis-results"
         )
         try:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": message.analysis_run_id,
+            }
+            if capability is not None:
+                headers["X-Analysis-Job-Capability"] = capability.get_secret_value()
+            body = {key: value for key, value in message.payload.items() if not key.startswith("_")}
             response = await self._client.post(
                 url,
-                json=message.payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Idempotency-Key": message.analysis_run_id,
-                },
+                json=body,
+                headers=headers,
                 timeout=self._settings.ingestion_timeout_sec,
             )
         except (httpx.HTTPError, MeetingServiceTlsError) as exc:
@@ -373,6 +403,8 @@ class MeetingServiceClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+        if self._owns_capability_provider and self._capability_provider is not None:
+            await self._capability_provider.aclose()
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:

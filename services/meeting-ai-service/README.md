@@ -220,9 +220,12 @@ checkpoint reports busy and marks the scrub complete only after the final trunca
 The store never contains the event JSON or raw transcript. Redis remains pending until
 SQLite commits either
 `OUTBOXED` or `DEAD`; `OUTBOXED` and the encrypted analysis-result outbox insert are one
-`BEGIN IMMEDIATE` transaction. A stale lease reclaim increments a recovery counter,
-not the real failure budget. The stable analysis run UUIDv5 is derived from meeting ID,
-session ID, finalization version, and `MAI_ANALYSIS_SPEC_VERSION`.
+`BEGIN IMMEDIATE` transaction. A stale lease reclaim increments both the recovery
+counter and the shared failure budget. Once `MAI_READY_CONSUMER_MAX_FAILURES` is
+reached, the inbox row becomes `RETRY_EXHAUSTED` before another worker can claim it;
+an audit-referenced operator redrive resets both counters. The stable analysis run
+UUIDv5 is derived from meeting ID, session ID, finalization version, and
+`MAI_ANALYSIS_SPEC_VERSION`.
 
 Retry deadlines are enforced by scanning the current consumer's own PEL separately
 from `XAUTOCLAIM` stale-owner recovery. Result-outbox capacity is backpressure, not an

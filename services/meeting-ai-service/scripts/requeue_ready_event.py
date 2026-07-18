@@ -34,7 +34,11 @@ def main() -> int:
         ),
         max_rows=settings.ingestion_max_rows,
     )
-    inbox = SqliteReadyEventInbox(store, max_rows=settings.ready_consumer_inbox_max_rows)
+    inbox = SqliteReadyEventInbox(
+        store,
+        max_rows=settings.ready_consumer_inbox_max_rows,
+        max_failures=settings.ready_consumer_max_failures,
+    )
 
     if args.list_dead:
         for item in inbox.list_dead(limit=args.limit):

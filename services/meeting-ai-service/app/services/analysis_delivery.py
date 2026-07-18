@@ -23,6 +23,7 @@ from app.api.metrics import (
 )
 from app.core.config import Settings
 from app.models.schemas import AnalysisDeliveryHealth, AnalyzeResponse
+from app.services.canonical_transcript_client import HttpCanonicalTranscriptClient
 from app.services.durable_outbox import (
     ClaimedMessage,
     OutboxError,
@@ -55,7 +56,11 @@ def build_ingestion_payload(
     *,
     settings: Settings,
     meeting_id: str,
+    tenant_id: str | None = None,
     session_id: str,
+    finalization_version: int | None = None,
+    finalized_at: datetime | None = None,
+    analysis_spec_version: str | None = None,
     transcript: str,
     result: AnalyzeResponse,
     generated_at: datetime,
@@ -71,7 +76,7 @@ def build_ingestion_payload(
         raise AnalysisDeliveryContractError("session_id exceeds the backend contract limit")
     _validate_backend_contract(settings, result)
 
-    return {
+    payload: dict[str, object] = {
         "meeting_id": canonical_meeting_id,
         "transcript_session_id": session_id,
         "transcript_sha256": hashlib.sha256(transcript.encode("utf-8")).hexdigest(),
@@ -92,6 +97,34 @@ def build_ingestion_payload(
         "actions": [_action_payload(item.model_dump()) for item in result.action_items],
         "supersedes_analysis_run_id": None,
     }
+    canonical_values = (tenant_id, finalization_version, finalized_at, analysis_spec_version)
+    if any(value is not None for value in canonical_values):
+        if any(value is None for value in canonical_values):
+            raise AnalysisDeliveryContractError("canonical analysis tuple is incomplete")
+        assert tenant_id is not None
+        assert finalization_version is not None
+        assert finalized_at is not None
+        assert analysis_spec_version is not None
+        try:
+            canonical_tenant_id = str(uuid.UUID(tenant_id))
+        except ValueError as exc:
+            raise AnalysisDeliveryContractError("tenant_id must be a UUID") from exc
+        if finalization_version < 1:
+            raise AnalysisDeliveryContractError("finalization_version must be positive")
+        if finalized_at.tzinfo is None or finalized_at.utcoffset() is None:
+            raise AnalysisDeliveryContractError("finalized_at must carry a timezone")
+        spec_version = analysis_spec_version.strip()
+        if not spec_version or len(spec_version) > 64:
+            raise AnalysisDeliveryContractError("analysis_spec_version exceeds backend contract")
+        payload.update(
+            {
+                "finalization_version": finalization_version,
+                "finalized_at": _utc_instant(finalized_at),
+                "analysis_spec_version": spec_version,
+                "_canonical_tenant_id": canonical_tenant_id,
+            }
+        )
+    return payload
 
 
 def _validate_backend_contract(settings: Settings, result: AnalyzeResponse) -> None:
@@ -148,6 +181,10 @@ def _strict_iso_instant(value: object) -> str | None:
     return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _utc_instant(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 class AnalysisDeliveryRuntime:
     """Own the encrypted store, delivery worker, and runtime health state."""
 
@@ -182,7 +219,13 @@ class AnalysisDeliveryRuntime:
                 max_rows=settings.ingestion_max_rows,
             )
         if self.enabled and self._transport is None:
-            self._transport = MeetingServiceClient(settings, http_client)
+            capability_provider = HttpCanonicalTranscriptClient(settings, http_client)
+            self._transport = MeetingServiceClient(
+                settings,
+                http_client,
+                capability_provider=capability_provider,
+                owns_capability_provider=True,
+            )
             self._owns_transport = True
 
     @property

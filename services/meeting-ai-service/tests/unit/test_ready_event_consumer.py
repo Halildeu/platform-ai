@@ -10,6 +10,7 @@ import random
 import sqlite3
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
@@ -21,6 +22,7 @@ from app.services.analysis_application import AnalysisApplicationService
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
 from app.services.analyze import MeetingAnalysisService
 from app.services.canonical_transcript_client import (
+    CanonicalTranscriptFetchResult,
     CanonicalTranscriptRetryableError,
     CanonicalTranscriptSnapshot,
 )
@@ -89,16 +91,21 @@ class FakeTranscriptClient:
         self.calls += 1
         if self.retry:
             raise CanonicalTranscriptRetryableError("transcript_http_503")
-        return CanonicalTranscriptSnapshot(
-            tenantId=str(event.tenant_id),
-            meetingId=str(event.meeting_id),
-            sessionId=str(event.session_id),
-            finalizationVersion=event.finalization_version,
-            state="FINALIZED",
-            transcript=RAW_TRANSCRIPT,
-            transcriptSha256=hashlib.sha256(RAW_TRANSCRIPT.encode()).hexdigest(),
-            segmentCount=event.segment_count,
-            segments=[{"text": RAW_TRANSCRIPT, "start": 0.0, "end": 4.0}],
+        return CanonicalTranscriptFetchResult(
+            snapshot=CanonicalTranscriptSnapshot(
+                tenantId=str(event.tenant_id),
+                meetingId=str(event.meeting_id),
+                sessionId=str(event.session_id),
+                finalizationVersion=event.finalization_version,
+                finalizedAt="2026-07-18T01:00:00Z",
+                state="FINALIZED",
+                transcript=RAW_TRANSCRIPT,
+                transcriptSha256=hashlib.sha256(RAW_TRANSCRIPT.encode()).hexdigest(),
+                segmentCount=event.segment_count,
+                segments=[{"text": RAW_TRANSCRIPT, "start": 0.0, "end": 4.0}],
+            ),
+            analysis_job_capability=SecretStr("unused-initial-capability"),
+            analysis_job_capability_expires_at=datetime(2026, 7, 18, 1, 15, tzinfo=UTC),
         )
 
     async def aclose(self) -> None:
@@ -205,6 +212,36 @@ def test_redis_client_has_bounded_connect_and_command_timeouts(
     assert captured["retry_on_timeout"] is False
 
 
+def test_worker_loop_logs_only_exception_class_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        runtime, _, redis, _ = _runtime(tmp_path)
+
+        async def fail_group(**_kwargs: object) -> object:
+            raise RuntimeError("credential-shaped-sensitive-detail")
+
+        async def stop_after_error() -> None:
+            runtime._stop.set()
+
+        monkeypatch.setattr(redis, "xgroup_create", fail_group)
+        monkeypatch.setattr(runtime, "_wait_after_error", stop_after_error)
+        await runtime._worker_loop()
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(scenario())
+
+    records = [
+        record for record in caplog.records if record.message == "Ready-event consumer loop failure"
+    ]
+    assert len(records) == 1
+    assert records[0].err_class == "RuntimeError"  # type: ignore[attr-defined]
+    assert records[0].exc_info is None
+    assert "credential-shaped-sensitive-detail" not in caplog.text
+
+
 def _runtime(
     tmp_path: Path,
     *,
@@ -244,6 +281,26 @@ def test_ready_event_outboxes_once_then_duplicate_only_acks(tmp_path: Path) -> N
     assert ack_count == 2
     assert pending == 1
     assert RAW_TRANSCRIPT.encode() not in durable_bytes
+
+
+def test_ready_event_outbox_carries_deterministic_backend_tuple_without_capability(
+    tmp_path: Path,
+) -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        runtime, delivery, _, _ = _runtime(tmp_path)
+        await runtime.process_message("1-0", _fields())
+        assert delivery.store is not None
+        return delivery.store.claim_next(owner="assertion", lease_sec=10.0)
+
+    message = asyncio.run(scenario())
+    assert message is not None
+    assert message.analysis_run_id == "7ee11691-2c23-5518-adfa-a0e138b5eabe"
+    assert message.payload["_canonical_tenant_id"] == TENANT
+    assert message.payload["transcript_session_id"] == SESSION
+    assert message.payload["finalization_version"] == 1
+    assert message.payload["finalized_at"] == "2026-07-18T01:00:00Z"
+    assert message.payload["analysis_spec_version"] == "meeting-intelligence-v1"
+    assert not any("capability" in key for key in message.payload)
 
 
 def test_redis_message_stays_pending_until_analysis_outbox_commit(tmp_path: Path) -> None:

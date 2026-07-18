@@ -110,11 +110,20 @@ class ReadyDeadLetterMetadata:
 class SqliteReadyEventInbox:
     """Lease-based inbox sharing one WAL database with the result outbox."""
 
-    def __init__(self, outbox: SqliteOutboxStore, *, max_rows: int) -> None:
+    def __init__(
+        self,
+        outbox: SqliteOutboxStore,
+        *,
+        max_rows: int,
+        max_failures: int,
+    ) -> None:
         if max_rows < 1:
             raise ValueError("max_rows must be positive")
+        if max_failures < 1:
+            raise ValueError("max_failures must be positive")
         self._outbox = outbox
         self._max_rows = max_rows
+        self._max_failures = max_failures
 
     def _connect(self) -> sqlite3.Connection:
         return self._outbox._connect()
@@ -363,6 +372,32 @@ class SqliteReadyEventInbox:
                             max(0.0, float(row["lease_until"]) - timestamp),
                         )
                     recovery_count += 1
+                    failure_count += 1
+                    if failure_count >= self._max_failures:
+                        connection.execute(
+                            """
+                            UPDATE meeting_transcript_ready_inbox
+                            SET state = 'DEAD', failure_count = ?,
+                                lease_recovery_count = ?, lease_owner = NULL,
+                                lease_until = NULL, updated_at = ?,
+                                last_error_code = 'lease_recovery_exhausted',
+                                dead_reason = 'RETRY_EXHAUSTED'
+                            WHERE event_key_digest = ? AND state = 'PROCESSING'
+                            """,
+                            (
+                                failure_count,
+                                recovery_count,
+                                timestamp,
+                                row["event_key_digest"],
+                            ),
+                        )
+                        connection.commit()
+                        return ReadyClaim(
+                            ReadyClaimDisposition.DEAD,
+                            failure_count,
+                            recovery_count,
+                            dlq_published,
+                        )
                 elif float(row["next_attempt_at"]) > timestamp:
                     connection.commit()
                     return ReadyClaim(
@@ -377,10 +412,17 @@ class SqliteReadyEventInbox:
                     """
                     UPDATE meeting_transcript_ready_inbox
                     SET state = 'PROCESSING', lease_owner = ?, lease_until = ?,
-                        lease_recovery_count = ?, updated_at = ?
+                        failure_count = ?, lease_recovery_count = ?, updated_at = ?
                     WHERE event_key_digest = ?
                     """,
-                    (owner, lease_until, recovery_count, timestamp, row["event_key_digest"]),
+                    (
+                        owner,
+                        lease_until,
+                        failure_count,
+                        recovery_count,
+                        timestamp,
+                        row["event_key_digest"],
+                    ),
                 )
                 connection.commit()
                 return ReadyClaim(
@@ -707,6 +749,7 @@ class SqliteReadyEventInbox:
                     """
                     UPDATE meeting_transcript_ready_inbox
                     SET state = 'RECEIVED', failure_count = 0,
+                        lease_recovery_count = 0,
                         next_attempt_at = ?, updated_at = ?, last_error_code = NULL,
                         dlq_published_at = NULL, dead_reason = NULL,
                         redrive_count = redrive_count + 1, last_redriven_at = ?,

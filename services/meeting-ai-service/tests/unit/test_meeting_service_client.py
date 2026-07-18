@@ -31,6 +31,18 @@ from app.services.meeting_service_client import (
 KEY = base64.b64encode(b"K" * 32).decode()
 
 
+class FakeCapabilityProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def capability_for(self, message: ClaimedMessage):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        return SecretStr(f"capability-{self.calls}"), None
+
+    async def aclose(self) -> None:
+        return None
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         ingestion_enabled=True,
@@ -78,6 +90,42 @@ def test_token_is_cached_and_idempotency_header_is_stable(tmp_path: Path) -> Non
         assert all(h["Authorization"] == "Bearer token" for h in ingestion_headers)
 
     asyncio.run(scenario())
+
+
+def test_each_post_uses_fresh_capability_and_strips_internal_tenant_metadata(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[list[httpx.Headers], list[dict[str, object]], int]:
+        headers: list[httpx.Headers] = []
+        bodies: list[dict[str, object]] = []
+        capabilities = FakeCapabilityProvider()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+            headers.append(request.headers)
+            bodies.append(json.loads(request.content))
+            return httpx.Response(201)
+
+        message = _message()
+        message.payload["_canonical_tenant_id"] = "33333333-3333-4333-8333-333333333333"
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = MeetingServiceClient(
+                _settings(tmp_path),
+                client,
+                capability_provider=capabilities,
+            )
+            await service.deliver(message)
+            await service.deliver(message)
+        return headers, bodies, capabilities.calls
+
+    headers, bodies, calls = asyncio.run(scenario())
+    assert calls == 2
+    assert [item["X-Analysis-Job-Capability"] for item in headers] == [
+        "capability-1",
+        "capability-2",
+    ]
+    assert all("_canonical_tenant_id" not in body for body in bodies)
 
 
 def test_401_invalidates_token_and_is_retryable(tmp_path: Path) -> None:

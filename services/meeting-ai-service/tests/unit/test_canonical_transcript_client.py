@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -20,6 +21,8 @@ from app.services.canonical_transcript_client import (
     CanonicalTranscriptTerminalError,
     HttpCanonicalTranscriptClient,
 )
+from app.services.durable_outbox import ClaimedMessage
+from app.services.meeting_service_client import DeliveryDisposition
 
 MEETING = "11111111-1111-4111-8111-111111111111"
 SESSION = "22222222-2222-4222-8222-222222222222"
@@ -70,8 +73,7 @@ def _event(*, finalization_version: int = 1):  # type: ignore[no-untyped-def]
     return parse_transcript_ready_event(
         {
             "eventKey": (
-                f"meeting.transcript|{SESSION}|meeting.transcript.ready|"
-                f"{finalization_version}"
+                f"meeting.transcript|{SESSION}|meeting.transcript.ready|" f"{finalization_version}"
             ),
             "eventType": "meeting.transcript.ready",
             "aggregateId": SESSION,
@@ -91,6 +93,7 @@ def _snapshot(**overrides: object) -> dict[str, object]:
         "meetingId": MEETING,
         "sessionId": SESSION,
         "finalizationVersion": 1,
+        "finalizedAt": "2026-07-18T01:00:00Z",
         "state": "FINALIZED",
         "transcript": transcript,
         "transcriptSha256": hashlib.sha256(transcript.encode()).hexdigest(),
@@ -99,6 +102,17 @@ def _snapshot(**overrides: object) -> dict[str, object]:
     }
     body.update(overrides)
     return body
+
+
+def _snapshot_response(**overrides: object) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json=_snapshot(**overrides),
+        headers={
+            "X-Analysis-Job-Capability": "one-use-capability",
+            "X-Analysis-Job-Capability-Expires-At": "2026-07-18T01:15:00Z",
+        },
+    )
 
 
 def test_fetch_uses_separate_least_privilege_token_and_tenant_bound_path(
@@ -114,13 +128,26 @@ def test_fetch_uses_separate_least_privilege_token_and_tenant_bound_path(
                 token_form.update(parse_qs(request.content.decode()))
                 return httpx.Response(200, json={"access_token": "token", "expires_in": 60})
             transcript_request = request
-            return httpx.Response(200, json=_snapshot())
+            return httpx.Response(
+                200,
+                json=_snapshot(),
+                headers={
+                    "X-Analysis-Job-Capability": "one-use-capability",
+                    "X-Analysis-Job-Capability-Expires-At": "2026-07-18T01:15:00Z",
+                },
+            )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            snapshot = await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(
+            result = await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(
                 _event()
             )
-        assert snapshot.transcript == "Bütçe kararlaştırıldı."
+        assert result.snapshot.transcript == "Bütçe kararlaştırıldı."
+        assert result.snapshot.finalized_at == datetime.fromisoformat("2026-07-18T01:00:00+00:00")
+        assert result.analysis_job_capability.get_secret_value() == "one-use-capability"
+        assert result.analysis_job_capability_expires_at == datetime.fromisoformat(
+            "2026-07-18T01:15:00+00:00"
+        )
+        assert "one-use-capability" not in repr(result)
         assert transcript_request is not None
         return token_form, transcript_request
 
@@ -130,6 +157,8 @@ def test_fetch_uses_separate_least_privilege_token_and_tenant_bound_path(
     assert form["permissions"] == ["transcript:canonical:read"]
     assert request.headers["Authorization"] == "Bearer token"
     assert request.headers["X-Tenant-Id"] == TENANT
+    assert request.headers["X-Analysis-Run-Id"] == str(_event().analysis_run_id)
+    assert request.headers["X-Analysis-Spec-Version"] == "meeting-intelligence-v1"
     assert str(request.url).endswith(
         f"/tenants/{TENANT}/meetings/{MEETING}/sessions/{SESSION}/finalizations/1"
     )
@@ -140,13 +169,13 @@ def test_fetch_accepts_a_later_positive_finalization_version(tmp_path: Path) -> 
         async def handler(request: httpx.Request) -> httpx.Response:
             if request.url.host == "auth.test":
                 return httpx.Response(200, json={"access_token": "token"})
-            return httpx.Response(200, json=_snapshot(finalizationVersion=2))
+            return _snapshot_response(finalizationVersion=2)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            snapshot = await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(
+            result = await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(
                 _event(finalization_version=2)
             )
-        assert snapshot.finalization_version == 2
+        assert result.snapshot.finalization_version == 2
 
     asyncio.run(scenario())
 
@@ -159,6 +188,7 @@ def test_fetch_accepts_a_later_positive_finalization_version(tmp_path: Path) -> 
         {"finalizationVersion": 2},
         {"transcriptSha256": "0" * 64},
         {"segmentCount": 2},
+        {"finalizedAt": "2026-07-18T01:00:00"},
     ],
 )
 def test_foreign_nonfinalized_or_hash_mismatch_is_terminal(
@@ -168,13 +198,96 @@ def test_foreign_nonfinalized_or_hash_mismatch_is_terminal(
         async def handler(request: httpx.Request) -> httpx.Response:
             if request.url.host == "auth.test":
                 return httpx.Response(200, json={"access_token": "token"})
-            return httpx.Response(200, json=_snapshot(**override))
+            return _snapshot_response(**override)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             with pytest.raises(CanonicalTranscriptTerminalError):
                 await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(_event())
 
     asyncio.run(scenario())
+
+
+def test_delivery_refresh_validates_finalized_at_against_outboxed_tuple(
+    tmp_path: Path,
+) -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        request_headers: httpx.Headers | None = None
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal request_headers
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token"})
+            request_headers = request.headers
+            return _snapshot_response(finalizedAt="2026-07-18T01:00:01Z")
+
+        message = ClaimedMessage(
+            analysis_run_id="44444444-4444-4444-8444-444444444444",
+            meeting_id=MEETING,
+            payload={
+                "_canonical_tenant_id": TENANT,
+                "meeting_id": MEETING,
+                "transcript_session_id": SESSION,
+                "transcript_sha256": _snapshot()["transcriptSha256"],
+                "finalization_version": 1,
+                "finalized_at": "2026-07-18T01:00:00Z",
+                "analysis_spec_version": "meeting-intelligence-v1",
+            },
+            attempt_count=2,
+            created_at=1.0,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            capability, error = await HttpCanonicalTranscriptClient(
+                _settings(tmp_path), client
+            ).capability_for(message)
+        return capability, error, request_headers
+
+    capability, error, headers = asyncio.run(scenario())
+    assert capability is None
+    assert error is not None
+    assert error.disposition is DeliveryDisposition.TERMINAL
+    assert error.error_code == "transcript_identity_mismatch"
+    assert headers is not None
+    assert headers["X-Analysis-Run-Id"] == "44444444-4444-4444-8444-444444444444"
+    assert headers["X-Analysis-Spec-Version"] == "meeting-intelligence-v1"
+
+
+def test_delivery_refresh_retries_when_capability_has_no_delivery_window(
+    tmp_path: Path,
+) -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token"})
+            response = _snapshot_response()
+            response.headers["X-Analysis-Job-Capability-Expires-At"] = "2026-07-18T01:00:00Z"
+            return response
+
+        message = ClaimedMessage(
+            analysis_run_id="44444444-4444-4444-8444-444444444444",
+            meeting_id=MEETING,
+            payload={
+                "_canonical_tenant_id": TENANT,
+                "meeting_id": MEETING,
+                "transcript_session_id": SESSION,
+                "transcript_sha256": _snapshot()["transcriptSha256"],
+                "finalization_version": 1,
+                "finalized_at": "2026-07-18T01:00:00Z",
+                "analysis_spec_version": "meeting-intelligence-v1",
+            },
+            attempt_count=2,
+            created_at=1.0,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await HttpCanonicalTranscriptClient(_settings(tmp_path), client).capability_for(
+                message
+            )
+
+    capability, error = asyncio.run(scenario())
+    assert capability is None
+    assert error is not None
+    assert error.disposition is DeliveryDisposition.RETRY
+    assert error.error_code == "transcript_capability_expired"
+    assert error.retry_after_sec == 1.0
 
 
 def test_temporarily_missing_snapshot_is_retryable_without_response_body(

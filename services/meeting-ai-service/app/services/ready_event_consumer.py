@@ -123,6 +123,7 @@ class ReadyEventConsumerRuntime:
             self._inbox = SqliteReadyEventInbox(
                 delivery.store,
                 max_rows=settings.ready_consumer_inbox_max_rows,
+                max_failures=settings.ready_consumer_max_failures,
             )
             if self._redis is None:
                 self._redis = _build_redis_client(settings)
@@ -297,7 +298,8 @@ class ReadyEventConsumerRuntime:
     ) -> None:
         assert self._transcripts is not None
         try:
-            snapshot = await self._transcripts.fetch(event)
+            fetch_result = await self._transcripts.fetch(event)
+            snapshot = fetch_result.snapshot
             segments = (
                 [segment.model_dump() for segment in snapshot.segments]
                 if snapshot.segments is not None
@@ -314,7 +316,11 @@ class ReadyEventConsumerRuntime:
                 payload = build_ingestion_payload(
                     settings=self.settings,
                     meeting_id=str(event.meeting_id),
+                    tenant_id=str(event.tenant_id),
                     session_id=str(event.session_id),
+                    finalization_version=snapshot.finalization_version,
+                    finalized_at=snapshot.finalized_at,
+                    analysis_spec_version=self.settings.analysis_spec_version,
                     transcript=command.transcript,
                     result=result,
                     generated_at=command.generated_at or generated_at,
@@ -598,10 +604,10 @@ class ReadyEventConsumerRuntime:
                     extra={"err_class": type(exc).__name__},
                 )
                 await self._wait_after_error()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - outer worker boundary must stay alive
                 self._group_ready = False
                 self._last_error_code = f"redis_{type(exc).__name__}"
-                logger.exception(
+                logger.error(
                     "Ready-event consumer loop failure",
                     extra={"err_class": type(exc).__name__},
                 )
