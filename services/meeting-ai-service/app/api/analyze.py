@@ -68,6 +68,14 @@ async def analyze_endpoint(
 
     application: AnalysisApplicationService = request.app.state.analysis_application
     delivery: AnalysisDeliveryRuntime = request.app.state.analysis_delivery
+    if delivery.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Durable analysis requires the canonical transcript.ready flow; "
+                "direct transcript delivery is not accepted"
+            ),
+        )
     corr_id = _correlation_id(request)
     log_extra = {
         "correlation_id": corr_id,

@@ -56,11 +56,11 @@ def build_ingestion_payload(
     *,
     settings: Settings,
     meeting_id: str,
-    tenant_id: str | None = None,
+    tenant_id: str,
     session_id: str,
-    finalization_version: int | None = None,
-    finalized_at: datetime | None = None,
-    analysis_spec_version: str | None = None,
+    finalization_version: int,
+    finalized_at: datetime,
+    analysis_spec_version: str,
     transcript: str,
     result: AnalyzeResponse,
     generated_at: datetime,
@@ -97,33 +97,25 @@ def build_ingestion_payload(
         "actions": [_action_payload(item.model_dump()) for item in result.action_items],
         "supersedes_analysis_run_id": None,
     }
-    canonical_values = (tenant_id, finalization_version, finalized_at, analysis_spec_version)
-    if any(value is not None for value in canonical_values):
-        if any(value is None for value in canonical_values):
-            raise AnalysisDeliveryContractError("canonical analysis tuple is incomplete")
-        assert tenant_id is not None
-        assert finalization_version is not None
-        assert finalized_at is not None
-        assert analysis_spec_version is not None
-        try:
-            canonical_tenant_id = str(uuid.UUID(tenant_id))
-        except ValueError as exc:
-            raise AnalysisDeliveryContractError("tenant_id must be a UUID") from exc
-        if finalization_version < 1:
-            raise AnalysisDeliveryContractError("finalization_version must be positive")
-        if finalized_at.tzinfo is None or finalized_at.utcoffset() is None:
-            raise AnalysisDeliveryContractError("finalized_at must carry a timezone")
-        spec_version = analysis_spec_version.strip()
-        if not spec_version or len(spec_version) > 64:
-            raise AnalysisDeliveryContractError("analysis_spec_version exceeds backend contract")
-        payload.update(
-            {
-                "finalization_version": finalization_version,
-                "finalized_at": _utc_instant(finalized_at),
-                "analysis_spec_version": spec_version,
-                "_canonical_tenant_id": canonical_tenant_id,
-            }
-        )
+    try:
+        canonical_tenant_id = str(uuid.UUID(tenant_id))
+    except ValueError as exc:
+        raise AnalysisDeliveryContractError("tenant_id must be a UUID") from exc
+    if finalization_version < 1:
+        raise AnalysisDeliveryContractError("finalization_version must be positive")
+    if finalized_at.tzinfo is None or finalized_at.utcoffset() is None:
+        raise AnalysisDeliveryContractError("finalized_at must carry a timezone")
+    spec_version = analysis_spec_version.strip()
+    if not spec_version or len(spec_version) > 64:
+        raise AnalysisDeliveryContractError("analysis_spec_version exceeds backend contract")
+    payload.update(
+        {
+            "finalization_version": finalization_version,
+            "finalized_at": _utc_instant(finalized_at),
+            "analysis_spec_version": spec_version,
+            "_canonical_tenant_id": canonical_tenant_id,
+        }
+    )
     return payload
 
 
@@ -265,7 +257,11 @@ class AnalysisDeliveryRuntime:
         self,
         *,
         meeting_id: str | None,
+        tenant_id: str | None = None,
         session_id: str | None,
+        finalization_version: int | None = None,
+        finalized_at: datetime | None = None,
+        analysis_spec_version: str | None = None,
         transcript: str,
         result: AnalyzeResponse,
         analysis_run_id: str | None = None,
@@ -278,11 +274,30 @@ class AnalysisDeliveryRuntime:
             raise AnalysisDeliveryContractError(
                 "meeting_id and session_id are required when durable delivery is enabled"
             )
+        canonical_values = (
+            tenant_id,
+            finalization_version,
+            finalized_at,
+            analysis_spec_version,
+        )
+        if any(value is None for value in canonical_values):
+            mai_ingestion_enqueue_total.labels(outcome="invalid_contract").inc()
+            raise AnalysisDeliveryContractError(
+                "durable delivery requires a canonical transcript.ready tuple"
+            )
+        assert tenant_id is not None
+        assert finalization_version is not None
+        assert finalized_at is not None
+        assert analysis_spec_version is not None
         run_id = analysis_run_id or str(uuid.uuid4())
         payload = build_ingestion_payload(
             settings=self.settings,
             meeting_id=meeting_id,
+            tenant_id=tenant_id,
             session_id=session_id,
+            finalization_version=finalization_version,
+            finalized_at=finalized_at,
+            analysis_spec_version=analysis_spec_version,
             transcript=transcript,
             result=result,
             generated_at=generated_at or datetime.now(UTC),

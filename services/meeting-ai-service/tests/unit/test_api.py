@@ -215,7 +215,7 @@ def _configure_ingestion(monkeypatch, tmp_path: Path, *, max_rows: int = 10) -> 
     monkeypatch.setenv("MAI_INGESTION_MAX_ROWS", str(max_rows))
 
 
-def test_analyze_durably_enqueues_before_returning(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_analyze_rejects_noncanonical_durable_delivery(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     _configure_ingestion(monkeypatch, tmp_path)
     with TestClient(app) as client:
         resp = client.post(
@@ -226,9 +226,12 @@ def test_analyze_durably_enqueues_before_returning(monkeypatch, tmp_path: Path) 
                 "session_id": "session-1",
             },
         )
-    assert resp.status_code == 200
-    assert resp.headers["X-Analysis-Delivery"] == "queued"
-    assert len(resp.headers["X-Analysis-Run-Id"]) == 36
+    assert resp.status_code == 422
+    assert resp.json()["detail"].startswith(
+        "Durable analysis requires the canonical transcript.ready flow"
+    )
+    assert "X-Analysis-Delivery" not in resp.headers
+    assert "X-Analysis-Run-Id" not in resp.headers
 
 
 def test_analyze_requires_canonical_ids_when_delivery_enabled(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -243,7 +246,7 @@ def test_analyze_requires_canonical_ids_when_delivery_enabled(monkeypatch, tmp_p
     assert invalid.status_code == 422
 
 
-def test_analyze_fails_closed_when_durable_queue_is_full(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_direct_analyze_cannot_fill_canonical_delivery_outbox(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     _configure_ingestion(monkeypatch, tmp_path, max_rows=1)
     payload = {
         "transcript": "Bütçe kararlaştırıldı.",
@@ -253,9 +256,12 @@ def test_analyze_fails_closed_when_durable_queue_is_full(monkeypatch, tmp_path: 
     with TestClient(app) as client:
         first = client.post("/analyze", json=payload)
         second = client.post("/analyze", json=payload)
-    assert first.status_code == 200
-    assert second.status_code == 503
-    assert second.headers["Retry-After"] == "30"
+    # #263: direct /analyze can no longer feed the durable ingestion outbox —
+    # both responses must reject with 422 (canonical transcript.ready flow
+    # required) instead of the old 200/503 outbox-throttle pair.
+    assert first.status_code == second.status_code == 422
+    assert "Retry-After" not in first.headers
+    assert "Retry-After" not in second.headers
 
 
 # ── Faz 24 live analysis (Zeynep 2026-07-20 kapsam kararı) ─────────────────

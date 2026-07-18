@@ -29,6 +29,7 @@ KEY = b"K" * 32
 MEETING_ID = "11111111-1111-4111-8111-111111111111"
 TENANT_ID = "33333333-3333-4333-8333-333333333333"
 SESSION_ID = "22222222-2222-4222-8222-222222222222"
+FINALIZED_AT = datetime(2026, 7, 18, 1, 0, tzinfo=UTC)
 
 
 class FakeTransport:
@@ -114,6 +115,15 @@ def _result() -> AnalyzeResponse:
     )
 
 
+def _canonical_tuple() -> dict[str, object]:
+    return {
+        "tenant_id": TENANT_ID,
+        "finalization_version": 1,
+        "finalized_at": FINALIZED_AT,
+        "analysis_spec_version": "meeting-intelligence-v1",
+    }
+
+
 def test_payload_matches_backend_contract_and_preserves_grounding(tmp_path: Path) -> None:
     payload = build_ingestion_payload(
         settings=_settings(tmp_path / "outbox.sqlite3"),
@@ -174,6 +184,7 @@ def test_valid_iso_due_is_normalized_to_utc(tmp_path: Path) -> None:
     payload = build_ingestion_payload(
         settings=_settings(tmp_path / "outbox.sqlite3"),
         meeting_id=MEETING_ID,
+        **_canonical_tuple(),
         session_id="session-1",
         transcript="A",
         result=result,
@@ -191,6 +202,7 @@ def test_delivery_refuses_unredacted_or_backend_oversized_output(tmp_path: Path)
         build_ingestion_payload(
             settings=_settings(tmp_path / "outbox.sqlite3"),
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=result,
@@ -203,6 +215,7 @@ def test_delivery_refuses_unredacted_or_backend_oversized_output(tmp_path: Path)
         build_ingestion_payload(
             settings=_settings(tmp_path / "outbox.sqlite3"),
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=result,
@@ -222,6 +235,7 @@ def test_enqueue_survives_restart_and_is_delivered(tmp_path: Path) -> None:
         )
         run_id = await first.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="Bütçe onaylandı.",
             result=_result(),
@@ -241,6 +255,33 @@ def test_enqueue_survives_restart_and_is_delivered(tmp_path: Path) -> None:
         assert len(transport.calls) == 1
         assert transport.calls[0].analysis_run_id == run_id
         assert store.summary().pending == 0
+
+    asyncio.run(scenario())
+
+
+def test_noncanonical_analysis_is_rejected_before_outbox_write(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "outbox.sqlite3"
+        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        runtime = AnalysisDeliveryRuntime(
+            _settings(path),
+            store=store,
+            transport=FakeTransport([]),
+        )
+
+        with pytest.raises(
+            AnalysisDeliveryContractError,
+            match="canonical transcript.ready tuple",
+        ):
+            await runtime.enqueue_analysis(
+                meeting_id=MEETING_ID,
+                session_id=SESSION_ID,
+                transcript="A",
+                result=_result(),
+            )
+
+        summary = store.summary()
+        assert summary.pending == summary.in_flight == summary.dead == 0
 
     asyncio.run(scenario())
 
@@ -373,6 +414,7 @@ def test_retry_then_success_reuses_same_analysis_run_id(tmp_path: Path) -> None:
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         run_id = await runtime.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=_result(),
@@ -401,6 +443,7 @@ def test_enqueue_does_not_wait_for_blocked_network_delivery(tmp_path: Path) -> N
         run_id = await asyncio.wait_for(
             runtime.enqueue_analysis(
                 meeting_id=MEETING_ID,
+                **_canonical_tuple(),
                 session_id="session-1",
                 transcript="A",
                 result=_result(),
@@ -427,6 +470,7 @@ def test_shutdown_cancellation_preserves_leased_payload_for_recovery(tmp_path: P
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         await runtime.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=_result(),
@@ -465,6 +509,7 @@ def test_retry_limit_moves_payload_to_dead_letter(tmp_path: Path) -> None:
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         await runtime.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=_result(),
@@ -518,6 +563,7 @@ def test_terminal_failure_enters_dead_letter_and_degrades_health(tmp_path: Path)
         )
         await runtime.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=_result(),

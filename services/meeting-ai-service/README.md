@@ -124,18 +124,23 @@ MAI_BACKEND=ollama python scripts/intel_eval.py \
 
 ## API
 
-- `POST /analyze` — JSON `{transcript, meeting_id?, session_id?}` → `AnalyzeResponse`
+- `POST /analyze` — JSON `{transcript, meeting_id?, session_id?}` → preview
+  `AnalyzeResponse` only while durable ingestion is disabled
 - `GET /health`, `GET /ready`, `GET /metrics` (`mai_*`, `kvkk_*`)
 
 ## Durable analysis-result delivery (#247)
 
-When `MAI_INGESTION_ENABLED=true`, a successful `/analyze` call is committed to an
-encrypted local SQLite-WAL outbox before the HTTP response returns. Network delivery
-to meeting-service runs in a lifespan worker, so Keycloak/meeting-service latency is
-not added to the user-visible analysis path. The same `analysisRunId` is reused for
-every attempt and sent as `Idempotency-Key`; `200` replay and `201` create both ACK
-the local row. Retryable network/401/429/5xx results use exponential backoff and
-jitter. Terminal 4xx or the attempt limit moves the encrypted row to DLQ.
+When `MAI_INGESTION_ENABLED=true`, durable outbox writes are accepted only from the
+canonical `meeting.transcript.ready` consumer with the complete tenant, meeting,
+session, finalization, finalized-at, and analysis-spec tuple. The direct `/analyze`
+route cannot establish that trusted tuple and returns `422` instead of queueing a
+result that meeting-service must reject or allowing a caller to select another
+tenant's finalization. Network delivery to meeting-service runs in a lifespan worker.
+The same deterministic `analysisRunId` is reused for every attempt and sent as
+`Idempotency-Key`; every POST obtains a fresh, tuple-bound one-use capability from
+transcript-service. A `200` replay and `201` create both ACK the local row. Retryable
+network/401/429/5xx results use exponential backoff and jitter. Terminal 4xx or the
+attempt limit moves the encrypted row to DLQ.
 
 The outbox contains no raw transcript. It stores the transcript SHA-256 and the
 already-redacted analysis payload. That payload is still sensitive and is encrypted
