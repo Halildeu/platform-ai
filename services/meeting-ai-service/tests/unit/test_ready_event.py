@@ -94,7 +94,7 @@ def test_analysis_run_id_changes_only_with_identity_tuple() -> None:
     [
         ({b"tenantId": uuid.uuid4().bytes}, None),
         ({b"eventKey": b"wrong"}, None),
-        ({}, _payload(finalizationVersion=2)),
+        ({}, _payload(finalizationVersion=0)),
         ({}, _payload(analysisRunId="not-allowed")),
         ({}, _payload(orgId=str(uuid.uuid4()))),
     ],
@@ -109,6 +109,26 @@ def test_parser_rejects_cross_tenant_noncanonical_or_future_contract(
             event_fields,
             analysis_spec_version="meeting-intelligence-v1",
         )
+
+
+def test_parser_accepts_later_finalization_cycle() -> None:
+    raw = _payload(finalizationVersion=2)
+    event = parse_transcript_ready_event(
+        _fields(
+            raw,
+            eventKey=f"meeting.transcript|{SESSION}|meeting.transcript.ready|2",
+        ),
+        analysis_spec_version="meeting-intelligence-v1",
+    )
+
+    assert event.finalization_version == 2
+    assert event.event_key.endswith("|2")
+    assert event.analysis_run_id != analysis_run_id_for(
+        meeting_id=uuid.UUID(MEETING),
+        session_id=uuid.UUID(SESSION),
+        finalization_version=1,
+        analysis_spec_version="meeting-intelligence-v1",
+    )
 
 
 def test_same_semantic_json_with_different_bytes_gets_a_different_hash() -> None:

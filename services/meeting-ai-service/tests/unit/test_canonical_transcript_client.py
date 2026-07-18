@@ -51,7 +51,7 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _event():  # type: ignore[no-untyped-def]
+def _event(*, finalization_version: int = 1):  # type: ignore[no-untyped-def]
     payload = json.dumps(
         {
             "schema": "meeting.event.v1",
@@ -62,14 +62,17 @@ def _event():  # type: ignore[no-untyped-def]
             "orgId": TENANT,
             "generatedAt": "2026-07-18T01:02:03Z",
             "transcriptSessionId": SESSION,
-            "finalizationVersion": 1,
+            "finalizationVersion": finalization_version,
             "segmentCount": 1,
         },
         separators=(",", ":"),
     )
     return parse_transcript_ready_event(
         {
-            "eventKey": f"meeting.transcript|{SESSION}|meeting.transcript.ready|1",
+            "eventKey": (
+                f"meeting.transcript|{SESSION}|meeting.transcript.ready|"
+                f"{finalization_version}"
+            ),
             "eventType": "meeting.transcript.ready",
             "aggregateId": SESSION,
             "meetingId": MEETING,
@@ -130,6 +133,22 @@ def test_fetch_uses_separate_least_privilege_token_and_tenant_bound_path(
     assert str(request.url).endswith(
         f"/tenants/{TENANT}/meetings/{MEETING}/sessions/{SESSION}/finalizations/1"
     )
+
+
+def test_fetch_accepts_a_later_positive_finalization_version(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token"})
+            return httpx.Response(200, json=_snapshot(finalizationVersion=2))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            snapshot = await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(
+                _event(finalization_version=2)
+            )
+        assert snapshot.finalization_version == 2
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

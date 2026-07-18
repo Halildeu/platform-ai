@@ -157,6 +157,8 @@ class Settings(BaseSettings):
     )
     ready_redis_dead_letter_maxlen: int = Field(default=10_000, ge=1, le=1_000_000)
     ready_redis_block_ms: int = Field(default=1_000, ge=10, le=60_000)
+    ready_redis_connect_timeout_sec: float = Field(default=5.0, ge=0.1, le=120.0)
+    ready_redis_command_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
     ready_redis_batch_size: int = Field(default=1, ge=1, le=100)
     ready_redis_claim_idle_ms: int = Field(default=120_000, ge=100, le=3_600_000)
     ready_consumer_lease_sec: float = Field(default=120.0, ge=5.0, le=7_200.0)
@@ -372,6 +374,10 @@ class Settings(BaseSettings):
         if self.ready_redis_claim_idle_ms / 1000 < self.ready_consumer_lease_sec:
             raise ValueError(
                 "ready Redis claim idle time must be >= the ready consumer processing lease"
+            )
+        if self.ready_redis_command_timeout_sec <= self.ready_redis_block_ms / 1000:
+            raise ValueError(
+                "ready Redis command timeout must exceed the blocking read window"
             )
         return self
 

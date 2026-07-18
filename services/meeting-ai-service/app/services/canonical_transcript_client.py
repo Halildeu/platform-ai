@@ -52,7 +52,11 @@ class CanonicalTranscriptSnapshot(BaseModel):
     tenant_id: str = Field(alias="tenantId")
     meeting_id: str = Field(alias="meetingId")
     session_id: str = Field(alias="sessionId")
-    finalization_version: Literal[1] = Field(alias="finalizationVersion")
+    finalization_version: int = Field(
+        alias="finalizationVersion",
+        ge=1,
+        le=2_147_483_647,
+    )
     state: Literal["FINALIZED"]
     transcript: str = Field(min_length=1, repr=False)
     transcript_sha256: str = Field(

@@ -370,6 +370,9 @@ class ReadyEventConsumerRuntime:
                 error_code=f"processing_{type(exc).__name__}",
             )
             return
+        except ReadyInboxLeaseLostError:
+            mai_ready_consumer_events_total.labels(outcome="lease_lost").inc()
+            return
         except OutboxError as exc:
             if isinstance(exc, OutboxConflictError):
                 await self._terminal(
@@ -400,9 +403,6 @@ class ReadyEventConsumerRuntime:
                 error_code=str(error_code),
                 failure_count=claim.failure_count,
             )
-            return
-        except ReadyInboxLeaseLostError:
-            mai_ready_consumer_events_total.labels(outcome="lease_lost").inc()
             return
         except Exception as exc:  # noqa: BLE001 - persist bounded retry without exception text
             logger.error(
@@ -766,6 +766,10 @@ def _build_redis_client(settings: Settings) -> Any:
     return Redis.from_url(
         settings.ready_redis_url.get_secret_value(),
         decode_responses=False,
+        socket_connect_timeout=settings.ready_redis_connect_timeout_sec,
+        socket_timeout=settings.ready_redis_command_timeout_sec,
+        health_check_interval=30,
+        retry_on_timeout=False,
     )
 
 

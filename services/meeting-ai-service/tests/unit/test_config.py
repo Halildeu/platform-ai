@@ -180,6 +180,12 @@ def test_ready_consumer_is_default_off_and_fails_closed_on_partial_config(
         Settings(**values)
 
     values = _ready_values(tmp_path)
+    values["ready_redis_block_ms"] = 10_000
+    values["ready_redis_command_timeout_sec"] = 10.0
+    with pytest.raises(ValidationError, match="must exceed the blocking read window"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
     values["ready_producer_replay_horizon_sec"] = 0.0
     with pytest.raises(ValidationError, match="explicitly configured"):
         Settings(**values)

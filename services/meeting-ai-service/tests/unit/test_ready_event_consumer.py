@@ -8,9 +8,12 @@ import hashlib
 import json
 import random
 import sqlite3
+import sys
 import time
 from pathlib import Path
+from types import ModuleType
 
+import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
@@ -23,7 +26,8 @@ from app.services.canonical_transcript_client import (
 )
 from app.services.durable_outbox import PayloadCipher
 from app.services.meeting_service_client import DeliveryAttempt, DeliveryDisposition
-from app.services.ready_event_consumer import ReadyEventConsumerRuntime
+from app.services.ready_event_consumer import ReadyEventConsumerRuntime, _build_redis_client
+from app.services.ready_event_inbox import ReadyInboxLeaseLostError
 
 MEETING = "11111111-1111-4111-8111-111111111111"
 SESSION = "22222222-2222-4222-8222-222222222222"
@@ -168,6 +172,39 @@ def _fields(*, generated_at: str = "2026-07-18T01:02:03Z") -> dict[object, objec
     }
 
 
+def test_redis_client_has_bounded_connect_and_command_timeouts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class StubRedis:
+        @classmethod
+        def from_url(cls, url: str, **kwargs: object) -> object:
+            captured["url"] = url
+            captured.update(kwargs)
+            return object()
+
+    redis_package = ModuleType("redis")
+    redis_asyncio = ModuleType("redis.asyncio")
+    redis_asyncio.Redis = StubRedis  # type: ignore[attr-defined]
+    redis_package.asyncio = redis_asyncio  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "redis", redis_package)
+    monkeypatch.setitem(sys.modules, "redis.asyncio", redis_asyncio)
+
+    settings = _settings(
+        tmp_path,
+        ready_redis_connect_timeout_sec=3.0,
+        ready_redis_command_timeout_sec=7.0,
+    )
+    _build_redis_client(settings)
+    assert captured["url"] == "redis://redis.test:6379/0"
+    assert captured["socket_connect_timeout"] == 3.0
+    assert captured["socket_timeout"] == 7.0
+    assert captured["health_check_interval"] == 30
+    assert captured["retry_on_timeout"] is False
+
+
 def _runtime(
     tmp_path: Path,
     *,
@@ -225,6 +262,33 @@ def test_redis_message_stays_pending_until_analysis_outbox_commit(tmp_path: Path
     ack_count, outbox_pending = asyncio.run(scenario())
     assert ack_count == 1
     assert outbox_pending == 1
+
+
+def test_lost_inbox_lease_does_not_ack_or_consume_retry_budget(tmp_path: Path) -> None:
+    async def scenario() -> tuple[FakeRedis, tuple[str, int], int]:
+        runtime, delivery, redis, _ = _runtime(tmp_path)
+        assert runtime._inbox is not None
+
+        def lose_lease(**_: object) -> bool:
+            raise ReadyInboxLeaseLostError("ready-event processing lease was lost")
+
+        runtime._inbox.commit_outboxed = lose_lease  # type: ignore[method-assign]
+        await runtime.process_message("1-0", _fields())
+        with sqlite3.connect(_settings(tmp_path).ingestion_store_path) as connection:
+            row = connection.execute(
+                "SELECT state, failure_count FROM meeting_transcript_ready_inbox "
+                "WHERE event_key_digest = ?",
+                (_event_lookup_digest(),),
+            ).fetchone()
+        assert row is not None
+        assert delivery.store is not None
+        return redis, (str(row[0]), int(row[1])), delivery.store.summary().pending
+
+    redis, inbox_row, outbox_pending = asyncio.run(scenario())
+    assert redis.acked == []
+    assert redis.added == []
+    assert inbox_row == ("PROCESSING", 0)
+    assert outbox_pending == 0
 
 
 def test_same_key_different_wire_bytes_dead_letters_metadata_only(tmp_path: Path) -> None:

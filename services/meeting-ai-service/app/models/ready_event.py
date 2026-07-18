@@ -30,7 +30,9 @@ class TranscriptReadyEnvelope(BaseModel):
     org_id: uuid.UUID = Field(alias="orgId")
     generated_at: datetime = Field(alias="generatedAt")
     transcript_session_id: uuid.UUID = Field(alias="transcriptSessionId")
-    finalization_version: Literal[1] = Field(alias="finalizationVersion")
+    finalization_version: Annotated[int, Field(ge=1, le=2_147_483_647)] = Field(
+        alias="finalizationVersion"
+    )
     segment_count: Annotated[int, Field(ge=1, le=1_000_000)] = Field(alias="segmentCount")
 
     @model_validator(mode="after")
