@@ -41,11 +41,17 @@ class CanonicalTranscriptTerminalError(CanonicalTranscriptError):
 
 
 class CanonicalTranscriptSegment(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", allow_inf_nan=False)
 
-    text: str = Field(min_length=1, repr=False)
+    text: str | None = Field(default=None, min_length=1, repr=False)
     start: float = Field(ge=0.0)
     end: float | None = Field(default=None, ge=0.0)
+
+    @model_validator(mode="after")
+    def _verify_timing(self) -> CanonicalTranscriptSegment:
+        if self.end is not None and self.end < self.start:
+            raise ValueError("canonical transcript segment end precedes start")
+        return self
 
 
 class CanonicalTranscriptSnapshot(BaseModel):
@@ -69,7 +75,7 @@ class CanonicalTranscriptSnapshot(BaseModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     segment_count: int = Field(alias="segmentCount", ge=1, le=1_000_000)
-    segments: list[CanonicalTranscriptSegment] | None = None
+    segments: list[CanonicalTranscriptSegment] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _verify_content_hash(self) -> CanonicalTranscriptSnapshot:
@@ -78,16 +84,19 @@ class CanonicalTranscriptSnapshot(BaseModel):
         actual = hashlib.sha256(self.transcript.encode("utf-8")).hexdigest()
         if actual != self.transcript_sha256:
             raise ValueError("canonical transcript content hash mismatch")
-        if self.segments is not None and len(self.segments) != self.segment_count:
+        if len(self.segments) != self.segment_count:
             raise ValueError("canonical transcript segment count mismatch")
+        reconstructed = "\n".join(
+            segment.text for segment in self.segments if segment.text is not None
+        )
+        if reconstructed != self.transcript:
+            raise ValueError("canonical transcript does not match its segments")
         return self
 
 
 @dataclass(frozen=True)
 class CanonicalTranscriptFetchResult:
     snapshot: CanonicalTranscriptSnapshot
-    analysis_job_capability: SecretStr
-    analysis_job_capability_expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -107,9 +116,6 @@ class CanonicalTranscriptPort(Protocol):
     async def fetch(self, event: ParsedTranscriptReadyEvent) -> CanonicalTranscriptFetchResult: ...
 
     async def aclose(self) -> None: ...
-
-
-CAPABILITY_DELIVERY_MIN_REMAINING = timedelta(seconds=5)
 
 
 class HttpCanonicalTranscriptClient:
@@ -155,7 +161,7 @@ class HttpCanonicalTranscriptClient:
                 error_code="transcript_delivery_tuple_invalid",
             )
         try:
-            result = await self._fetch(query)
+            capability, capability_expires_at = await self._issue_capability(query)
         except CanonicalTranscriptRetryableError as exc:
             return None, DeliveryAttempt(
                 DeliveryDisposition.RETRY,
@@ -167,15 +173,19 @@ class HttpCanonicalTranscriptClient:
                 DeliveryDisposition.TERMINAL,
                 error_code=exc.error_code,
             )
-        if result.analysis_job_capability_expires_at <= (
-            datetime.now(UTC) + CAPABILITY_DELIVERY_MIN_REMAINING
-        ):
+        minimum_remaining = timedelta(
+            seconds=(
+                self._settings.ingestion_timeout_sec
+                + self._settings.transcript_service_capability_clock_skew_sec
+            )
+        )
+        if capability_expires_at <= datetime.now(UTC) + minimum_remaining:
             return None, DeliveryAttempt(
                 DeliveryDisposition.RETRY,
                 error_code="transcript_capability_expired",
                 retry_after_sec=1.0,
             )
-        return result.analysis_job_capability, None
+        return capability, None
 
     async def _fetch(self, query: _CanonicalTranscriptQuery) -> CanonicalTranscriptFetchResult:
         token, token_error = await self._tokens.get_token()
@@ -225,14 +235,8 @@ class HttpCanonicalTranscriptClient:
             raise CanonicalTranscriptTerminalError(f"transcript_http_{response.status_code}")
         try:
             snapshot = CanonicalTranscriptSnapshot.model_validate_json(response.content)
-            capability = response.headers["X-Analysis-Job-Capability"].strip()
-            capability_expires_at = _aware_datetime(
-                response.headers["X-Analysis-Job-Capability-Expires-At"]
-            )
-            if not capability:
-                raise ValueError("empty capability")
-        except (KeyError, ValidationError, ValueError) as exc:
-            raise CanonicalTranscriptTerminalError("transcript_invalid_response") from exc
+        except (ValidationError, ValueError):
+            raise CanonicalTranscriptTerminalError("transcript_invalid_response") from None
         if len(snapshot.transcript) > self._settings.max_transcript_chars:
             raise CanonicalTranscriptTerminalError("transcript_too_large")
         if (
@@ -248,11 +252,76 @@ class HttpCanonicalTranscriptClient:
             )
         ):
             raise CanonicalTranscriptTerminalError("transcript_identity_mismatch")
-        return CanonicalTranscriptFetchResult(
-            snapshot=snapshot,
-            analysis_job_capability=SecretStr(capability),
-            analysis_job_capability_expires_at=capability_expires_at,
+        return CanonicalTranscriptFetchResult(snapshot=snapshot)
+
+    async def _issue_capability(
+        self, query: _CanonicalTranscriptQuery
+    ) -> tuple[SecretStr, datetime]:
+        token, token_error = await self._tokens.get_token()
+        if token_error is not None:
+            if token_error.disposition is DeliveryDisposition.RETRY:
+                raise CanonicalTranscriptRetryableError(
+                    token_error.error_code,
+                    token_error.retry_after_sec,
+                )
+            raise CanonicalTranscriptTerminalError(token_error.error_code)
+        assert token is not None
+
+        path = self._settings.transcript_service_capability_path_template.format(
+            tenant_id=query.tenant_id,
+            meeting_id=query.meeting_id,
+            session_id=query.session_id,
+            finalization_version=query.finalization_version,
         )
+        url = self._settings.transcript_service_base_url.rstrip("/") + path
+        try:
+            response = await self._client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-Tenant-Id": str(query.tenant_id),
+                    "X-Meeting-Id": str(query.meeting_id),
+                    "X-Transcript-Session-Id": str(query.session_id),
+                    "X-Analysis-Run-Id": str(query.analysis_run_id),
+                    "X-Analysis-Spec-Version": query.analysis_spec_version,
+                    "X-Transcript-Finalized-At": (
+                        query.finalized_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+                        if query.finalized_at is not None
+                        else ""
+                    ),
+                    "X-Transcript-Sha256": query.transcript_sha256 or "",
+                },
+                timeout=self._settings.transcript_service_timeout_sec,
+            )
+        except (httpx.HTTPError, MeetingServiceTlsError) as exc:
+            raise CanonicalTranscriptRetryableError(
+                f"transcript_capability_network_{type(exc).__name__}"
+            ) from exc
+
+        if response.status_code == 401:
+            self._tokens.invalidate()
+            raise CanonicalTranscriptRetryableError("transcript_capability_http_401")
+        if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
+            raise CanonicalTranscriptRetryableError(
+                f"transcript_capability_http_{response.status_code}",
+                _retry_after_seconds(response),
+            )
+        if response.status_code != 200:
+            raise CanonicalTranscriptTerminalError(
+                f"transcript_capability_http_{response.status_code}"
+            )
+        try:
+            capability = response.headers["X-Analysis-Job-Capability"].strip()
+            capability_expires_at = _aware_datetime(
+                response.headers["X-Analysis-Job-Capability-Expires-At"]
+            )
+            if not capability:
+                raise ValueError("empty capability")
+        except (KeyError, ValueError):
+            raise CanonicalTranscriptTerminalError(
+                "transcript_capability_invalid_response"
+            ) from None
+        return SecretStr(capability), capability_expires_at
 
     async def aclose(self) -> None:
         await self._client.aclose()

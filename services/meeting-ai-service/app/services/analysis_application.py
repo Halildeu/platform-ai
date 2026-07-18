@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
-from starlette.concurrency import run_in_threadpool
+import anyio
 
 from app.core.config import Settings
 from app.models.schemas import AnalyzeResponse
@@ -64,10 +64,11 @@ class AnalysisApplicationService:
             raise AnalysisTranscriptTooLargeError("transcript exceeds configured limit")
         try:
             result = await asyncio.wait_for(
-                run_in_threadpool(
+                anyio.to_thread.run_sync(
                     self._analyzer.analyze,
                     command.transcript,
                     command.segments,
+                    abandon_on_cancel=True,
                 ),
                 timeout=self._settings.request_timeout,
             )

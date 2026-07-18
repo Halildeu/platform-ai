@@ -21,6 +21,7 @@ from app.services.ready_event_inbox import (
     ReadyClaimDisposition,
     ReadyDeadReason,
     ReadyEventIdentity,
+    ReadyInboxLeaseLostError,
     ReadyInboxState,
     SqliteReadyEventInbox,
 )
@@ -30,10 +31,10 @@ HASH_A = "a" * 64
 HASH_B = "b" * 64
 
 
-def _lookup_digest(event_key: str) -> str:
+def _lookup_digest(lookup_key: str) -> str:
     return PayloadCipher({"v1": KEY}, "v1").lookup_digests(
         purpose="ready-event-inbox",
-        value=event_key,
+        value=lookup_key,
     )[0]
 
 
@@ -46,13 +47,18 @@ def _stores(path: Path) -> tuple[SqliteOutboxStore, SqliteReadyEventInbox]:
     return outbox, SqliteReadyEventInbox(outbox, max_rows=20, max_failures=3)
 
 
-def _identity(*, payload_hash: str = HASH_A, run_id: str = "run-1") -> ReadyEventIdentity:
+def _identity(
+    *,
+    payload_hash: str = HASH_A,
+    run_id: str = "run-1",
+    tenant_id: str = "33333333-3333-4333-8333-333333333333",
+) -> ReadyEventIdentity:
     return ReadyEventIdentity(
         event_key=(
             "meeting.transcript|22222222-2222-4222-8222-222222222222" "|meeting.transcript.ready|1"
         ),
         payload_sha256=payload_hash,
-        tenant_id="33333333-3333-4333-8333-333333333333",
+        tenant_id=tenant_id,
         meeting_id="11111111-1111-4111-8111-111111111111",
         session_id="22222222-2222-4222-8222-222222222222",
         finalization_version=1,
@@ -89,12 +95,104 @@ def _create_version_3_inbox(path: Path, identity: ReadyEventIdentity) -> None:
         )
 
 
-def test_migration_upgrades_store_to_encrypted_version_4(tmp_path: Path) -> None:
+def _upgrade_to_legacy_version_4(path: Path) -> None:
+    cipher = PayloadCipher({"v1": KEY}, "v1")
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM meeting_transcript_ready_inbox").fetchone()
+        assert row is not None
+        sql = (
+            files("app.migrations")
+            .joinpath("0004_ready_event_inbox_encryption.sql")
+            .read_text(encoding="utf-8")
+        )
+        connection.execute(sql.strip().rstrip(";"))
+        envelope: dict[str, object] = {
+            "eventKey": row["event_key"],
+            "payloadSha256": row["payload_sha256"],
+            "tenantId": row["tenant_id"],
+            "meetingId": row["meeting_id"],
+            "sessionId": row["session_id"],
+            "finalizationVersion": row["finalization_version"],
+            "analysisRunId": row["analysis_run_id"],
+        }
+        key_id, digest, nonce, ciphertext = cipher.encrypt_metadata(
+            purpose="ready-event-inbox",
+            lookup_value=str(row["event_key"]),
+            payload=envelope,
+        )
+        connection.execute(
+            """
+            INSERT INTO meeting_transcript_ready_inbox_v4 (
+                event_key_digest, identity_key_id, identity_nonce,
+                identity_ciphertext, state, failure_count,
+                lease_recovery_count, next_attempt_at, lease_owner,
+                lease_until, created_at, updated_at, last_error_code,
+                dlq_published_at, dead_reason, redrive_count,
+                last_redriven_at, last_redrive_reference
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                digest,
+                key_id,
+                nonce,
+                ciphertext,
+                row["state"],
+                row["failure_count"],
+                row["lease_recovery_count"],
+                row["next_attempt_at"],
+                row["lease_owner"],
+                row["lease_until"],
+                row["created_at"],
+                row["updated_at"],
+                row["last_error_code"],
+                row["dlq_published_at"],
+                row["dead_reason"],
+                row["redrive_count"],
+                row["last_redriven_at"],
+                row["last_redrive_reference"],
+            ),
+        )
+        connection.execute("DROP TABLE meeting_transcript_ready_inbox")
+        connection.execute(
+            "ALTER TABLE meeting_transcript_ready_inbox_v4 "
+            "RENAME TO meeting_transcript_ready_inbox"
+        )
+        connection.execute(
+            """
+            CREATE INDEX idx_meeting_transcript_ready_due
+            ON meeting_transcript_ready_inbox(
+                state, next_attempt_at, lease_until, created_at
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX idx_meeting_transcript_ready_terminal
+            ON meeting_transcript_ready_inbox(state, updated_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE meeting_ai_store_metadata (
+                name TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO meeting_ai_store_metadata(name, value) VALUES (?, 'complete')",
+            (SqliteOutboxStore._INBOX_SCRUB_MARKER,),
+        )
+        connection.execute("PRAGMA user_version=4")
+
+
+def test_migration_upgrades_store_to_lease_fenced_version_5(tmp_path: Path) -> None:
     path = tmp_path / "delivery.sqlite3"
     _stores(path)
 
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
         columns = {
             row[1]
             for row in connection.execute(
@@ -109,6 +207,7 @@ def test_migration_upgrades_store_to_encrypted_version_4(tmp_path: Path) -> None
         "lease_recovery_count",
         "dead_reason",
         "redrive_count",
+        "lease_token",
     } <= columns
     assert {"event_key", "payload_sha256", "tenant_id", "analysis_run_id"}.isdisjoint(columns)
 
@@ -159,6 +258,52 @@ def test_version_3_plaintext_identity_is_encrypted_and_scrubbed_on_upgrade(
         assert plaintext.encode() not in durable_bytes
 
 
+def test_version_4_event_only_lookup_is_tenant_bound_on_upgrade(tmp_path: Path) -> None:
+    path = tmp_path / "delivery.sqlite3"
+    identity = _identity()
+    _create_version_3_inbox(path, identity)
+    _upgrade_to_legacy_version_4(path)
+    legacy_digest = _lookup_digest(identity.event_key)
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute(
+            "SELECT event_key_digest FROM meeting_transcript_ready_inbox"
+        ).fetchone() == (legacy_digest,)
+
+    _, inbox = _stores(path)
+    claim = inbox.register_and_claim(identity, owner="worker", lease_sec=30.0, now=2.0)
+    assert claim.disposition is ReadyClaimDisposition.CLAIMED
+    assert claim.lease_token is not None
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        rows = connection.execute(
+            "SELECT event_key_digest, lease_token FROM meeting_transcript_ready_inbox"
+        ).fetchall()
+    assert rows == [(_lookup_digest(identity.lookup_key), claim.lease_token)]
+
+
+def test_claim_preserves_stored_run_id_across_identity_algorithm_upgrade(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "delivery.sqlite3"
+    legacy_identity = _identity(run_id="legacy-run-id")
+    _create_version_3_inbox(path, legacy_identity)
+    _upgrade_to_legacy_version_4(path)
+
+    _, inbox = _stores(path)
+    upgraded_identity = _identity(run_id="tenant-bound-run-id")
+    claim = inbox.register_and_claim(
+        upgraded_identity,
+        owner="worker",
+        lease_sec=30.0,
+        now=2.0,
+    )
+
+    assert claim.disposition is ReadyClaimDisposition.CLAIMED
+    assert claim.analysis_run_id == "legacy-run-id"
+
+
 def test_pending_plaintext_scrub_resumes_after_startup_interruption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -179,7 +324,7 @@ def test_pending_plaintext_scrub_resumes_after_startup_interruption(
         _stores(path)
 
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
         assert connection.execute(
             "SELECT value FROM meeting_ai_store_metadata WHERE name = ?",
             (SqliteOutboxStore._INBOX_SCRUB_MARKER,),
@@ -246,10 +391,12 @@ def test_key_rotation_finds_existing_encrypted_identity(tmp_path: Path) -> None:
         max_rows=10,
     )
     first_inbox = SqliteReadyEventInbox(first_store, max_rows=20, max_failures=3)
-    first_inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=1.0)
+    claim = first_inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=1.0)
+    assert claim.lease_token is not None
     first_inbox.mark_dead(
-        event_key=_identity().event_key,
+        lookup_key=_identity().lookup_key,
         owner="worker",
+        lease_token=claim.lease_token,
         error_code="terminal",
         reason=ReadyDeadReason.TERMINAL,
         now=2.0,
@@ -292,8 +439,9 @@ def test_stale_lease_recovery_consumes_failure_budget(tmp_path: Path) -> None:
     assert recovered.lease_recovery_count == 1
 
     failed = inbox.mark_failure(
-        event_key=_identity().event_key,
+        lookup_key=_identity().lookup_key,
         owner="worker-b",
+        lease_token=recovered.lease_token or "",
         error_code="transcript_http_503",
         next_attempt_at=120.0,
         max_failures=3,
@@ -331,10 +479,12 @@ def test_repeated_stale_leases_stop_at_failure_budget(tmp_path: Path) -> None:
 def test_not_due_exact_replay_uses_read_only_busy_fast_path(tmp_path: Path) -> None:
     path = tmp_path / "delivery.sqlite3"
     _, inbox = _stores(path)
-    inbox.register_and_claim(_identity(), owner="worker", lease_sec=10.0, now=100.0)
+    claim = inbox.register_and_claim(_identity(), owner="worker", lease_sec=10.0, now=100.0)
+    assert claim.lease_token is not None
     inbox.mark_failure(
-        event_key=_identity().event_key,
+        lookup_key=_identity().lookup_key,
         owner="worker",
+        lease_token=claim.lease_token,
         error_code="transcript_http_503",
         next_attempt_at=200.0,
         max_failures=3,
@@ -378,12 +528,76 @@ def test_concurrent_duplicate_delivery_has_one_processing_owner(tmp_path: Path) 
     assert inbox.summary(now=101.0).processing == 1
 
 
+def test_same_event_key_isolated_by_tenant(tmp_path: Path) -> None:
+    _, inbox = _stores(tmp_path / "delivery.sqlite3")
+    first = inbox.register_and_claim(_identity(), owner="worker-a", lease_sec=30.0, now=100.0)
+    second_identity = _identity(
+        tenant_id="44444444-4444-4444-8444-444444444444",
+        run_id="run-2",
+    )
+    second = inbox.register_and_claim(second_identity, owner="worker-b", lease_sec=30.0, now=100.0)
+
+    assert first.disposition is ReadyClaimDisposition.CLAIMED
+    assert second.disposition is ReadyClaimDisposition.CLAIMED
+    assert first.lease_token != second.lease_token
+    assert inbox.summary(now=101.0).processing == 2
+
+
+def test_recovered_lease_fences_stale_token_even_for_same_owner(tmp_path: Path) -> None:
+    _, inbox = _stores(tmp_path / "delivery.sqlite3")
+    first = inbox.register_and_claim(_identity(), owner="worker", lease_sec=10.0, now=100.0)
+    recovered = inbox.register_and_claim(_identity(), owner="worker", lease_sec=10.0, now=111.0)
+    assert first.lease_token is not None
+    assert recovered.lease_token is not None
+    assert first.lease_token != recovered.lease_token
+
+    with pytest.raises(ReadyInboxLeaseLostError):
+        inbox.commit_outboxed(
+            lookup_key=_identity().lookup_key,
+            owner="worker",
+            lease_token=first.lease_token,
+            analysis_run_id="run-1",
+            meeting_id=_identity().meeting_id,
+            payload={"summary": "stale-result"},
+            now=112.0,
+        )
+
+    assert inbox.commit_outboxed(
+        lookup_key=_identity().lookup_key,
+        owner="worker",
+        lease_token=recovered.lease_token,
+        analysis_run_id="run-1",
+        meeting_id=_identity().meeting_id,
+        payload={"summary": "current-result"},
+        now=112.0,
+    )
+
+
+def test_expired_lease_cannot_mutate_inbox(tmp_path: Path) -> None:
+    _, inbox = _stores(tmp_path / "delivery.sqlite3")
+    claim = inbox.register_and_claim(_identity(), owner="worker", lease_sec=10.0, now=100.0)
+    assert claim.lease_token is not None
+
+    with pytest.raises(ReadyInboxLeaseLostError):
+        inbox.mark_failure(
+            lookup_key=_identity().lookup_key,
+            owner="worker",
+            lease_token=claim.lease_token,
+            error_code="late_failure",
+            next_attempt_at=120.0,
+            max_failures=3,
+            now=111.0,
+        )
+
+
 def test_same_key_different_bytes_is_dead_even_after_outboxed(tmp_path: Path) -> None:
     _, inbox = _stores(tmp_path / "delivery.sqlite3")
-    inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=10.0)
+    claim = inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=10.0)
+    assert claim.lease_token is not None
     assert inbox.commit_outboxed(
-        event_key=_identity().event_key,
+        lookup_key=_identity().lookup_key,
         owner="worker",
+        lease_token=claim.lease_token,
         analysis_run_id="run-1",
         meeting_id=_identity().meeting_id,
         payload={"summary": "redacted-result"},
@@ -408,12 +622,14 @@ def test_outbox_insert_and_outboxed_state_are_one_transaction(tmp_path: Path) ->
         payload={"summary": "first"},
         now=1.0,
     )
-    inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=2.0)
+    claim = inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=2.0)
+    assert claim.lease_token is not None
 
     with pytest.raises(OutboxConflictError):
         inbox.commit_outboxed(
-            event_key=_identity().event_key,
+            lookup_key=_identity().lookup_key,
             owner="worker",
+            lease_token=claim.lease_token,
             analysis_run_id="run-1",
             meeting_id=_identity().meeting_id,
             payload={"summary": "different"},
@@ -427,10 +643,12 @@ def test_outbox_insert_and_outboxed_state_are_one_transaction(tmp_path: Path) ->
 
 def test_terminal_retention_waits_for_result_outbox_delivery(tmp_path: Path) -> None:
     outbox, inbox = _stores(tmp_path / "delivery.sqlite3")
-    inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=1.0)
+    claim = inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=1.0)
+    assert claim.lease_token is not None
     inbox.commit_outboxed(
-        event_key=_identity().event_key,
+        lookup_key=_identity().lookup_key,
         owner="worker",
+        lease_token=claim.lease_token,
         analysis_run_id="run-1",
         meeting_id=_identity().meeting_id,
         payload={"summary": "encrypted-result"},
@@ -479,22 +697,24 @@ def test_poison_row_is_metadata_only_and_committed_before_dlq_marker(tmp_path: P
 def test_retry_exhaustion_can_be_audit_rearmed_for_exact_producer_replay(tmp_path: Path) -> None:
     path = tmp_path / "delivery.sqlite3"
     _, inbox = _stores(path)
-    inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=1.0)
+    claim = inbox.register_and_claim(_identity(), owner="worker", lease_sec=30.0, now=1.0)
+    assert claim.lease_token is not None
     failed = inbox.mark_failure(
-        event_key=_identity().event_key,
+        lookup_key=_identity().lookup_key,
         owner="worker",
+        lease_token=claim.lease_token,
         error_code="transcript_http_503",
         next_attempt_at=2.0,
         max_failures=1,
         now=2.0,
     )
     assert failed.state is ReadyInboxState.DEAD
-    inbox.mark_dlq_published(_identity().event_key, now=3.0)
+    inbox.mark_dlq_published(_identity().lookup_key, now=3.0)
     dead = inbox.list_dead(limit=10)
     assert len(dead) == 1
     assert dead[0].dead_reason is ReadyDeadReason.RETRY_EXHAUSTED
     assert inbox.rearm_retry_exhausted(
-        _identity().event_key,
+        _identity().lookup_key,
         audit_reference="platform-ai#263/operator-review",
         now=4.0,
     )
@@ -514,7 +734,7 @@ def test_retry_exhaustion_can_be_audit_rearmed_for_exact_producer_replay(tmp_pat
                 SELECT redrive_count, last_redriven_at, last_redrive_reference
                 FROM meeting_transcript_ready_inbox WHERE event_key_digest = ?
                 """,
-            (_lookup_digest(_identity().event_key),),
+            (_lookup_digest(_identity().lookup_key),),
         ).fetchone()
     assert audit == (1, 4.0, "platform-ai#263/operator-review")
 
@@ -542,9 +762,9 @@ def test_poison_and_payload_conflict_dead_rows_cannot_be_rearmed(tmp_path: Path)
         now=5.0,
     )
     assert conflict.disposition is ReadyClaimDisposition.CONFLICT
-    inbox.mark_dlq_published(_identity().event_key, now=6.0)
+    inbox.mark_dlq_published(_identity().lookup_key, now=6.0)
     assert not inbox.rearm_retry_exhausted(
-        _identity().event_key,
+        _identity().lookup_key,
         audit_reference="platform-ai#263",
         now=7.0,
     )

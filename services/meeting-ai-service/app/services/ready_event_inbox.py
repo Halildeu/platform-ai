@@ -9,15 +9,20 @@ queryable in SQLite.
 
 from __future__ import annotations
 
+import secrets
 import sqlite3
 import time
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from app.services.durable_outbox import OutboxError, OutboxIntegrityError, SqliteOutboxStore
 
 _IDENTITY_PURPOSE = "ready-event-inbox"
+
+
+def _event_lookup_key(event_key: str, tenant_id: str | None) -> str:
+    return event_key if tenant_id is None else f"{tenant_id}|{event_key}"
 
 
 class ReadyInboxError(OutboxError):
@@ -68,6 +73,10 @@ class ReadyEventIdentity:
     finalization_version: int
     analysis_run_id: str
 
+    @property
+    def lookup_key(self) -> str:
+        return _event_lookup_key(self.event_key, self.tenant_id)
+
 
 @dataclass(frozen=True)
 class ReadyClaim:
@@ -76,6 +85,8 @@ class ReadyClaim:
     lease_recovery_count: int
     dlq_published: bool
     retry_after_sec: float | None = None
+    lease_token: str | None = None
+    analysis_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +109,7 @@ class ReadyDeadLetterMetadata:
     """Transcript-free operator view of a ready-event dead-letter row."""
 
     event_key: str
+    lookup_key: str = field(repr=False)
     failure_count: int
     dead_reason: ReadyDeadReason | None
     last_error_code: str | None
@@ -128,24 +140,24 @@ class SqliteReadyEventInbox:
     def _connect(self) -> sqlite3.Connection:
         return self._outbox._connect()
 
-    def _lookup_digests(self, event_key: str) -> tuple[str, ...]:
+    def _lookup_digests(self, lookup_key: str) -> tuple[str, ...]:
         return self._outbox._cipher.lookup_digests(
             purpose=_IDENTITY_PURPOSE,
-            value=event_key,
+            value=lookup_key,
         )
 
     @staticmethod
     def _lookup_clause(digests: tuple[str, ...]) -> str:
         return ", ".join("?" for _ in digests)
 
-    def _select_by_event_key(
+    def _select_by_lookup_key(
         self,
         connection: sqlite3.Connection,
-        event_key: str,
+        lookup_key: str,
         *,
         columns: str = "*",
     ) -> sqlite3.Row | None:
-        digests = self._lookup_digests(event_key)
+        digests = self._lookup_digests(lookup_key)
         row: sqlite3.Row | None = connection.execute(
             f"""
             SELECT {columns}
@@ -183,7 +195,7 @@ class SqliteReadyEventInbox:
     ) -> tuple[str, str, bytes, bytes]:
         return self._outbox._cipher.encrypt_metadata(
             purpose=_IDENTITY_PURPOSE,
-            lookup_value=event_key,
+            lookup_value=_event_lookup_key(event_key, tenant_id),
             payload={
                 "eventKey": event_key,
                 "payloadSha256": payload_sha256,
@@ -223,7 +235,7 @@ class SqliteReadyEventInbox:
             or not isinstance(finalization_version, int)
         ):
             raise ReadyInboxIntegrityError("ready-event identity envelope has invalid types")
-        expected_digests = self._lookup_digests(event_key)
+        expected_digests = self._lookup_digests(_event_lookup_key(event_key, tenant_id))
         if str(row["event_key_digest"]) not in expected_digests:
             raise ReadyInboxIntegrityError("ready-event identity lookup digest is invalid")
         return ReadyEventIdentity(
@@ -236,7 +248,7 @@ class SqliteReadyEventInbox:
             analysis_run_id=analysis_run_id,
         )
 
-    def _decrypt_event_metadata(self, row: sqlite3.Row) -> tuple[str, str, str | None]:
+    def _decrypt_event_metadata(self, row: sqlite3.Row) -> tuple[str, str, str | None, str]:
         """Decrypt event key, payload digest, and optional analysis run id."""
         try:
             envelope = self._outbox._cipher.decrypt_metadata(
@@ -248,6 +260,7 @@ class SqliteReadyEventInbox:
             )
             event_key = envelope["eventKey"]
             payload_sha256 = envelope["payloadSha256"]
+            tenant_id = envelope.get("tenantId")
             analysis_run_id = envelope.get("analysisRunId")
         except (KeyError, TypeError, ValueError, OutboxIntegrityError) as exc:
             raise ReadyInboxIntegrityError("ready-event metadata envelope is invalid") from exc
@@ -255,9 +268,12 @@ class SqliteReadyEventInbox:
             raise ReadyInboxIntegrityError("ready-event metadata envelope has invalid types")
         if analysis_run_id is not None and not isinstance(analysis_run_id, str):
             raise ReadyInboxIntegrityError("ready-event analysis run id has invalid type")
-        if str(row["event_key_digest"]) not in self._lookup_digests(event_key):
+        if tenant_id is not None and not isinstance(tenant_id, str):
+            raise ReadyInboxIntegrityError("ready-event tenant id has invalid type")
+        lookup_key = _event_lookup_key(event_key, tenant_id)
+        if str(row["event_key_digest"]) not in self._lookup_digests(lookup_key):
             raise ReadyInboxIntegrityError("ready-event metadata lookup digest is invalid")
-        return event_key, payload_sha256, analysis_run_id
+        return event_key, payload_sha256, analysis_run_id, lookup_key
 
     def register_and_claim(
         self,
@@ -275,7 +291,7 @@ class SqliteReadyEventInbox:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = self._select_by_event_key(connection, identity.event_key)
+                row = self._select_by_lookup_key(connection, identity.lookup_key)
                 if row is None:
                     row_count = int(
                         connection.execute(
@@ -304,7 +320,7 @@ class SqliteReadyEventInbox:
                             timestamp,
                         ),
                     )
-                    row = self._select_by_event_key(connection, identity.event_key)
+                    row = self._select_by_lookup_key(connection, identity.lookup_key)
                     assert row is not None
 
                 failure_count = int(row["failure_count"])
@@ -323,6 +339,7 @@ class SqliteReadyEventInbox:
                         """
                         UPDATE meeting_transcript_ready_inbox
                         SET state = 'DEAD', lease_owner = NULL, lease_until = NULL,
+                            lease_token = NULL,
                             updated_at = ?, last_error_code = ?, dead_reason = 'CONFLICT',
                             dlq_published_at = ?
                         WHERE event_key_digest = ?
@@ -379,7 +396,7 @@ class SqliteReadyEventInbox:
                             UPDATE meeting_transcript_ready_inbox
                             SET state = 'DEAD', failure_count = ?,
                                 lease_recovery_count = ?, lease_owner = NULL,
-                                lease_until = NULL, updated_at = ?,
+                                lease_until = NULL, lease_token = NULL, updated_at = ?,
                                 last_error_code = 'lease_recovery_exhausted',
                                 dead_reason = 'RETRY_EXHAUSTED'
                             WHERE event_key_digest = ? AND state = 'PROCESSING'
@@ -408,16 +425,18 @@ class SqliteReadyEventInbox:
                         max(0.0, float(row["next_attempt_at"]) - timestamp),
                     )
 
+                lease_token = secrets.token_hex(16)
                 connection.execute(
                     """
                     UPDATE meeting_transcript_ready_inbox
-                    SET state = 'PROCESSING', lease_owner = ?, lease_until = ?,
+                    SET state = 'PROCESSING', lease_owner = ?, lease_until = ?, lease_token = ?,
                         failure_count = ?, lease_recovery_count = ?, updated_at = ?
                     WHERE event_key_digest = ?
                     """,
                     (
                         owner,
                         lease_until,
+                        lease_token,
                         failure_count,
                         recovery_count,
                         timestamp,
@@ -430,6 +449,8 @@ class SqliteReadyEventInbox:
                     failure_count,
                     recovery_count,
                     dlq_published,
+                    lease_token=lease_token,
+                    analysis_run_id=stored_identity.analysis_run_id,
                 )
             except Exception:
                 connection.rollback()
@@ -443,7 +464,7 @@ class SqliteReadyEventInbox:
     ) -> ReadyClaim | None:
         """Avoid a SQLite writer lock when an exact replay is not claimable yet."""
         with closing(self._connect()) as connection:
-            row = self._select_by_event_key(connection, identity.event_key)
+            row = self._select_by_lookup_key(connection, identity.lookup_key)
         if row is None:
             return None
         stored_identity = self._decrypt_identity(row)
@@ -486,7 +507,7 @@ class SqliteReadyEventInbox:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = self._select_by_event_key(connection, synthetic_key)
+                row = self._select_by_lookup_key(connection, synthetic_key)
                 if row is None:
                     row_count = int(
                         connection.execute(
@@ -526,7 +547,7 @@ class SqliteReadyEventInbox:
                     )
                     published = False
                 else:
-                    stored_key, stored_hash, _ = self._decrypt_event_metadata(row)
+                    stored_key, stored_hash, _, _ = self._decrypt_event_metadata(row)
                     if stored_key != synthetic_key or stored_hash != payload_sha256:
                         raise ReadyInboxIntegrityError(
                             "poison event identity changed for one Redis message id"
@@ -541,8 +562,9 @@ class SqliteReadyEventInbox:
     def mark_failure(
         self,
         *,
-        event_key: str,
+        lookup_key: str,
         owner: str,
+        lease_token: str,
         error_code: str,
         next_attempt_at: float,
         max_failures: int,
@@ -552,16 +574,17 @@ class SqliteReadyEventInbox:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = self._select_by_event_key(connection, event_key)
+                row = self._select_by_lookup_key(connection, lookup_key)
                 if (
                     row is None
                     or str(row["state"]) != ReadyInboxState.PROCESSING.value
                     or str(row["lease_owner"]) != owner
+                    or str(row["lease_token"]) != lease_token
+                    or row["lease_until"] is None
+                    or float(row["lease_until"]) <= timestamp
                 ):
                     raise ReadyInboxLeaseLostError("ready-event processing lease was lost")
-                stored_key, _, _ = self._decrypt_event_metadata(row)
-                if stored_key != event_key:
-                    raise ReadyInboxIntegrityError("ready-event lookup returned another identity")
+                self._decrypt_event_metadata(row)
                 failure_count = int(row["failure_count"]) + 1
                 state = (
                     ReadyInboxState.DEAD
@@ -572,9 +595,10 @@ class SqliteReadyEventInbox:
                     """
                     UPDATE meeting_transcript_ready_inbox
                     SET state = ?, failure_count = ?, next_attempt_at = ?,
-                        lease_owner = NULL, lease_until = NULL, updated_at = ?,
+                        lease_owner = NULL, lease_until = NULL, lease_token = NULL, updated_at = ?,
                         last_error_code = ?, dead_reason = ?
-                    WHERE event_key_digest = ? AND state = 'PROCESSING' AND lease_owner = ?
+                    WHERE event_key_digest = ? AND state = 'PROCESSING'
+                      AND lease_owner = ? AND lease_token = ? AND lease_until > ?
                     """,
                     (
                         state.value,
@@ -589,6 +613,8 @@ class SqliteReadyEventInbox:
                         ),
                         row["event_key_digest"],
                         owner,
+                        lease_token,
+                        timestamp,
                     ),
                 )
                 connection.commit()
@@ -600,8 +626,9 @@ class SqliteReadyEventInbox:
     def defer_without_failure(
         self,
         *,
-        event_key: str,
+        lookup_key: str,
         owner: str,
+        lease_token: str,
         error_code: str,
         next_attempt_at: float,
         now: float | None = None,
@@ -609,17 +636,26 @@ class SqliteReadyEventInbox:
         """Release a lease for local backpressure without consuming attempt budget."""
         timestamp = time.time() if now is None else now
         with closing(self._connect()) as connection:
-            row = self._select_by_event_key(connection, event_key)
+            row = self._select_by_lookup_key(connection, lookup_key)
             digest = None if row is None else str(row["event_key_digest"])
             cursor = connection.execute(
                 """
                 UPDATE meeting_transcript_ready_inbox
                 SET state = 'RECEIVED', next_attempt_at = ?, lease_owner = NULL,
-                    lease_until = NULL, updated_at = ?, last_error_code = ?,
+                    lease_until = NULL, lease_token = NULL, updated_at = ?, last_error_code = ?,
                     dead_reason = NULL
-                WHERE event_key_digest = ? AND state = 'PROCESSING' AND lease_owner = ?
+                WHERE event_key_digest = ? AND state = 'PROCESSING'
+                  AND lease_owner = ? AND lease_token = ? AND lease_until > ?
                 """,
-                (next_attempt_at, timestamp, error_code[:128], digest, owner),
+                (
+                    next_attempt_at,
+                    timestamp,
+                    error_code[:128],
+                    digest,
+                    owner,
+                    lease_token,
+                    timestamp,
+                ),
             )
         if cursor.rowcount != 1:
             raise ReadyInboxLeaseLostError("ready-event processing lease was lost")
@@ -627,32 +663,43 @@ class SqliteReadyEventInbox:
     def mark_dead(
         self,
         *,
-        event_key: str,
+        lookup_key: str,
         owner: str,
+        lease_token: str,
         error_code: str,
         reason: ReadyDeadReason,
         now: float | None = None,
     ) -> None:
         timestamp = time.time() if now is None else now
         with closing(self._connect()) as connection:
-            row = self._select_by_event_key(connection, event_key)
+            row = self._select_by_lookup_key(connection, lookup_key)
             digest = None if row is None else str(row["event_key_digest"])
             cursor = connection.execute(
                 """
                 UPDATE meeting_transcript_ready_inbox
                 SET state = 'DEAD', lease_owner = NULL, lease_until = NULL,
+                    lease_token = NULL,
                     updated_at = ?, last_error_code = ?, dead_reason = ?
-                WHERE event_key_digest = ? AND state = 'PROCESSING' AND lease_owner = ?
+                WHERE event_key_digest = ? AND state = 'PROCESSING'
+                  AND lease_owner = ? AND lease_token = ? AND lease_until > ?
                 """,
-                (timestamp, error_code[:128], reason.value, digest, owner),
+                (
+                    timestamp,
+                    error_code[:128],
+                    reason.value,
+                    digest,
+                    owner,
+                    lease_token,
+                    timestamp,
+                ),
             )
         if cursor.rowcount != 1:
             raise ReadyInboxLeaseLostError("ready-event processing lease was lost")
 
-    def mark_dlq_published(self, event_key: str, *, now: float | None = None) -> None:
+    def mark_dlq_published(self, lookup_key: str, *, now: float | None = None) -> None:
         timestamp = time.time() if now is None else now
         with closing(self._connect()) as connection:
-            row = self._select_by_event_key(connection, event_key)
+            row = self._select_by_lookup_key(connection, lookup_key)
             digest = None if row is None else str(row["event_key_digest"])
             cursor = connection.execute(
                 """
@@ -682,33 +729,39 @@ class SqliteReadyEventInbox:
                 """,
                 (limit,),
             ).fetchall()
-        return [
-            ReadyDeadLetterMetadata(
-                event_key=self._decrypt_event_metadata(row)[0],
-                failure_count=int(row["failure_count"]),
-                dead_reason=(
-                    None if row["dead_reason"] is None else ReadyDeadReason(str(row["dead_reason"]))
-                ),
-                last_error_code=(
-                    None if row["last_error_code"] is None else str(row["last_error_code"])
-                ),
-                updated_at=float(row["updated_at"]),
-                redrive_count=int(row["redrive_count"]),
-                last_redriven_at=(
-                    None if row["last_redriven_at"] is None else float(row["last_redriven_at"])
-                ),
-                last_redrive_reference=(
-                    None
-                    if row["last_redrive_reference"] is None
-                    else str(row["last_redrive_reference"])
-                ),
+        dead_letters: list[ReadyDeadLetterMetadata] = []
+        for row in rows:
+            event_key, _, _, lookup_key = self._decrypt_event_metadata(row)
+            dead_letters.append(
+                ReadyDeadLetterMetadata(
+                    event_key=event_key,
+                    lookup_key=lookup_key,
+                    failure_count=int(row["failure_count"]),
+                    dead_reason=(
+                        None
+                        if row["dead_reason"] is None
+                        else ReadyDeadReason(str(row["dead_reason"]))
+                    ),
+                    last_error_code=(
+                        None if row["last_error_code"] is None else str(row["last_error_code"])
+                    ),
+                    updated_at=float(row["updated_at"]),
+                    redrive_count=int(row["redrive_count"]),
+                    last_redriven_at=(
+                        None if row["last_redriven_at"] is None else float(row["last_redriven_at"])
+                    ),
+                    last_redrive_reference=(
+                        None
+                        if row["last_redrive_reference"] is None
+                        else str(row["last_redrive_reference"])
+                    ),
+                )
             )
-            for row in rows
-        ]
+        return dead_letters
 
     def rearm_retry_exhausted(
         self,
-        event_key: str,
+        lookup_key: str,
         *,
         audit_reference: str,
         now: float | None = None,
@@ -726,7 +779,7 @@ class SqliteReadyEventInbox:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = self._select_by_event_key(connection, event_key)
+                row = self._select_by_lookup_key(connection, lookup_key)
                 if (
                     row is None
                     or str(row["state"]) != ReadyInboxState.DEAD.value
@@ -735,8 +788,8 @@ class SqliteReadyEventInbox:
                 ):
                     connection.commit()
                     return False
-                stored_key, _, analysis_run_id = self._decrypt_event_metadata(row)
-                if stored_key != event_key or analysis_run_id is None:
+                _, _, analysis_run_id, stored_lookup_key = self._decrypt_event_metadata(row)
+                if stored_lookup_key != lookup_key or analysis_run_id is None:
                     raise ReadyInboxIntegrityError("retry-exhausted identity is invalid")
                 result_exists = connection.execute(
                     "SELECT 1 FROM analysis_delivery_outbox WHERE analysis_run_id = ?",
@@ -776,8 +829,9 @@ class SqliteReadyEventInbox:
     def commit_outboxed(
         self,
         *,
-        event_key: str,
+        lookup_key: str,
         owner: str,
+        lease_token: str,
         analysis_run_id: str,
         meeting_id: str,
         payload: dict[str, object],
@@ -787,15 +841,18 @@ class SqliteReadyEventInbox:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = self._select_by_event_key(connection, event_key)
+                row = self._select_by_lookup_key(connection, lookup_key)
                 if (
                     row is None
                     or str(row["state"]) != ReadyInboxState.PROCESSING.value
                     or str(row["lease_owner"]) != owner
+                    or str(row["lease_token"]) != lease_token
+                    or row["lease_until"] is None
+                    or float(row["lease_until"]) <= timestamp
                 ):
                     raise ReadyInboxLeaseLostError("ready-event processing lease was lost")
-                stored_key, _, stored_analysis_run_id = self._decrypt_event_metadata(row)
-                if stored_key != event_key or stored_analysis_run_id != analysis_run_id:
+                _, _, stored_analysis_run_id, stored_lookup_key = self._decrypt_event_metadata(row)
+                if stored_lookup_key != lookup_key or stored_analysis_run_id != analysis_run_id:
                     raise ReadyInboxLeaseLostError("ready-event processing lease was lost")
                 inserted = self._outbox.enqueue_in_transaction(
                     connection,
@@ -808,10 +865,12 @@ class SqliteReadyEventInbox:
                     """
                     UPDATE meeting_transcript_ready_inbox
                     SET state = 'OUTBOXED', lease_owner = NULL, lease_until = NULL,
+                        lease_token = NULL,
                         updated_at = ?, last_error_code = NULL
-                    WHERE event_key_digest = ? AND state = 'PROCESSING' AND lease_owner = ?
+                    WHERE event_key_digest = ? AND state = 'PROCESSING'
+                      AND lease_owner = ? AND lease_token = ? AND lease_until > ?
                     """,
-                    (timestamp, row["event_key_digest"], owner),
+                    (timestamp, row["event_key_digest"], owner, lease_token, timestamp),
                 )
                 if cursor.rowcount != 1:
                     raise ReadyInboxLeaseLostError("ready-event processing lease was lost")
@@ -858,7 +917,7 @@ class SqliteReadyEventInbox:
                 )
                 digests: list[str] = []
                 for row in rows:
-                    _, _, analysis_run_id = self._decrypt_event_metadata(row)
+                    _, _, analysis_run_id, _ = self._decrypt_event_metadata(row)
                     if analysis_run_id is not None:
                         result_exists = connection.execute(
                             "SELECT 1 FROM analysis_delivery_outbox WHERE analysis_run_id = ?",

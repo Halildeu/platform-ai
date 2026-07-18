@@ -10,7 +10,6 @@ import sqlite3
 import time
 import uuid
 from contextlib import suppress
-from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -105,7 +104,8 @@ class ReadyEventConsumerRuntime:
         self._owns_transcripts = False
         self._random = random_source or random.Random()  # noqa: S311 - retry jitter only
         configured_name = settings.ready_redis_consumer_name.strip()
-        self._owner = configured_name or f"{socket.gethostname()}-{uuid.uuid4()}"
+        owner_prefix = configured_name or socket.gethostname()
+        self._owner = f"{owner_prefix}-{uuid.uuid4()}"
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
@@ -156,7 +156,13 @@ class ReadyEventConsumerRuntime:
                 )
             except TimeoutError:
                 self._worker.cancel()
-                await asyncio.gather(self._worker, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(self._worker, return_exceptions=True),
+                        timeout=min(1.0, self.settings.ready_consumer_shutdown_grace_sec),
+                    )
+                except TimeoutError:
+                    logger.error("Ready-event worker did not acknowledge cancellation")
             self._worker = None
         if self._owns_transcripts and self._transcripts is not None:
             await self._transcripts.aclose()
@@ -242,6 +248,7 @@ class ReadyEventConsumerRuntime:
             await self._dead_letter_and_ack(
                 message_id=message_id,
                 event_key=synthetic_key,
+                lookup_key=synthetic_key,
                 error_code="event_contract_invalid",
                 failure_count=0,
                 already_published=published,
@@ -281,6 +288,7 @@ class ReadyEventConsumerRuntime:
             await self._dead_letter_and_ack(
                 message_id=message_id,
                 event_key=event.event_key,
+                lookup_key=event.lookup_key,
                 error_code=error_code,
                 failure_count=claim.failure_count,
                 already_published=claim.dlq_published,
@@ -288,6 +296,8 @@ class ReadyEventConsumerRuntime:
             mai_ready_consumer_events_total.labels(outcome="dead_letter").inc()
             return
 
+        assert claim.lease_token is not None
+        assert claim.analysis_run_id is not None
         await self._process_claimed(message_id, event, claim)
 
     async def _process_claimed(
@@ -297,15 +307,15 @@ class ReadyEventConsumerRuntime:
         claim: ReadyClaim,
     ) -> None:
         assert self._transcripts is not None
+        lease_token = claim.lease_token
+        assert lease_token is not None
+        analysis_run_id = claim.analysis_run_id
+        assert analysis_run_id is not None
         try:
             fetch_result = await self._transcripts.fetch(event)
             snapshot = fetch_result.snapshot
-            segments = (
-                [segment.model_dump() for segment in snapshot.segments]
-                if snapshot.segments is not None
-                else None
-            )
-            generated_at = datetime.now(UTC)
+            segments = [segment.model_dump() for segment in snapshot.segments]
+            generated_at = event.generated_at
 
             async def persist_result(
                 command: AnalysisCommand,
@@ -327,8 +337,9 @@ class ReadyEventConsumerRuntime:
                 )
                 await asyncio.to_thread(
                     self._inbox.commit_outboxed,
-                    event_key=event.event_key,
+                    lookup_key=event.lookup_key,
                     owner=self._owner,
+                    lease_token=lease_token,
                     analysis_run_id=command.analysis_run_id,
                     meeting_id=str(event.meeting_id),
                     payload=payload,
@@ -342,7 +353,7 @@ class ReadyEventConsumerRuntime:
                     meeting_id=str(event.meeting_id),
                     session_id=str(event.session_id),
                     finalization_version=event.finalization_version,
-                    analysis_run_id=str(event.analysis_run_id),
+                    analysis_run_id=analysis_run_id,
                     generated_at=generated_at,
                     segments=segments,
                 ),
@@ -360,6 +371,7 @@ class ReadyEventConsumerRuntime:
         except OutboxFullError:
             await self._defer_for_backpressure(
                 event,
+                claim,
                 error_code="store_OutboxFullError",
             )
             return
@@ -384,6 +396,7 @@ class ReadyEventConsumerRuntime:
                 await self._terminal(
                     message_id,
                     event,
+                    claim,
                     error_code="analysis_run_payload_conflict",
                     failure_count=claim.failure_count,
                 )
@@ -406,6 +419,7 @@ class ReadyEventConsumerRuntime:
             await self._terminal(
                 message_id,
                 event,
+                claim,
                 error_code=str(error_code),
                 failure_count=claim.failure_count,
             )
@@ -440,12 +454,14 @@ class ReadyEventConsumerRuntime:
         retry_after_sec: float | None = None,
     ) -> None:
         assert self._inbox is not None
+        assert claim.lease_token is not None
         delay = self._retry_delay(claim.failure_count + 1, retry_after_sec)
         try:
             outcome = await asyncio.to_thread(
                 self._inbox.mark_failure,
-                event_key=event.event_key,
+                lookup_key=event.lookup_key,
                 owner=self._owner,
+                lease_token=claim.lease_token,
                 error_code=error_code,
                 next_attempt_at=time.time() + delay,
                 max_failures=self.settings.ready_consumer_max_failures,
@@ -457,6 +473,7 @@ class ReadyEventConsumerRuntime:
             await self._dead_letter_and_ack(
                 message_id=message_id,
                 event_key=event.event_key,
+                lookup_key=event.lookup_key,
                 error_code=error_code,
                 failure_count=outcome.failure_count,
                 already_published=False,
@@ -471,16 +488,19 @@ class ReadyEventConsumerRuntime:
         self,
         message_id: str,
         event: ParsedTranscriptReadyEvent,
+        claim: ReadyClaim,
         *,
         error_code: str,
         failure_count: int,
     ) -> None:
         assert self._inbox is not None
+        assert claim.lease_token is not None
         try:
             await asyncio.to_thread(
                 self._inbox.mark_dead,
-                event_key=event.event_key,
+                lookup_key=event.lookup_key,
                 owner=self._owner,
+                lease_token=claim.lease_token,
                 error_code=error_code,
                 reason=ReadyDeadReason.TERMINAL,
             )
@@ -490,6 +510,7 @@ class ReadyEventConsumerRuntime:
         await self._dead_letter_and_ack(
             message_id=message_id,
             event_key=event.event_key,
+            lookup_key=event.lookup_key,
             error_code=error_code,
             failure_count=failure_count,
             already_published=False,
@@ -500,16 +521,19 @@ class ReadyEventConsumerRuntime:
     async def _defer_for_backpressure(
         self,
         event: ParsedTranscriptReadyEvent,
+        claim: ReadyClaim,
         *,
         error_code: str,
     ) -> None:
         """Keep the Redis PEL entry without treating local capacity as event failure."""
         assert self._inbox is not None
+        assert claim.lease_token is not None
         try:
             await asyncio.to_thread(
                 self._inbox.defer_without_failure,
-                event_key=event.event_key,
+                lookup_key=event.lookup_key,
                 owner=self._owner,
+                lease_token=claim.lease_token,
                 error_code=error_code,
                 next_attempt_at=time.time() + self.settings.ready_consumer_base_backoff_sec,
             )
@@ -527,6 +551,7 @@ class ReadyEventConsumerRuntime:
         *,
         message_id: str,
         event_key: str,
+        lookup_key: str,
         error_code: str,
         failure_count: int,
         already_published: bool,
@@ -545,7 +570,7 @@ class ReadyEventConsumerRuntime:
                 maxlen=self.settings.ready_redis_dead_letter_maxlen,
                 approximate=True,
             )
-            await asyncio.to_thread(self._inbox.mark_dlq_published, event_key)
+            await asyncio.to_thread(self._inbox.mark_dlq_published, lookup_key)
         await self._ack(message_id)
 
     async def _ack(self, message_id: str) -> None:

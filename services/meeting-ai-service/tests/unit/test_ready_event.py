@@ -61,24 +61,27 @@ def test_parser_pins_v1_cross_field_identity_and_payload_bytes() -> None:
 
     assert event.event_key == EVENT_KEY
     assert event.payload_sha256 == hashlib.sha256(raw).hexdigest()
-    assert str(event.analysis_run_id) == "7ee11691-2c23-5518-adfa-a0e138b5eabe"
+    assert str(event.analysis_run_id) == "5fd6d577-33a1-5d96-bf5f-51eec2915c58"
     assert event.finalization_version == 1
 
 
 def test_analysis_run_id_changes_only_with_identity_tuple() -> None:
     base = analysis_run_id_for(
+        tenant_id=uuid.UUID(TENANT),
         meeting_id=uuid.UUID(MEETING),
         session_id=uuid.UUID(SESSION),
         finalization_version=1,
         analysis_spec_version="meeting-intelligence-v1",
     )
     replay = analysis_run_id_for(
+        tenant_id=uuid.UUID(TENANT),
         meeting_id=uuid.UUID(MEETING),
         session_id=uuid.UUID(SESSION),
         finalization_version=1,
         analysis_spec_version="meeting-intelligence-v1",
     )
     changed_spec = analysis_run_id_for(
+        tenant_id=uuid.UUID(TENANT),
         meeting_id=uuid.UUID(MEETING),
         session_id=uuid.UUID(SESSION),
         finalization_version=1,
@@ -86,6 +89,16 @@ def test_analysis_run_id_changes_only_with_identity_tuple() -> None:
     )
     assert replay == base
     assert changed_spec != base
+    assert (
+        analysis_run_id_for(
+            tenant_id=uuid.uuid4(),
+            meeting_id=uuid.UUID(MEETING),
+            session_id=uuid.UUID(SESSION),
+            finalization_version=1,
+            analysis_spec_version="meeting-intelligence-v1",
+        )
+        != base
+    )
     assert base.version == 5
 
 
@@ -124,6 +137,7 @@ def test_parser_accepts_later_finalization_cycle() -> None:
     assert event.finalization_version == 2
     assert event.event_key.endswith("|2")
     assert event.analysis_run_id != analysis_run_id_for(
+        tenant_id=uuid.UUID(TENANT),
         meeting_id=uuid.UUID(MEETING),
         session_id=uuid.UUID(SESSION),
         finalization_version=1,

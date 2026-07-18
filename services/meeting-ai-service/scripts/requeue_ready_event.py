@@ -18,7 +18,7 @@ from app.services.ready_event_inbox import SqliteReadyEventInbox
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--event-key")
+    action.add_argument("--lookup-key")
     action.add_argument("--list-dead", action="store_true")
     parser.add_argument("--audit-reference")
     parser.add_argument("--limit", type=int, default=100)
@@ -44,7 +44,8 @@ def main() -> int:
         for item in inbox.list_dead(limit=args.limit):
             updated_at = datetime.fromtimestamp(item.updated_at, UTC).isoformat()
             print(  # noqa: T201
-                f"event_key={item.event_key} failures={item.failure_count} "
+                f"lookup_key={item.lookup_key} event_key={item.event_key} "
+                f"failures={item.failure_count} "
                 f"reason={item.dead_reason.value if item.dead_reason else '-'} "
                 f"updated_at={updated_at} redrives={item.redrive_count} "
                 f"error_code={item.last_error_code or '-'}"
@@ -52,16 +53,16 @@ def main() -> int:
         return 0
 
     if not args.audit_reference:
-        parser.error("--audit-reference is required with --event-key")
-    event_key = str(args.event_key)
+        parser.error("--audit-reference is required with --lookup-key")
+    lookup_key = str(args.lookup_key)
     if not inbox.rearm_retry_exhausted(
-        event_key,
+        lookup_key,
         audit_reference=str(args.audit_reference),
     ):
-        print(f"not-rearmed event_key={event_key}", file=sys.stderr)  # noqa: T201
+        print(f"not-rearmed lookup_key={lookup_key}", file=sys.stderr)  # noqa: T201
         return 2
     print(  # noqa: T201
-        f"rearmed event_key={event_key}; exact original producer event replay is now required"
+        f"rearmed lookup_key={lookup_key}; exact original producer event replay is now required"
     )
     return 0
 

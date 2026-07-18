@@ -56,9 +56,14 @@ class ParsedTranscriptReadyEvent:
     generated_at: datetime
     analysis_run_id: uuid.UUID
 
+    @property
+    def lookup_key(self) -> str:
+        return f"{self.tenant_id}|{self.event_key}"
+
 
 def analysis_run_id_for(
     *,
+    tenant_id: uuid.UUID,
     meeting_id: uuid.UUID,
     session_id: uuid.UUID,
     finalization_version: int,
@@ -70,7 +75,7 @@ def analysis_run_id_for(
     spec = analysis_spec_version.strip()
     if not spec or len(spec) > 64:
         raise ValueError("analysis_spec_version must contain 1..64 characters")
-    name = f"{meeting_id}/{session_id}/{finalization_version}/{spec}"
+    name = f"{tenant_id}/{meeting_id}/{session_id}/{finalization_version}/{spec}"
     return uuid.uuid5(_ANALYSIS_RUN_NAMESPACE, name)
 
 
@@ -121,6 +126,7 @@ def parse_transcript_ready_event(
         raise ReadyEventContractError("ready tenant/org identity does not match its payload")
 
     run_id = analysis_run_id_for(
+        tenant_id=envelope.tenant_id,
         meeting_id=envelope.meeting_id,
         session_id=envelope.transcript_session_id,
         finalization_version=envelope.finalization_version,

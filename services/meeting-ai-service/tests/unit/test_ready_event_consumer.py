@@ -10,7 +10,6 @@ import random
 import sqlite3
 import sys
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
@@ -18,6 +17,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
+from app.models.ready_event import parse_transcript_ready_event
 from app.services.analysis_application import AnalysisApplicationService
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
 from app.services.analyze import MeetingAnalysisService
@@ -29,7 +29,7 @@ from app.services.canonical_transcript_client import (
 from app.services.durable_outbox import PayloadCipher
 from app.services.meeting_service_client import DeliveryAttempt, DeliveryDisposition
 from app.services.ready_event_consumer import ReadyEventConsumerRuntime, _build_redis_client
-from app.services.ready_event_inbox import ReadyInboxLeaseLostError
+from app.services.ready_event_inbox import ReadyEventIdentity, ReadyInboxLeaseLostError
 
 MEETING = "11111111-1111-4111-8111-111111111111"
 SESSION = "22222222-2222-4222-8222-222222222222"
@@ -41,7 +41,7 @@ RAW_TRANSCRIPT = "RAW-CANONICAL-TRANSCRIPT-SECRET Bütçe kararlaştırıldı."
 def _event_lookup_digest() -> str:
     return PayloadCipher({"v1": b"K" * 32}, "v1").lookup_digests(
         purpose="ready-event-inbox",
-        value=EVENT_KEY,
+        value=f"{TENANT}|{EVENT_KEY}",
     )[0]
 
 
@@ -103,9 +103,7 @@ class FakeTranscriptClient:
                 transcriptSha256=hashlib.sha256(RAW_TRANSCRIPT.encode()).hexdigest(),
                 segmentCount=event.segment_count,
                 segments=[{"text": RAW_TRANSCRIPT, "start": 0.0, "end": 4.0}],
-            ),
-            analysis_job_capability=SecretStr("unused-initial-capability"),
-            analysis_job_capability_expires_at=datetime(2026, 7, 18, 1, 15, tzinfo=UTC),
+            )
         )
 
     async def aclose(self) -> None:
@@ -143,6 +141,11 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         "transcript_service_snapshot_path_template": (
             "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
             "/sessions/{session_id}/finalizations/{finalization_version}"
+        ),
+        "transcript_service_capability_path_template": (
+            "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+            "/sessions/{session_id}/finalizations/{finalization_version}"
+            "/analysis-capability"
         ),
         "transcript_service_token_url": "https://auth.test/token",
         "transcript_service_client_id": "meeting-ai-ready",
@@ -210,6 +213,21 @@ def test_redis_client_has_bounded_connect_and_command_timeouts(
     assert captured["socket_timeout"] == 7.0
     assert captured["health_check_interval"] == 30
     assert captured["retry_on_timeout"] is False
+
+
+def test_consumer_owner_is_unique_across_restarts_with_configured_name(tmp_path: Path) -> None:
+    first, _, _, _ = _runtime(
+        tmp_path / "first",
+        settings_overrides={"ready_redis_consumer_name": "meeting-ai"},
+    )
+    second, _, _, _ = _runtime(
+        tmp_path / "second",
+        settings_overrides={"ready_redis_consumer_name": "meeting-ai"},
+    )
+
+    assert first._owner.startswith("meeting-ai-")
+    assert second._owner.startswith("meeting-ai-")
+    assert first._owner != second._owner
 
 
 def test_worker_loop_logs_only_exception_class_without_traceback(
@@ -283,6 +301,39 @@ def test_ready_event_outboxes_once_then_duplicate_only_acks(tmp_path: Path) -> N
     assert RAW_TRANSCRIPT.encode() not in durable_bytes
 
 
+def test_upgrade_replay_outboxes_with_stored_analysis_run_id(tmp_path: Path) -> None:
+    async def scenario():  # type: ignore[no-untyped-def]
+        runtime, delivery, _, _ = _runtime(tmp_path)
+        assert runtime._inbox is not None
+        event = parse_transcript_ready_event(
+            _fields(),
+            analysis_spec_version=runtime.settings.analysis_spec_version,
+        )
+        legacy_run_id = "44444444-4444-4444-8444-444444444444"
+        runtime._inbox.register_and_claim(
+            ReadyEventIdentity(
+                event_key=event.event_key,
+                payload_sha256=event.payload_sha256,
+                tenant_id=str(event.tenant_id),
+                meeting_id=str(event.meeting_id),
+                session_id=str(event.session_id),
+                finalization_version=event.finalization_version,
+                analysis_run_id=legacy_run_id,
+            ),
+            owner="pre-upgrade-worker",
+            lease_sec=1.0,
+            now=1.0,
+        )
+
+        await runtime.process_message("2-0", _fields())
+        assert delivery.store is not None
+        return delivery.store.claim_next(owner="assertion", lease_sec=10.0)
+
+    message = asyncio.run(scenario())
+    assert message is not None
+    assert message.analysis_run_id == "44444444-4444-4444-8444-444444444444"
+
+
 def test_ready_event_outbox_carries_deterministic_backend_tuple_without_capability(
     tmp_path: Path,
 ) -> None:
@@ -294,7 +345,7 @@ def test_ready_event_outbox_carries_deterministic_backend_tuple_without_capabili
 
     message = asyncio.run(scenario())
     assert message is not None
-    assert message.analysis_run_id == "7ee11691-2c23-5518-adfa-a0e138b5eabe"
+    assert message.analysis_run_id == "5fd6d577-33a1-5d96-bf5f-51eec2915c58"
     assert message.payload["_canonical_tenant_id"] == TENANT
     assert message.payload["transcript_session_id"] == SESSION
     assert message.payload["finalization_version"] == 1

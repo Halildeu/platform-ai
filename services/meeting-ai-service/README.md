@@ -229,7 +229,7 @@ SQLite commits either
 counter and the shared failure budget. Once `MAI_READY_CONSUMER_MAX_FAILURES` is
 reached, the inbox row becomes `RETRY_EXHAUSTED` before another worker can claim it;
 an audit-referenced operator redrive resets both counters. The stable analysis run
-UUIDv5 is derived from meeting ID, session ID, finalization version, and
+UUIDv5 is derived from tenant ID, meeting ID, session ID, finalization version, and
 `MAI_ANALYSIS_SPEC_VERSION`.
 
 Retry deadlines are enforced by scanning the current consumer's own PEL separately
@@ -253,15 +253,20 @@ Required activation configuration, in addition to durable delivery:
 - `MAI_TRANSCRIPT_SERVICE_BASE_URL`
 - `MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE`, containing `{tenant_id}`,
   `{meeting_id}`, `{session_id}`, and `{finalization_version}`
+- `MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE`, containing the same identity
+  placeholders and pointing to the dedicated one-use analysis-capability endpoint
 - `MAI_TRANSCRIPT_SERVICE_TOKEN_URL`, `MAI_TRANSCRIPT_SERVICE_CLIENT_ID`,
   `MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET`
 - `MAI_TRANSCRIPT_SERVICE_AUDIENCE`, `MAI_TRANSCRIPT_SERVICE_SCOPE`
 
 The HTTP adapter expects a JSON snapshot with exact tenant, meeting, session,
 `finalizationVersion=1`, `state=FINALIZED`, `segmentCount`, raw in-memory `transcript`,
-and `transcriptSha256=sha256(UTF-8 transcript)`. Identity, state, count, and hash are
-verified before analysis. This adapter must remain disabled until transcript-service
-freezes that internal endpoint and auth-service/transcript-service enforce the
+and `transcriptSha256=sha256(UTF-8 transcript)`. Identity, state, count, segments,
+reconstructed text, and hash are verified before analysis. The snapshot GET never
+mints a delivery capability. A one-use capability is requested only immediately
+before result delivery and is bound to the canonical tuple. This adapter must remain
+disabled until transcript-service freezes both internal endpoints and
+auth-service/transcript-service enforce the
 tenant/job binding for the token; an event or caller-supplied tenant header is not
 accepted as authority.
 
@@ -273,7 +278,7 @@ exact original event:
 ```bash
 python scripts/requeue_ready_event.py --list-dead --limit 100
 python scripts/requeue_ready_event.py \
-  --event-key <event-key> \
+  --lookup-key <tenant-id>|<event-key> \
   --audit-reference <issue-or-change-reference>
 ```
 

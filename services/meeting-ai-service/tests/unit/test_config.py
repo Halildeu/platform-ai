@@ -150,6 +150,11 @@ def _ready_values(tmp_path: Path) -> dict[str, object]:
                 "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
                 "/sessions/{session_id}/finalizations/{finalization_version}"
             ),
+            "transcript_service_capability_path_template": (
+                "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+                "/sessions/{session_id}/finalizations/{finalization_version}"
+                "/analysis-capability"
+            ),
             "transcript_service_token_url": "https://auth.test/token",
             "transcript_service_client_id": "meeting-ai-ready",
             "transcript_service_client_secret": SecretStr("transcript-secret-value"),

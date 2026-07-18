@@ -184,12 +184,18 @@ class Settings(BaseSettings):
 
     transcript_service_base_url: str = Field(default="")
     transcript_service_snapshot_path_template: str = Field(default="")
+    transcript_service_capability_path_template: str = Field(default="")
     transcript_service_token_url: str = Field(default="")
     transcript_service_client_id: str = Field(default="")
     transcript_service_client_secret: SecretStr = Field(default=SecretStr(""))
     transcript_service_audience: str = Field(default="transcript-service")
     transcript_service_scope: str = Field(default="transcript:canonical:read")
     transcript_service_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
+    transcript_service_capability_clock_skew_sec: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+    )
 
     @property
     def transcript_service_permissions(self) -> list[str]:
@@ -360,6 +366,15 @@ class Settings(BaseSettings):
                 "containing tenant_id, meeting_id, session_id, and "
                 "finalization_version placeholders"
             )
+        if not self.transcript_service_capability_path_template.startswith("/") or any(
+            placeholder not in self.transcript_service_capability_path_template
+            for placeholder in required_placeholders
+        ):
+            raise ValueError(
+                "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE must be an absolute path "
+                "containing tenant_id, meeting_id, session_id, and "
+                "finalization_version placeholders"
+            )
         if self.ready_consumer_max_backoff_sec < self.ready_consumer_base_backoff_sec:
             raise ValueError("ready consumer max backoff must be >= base backoff")
         if self.ready_producer_replay_horizon_sec <= 0:
@@ -376,9 +391,7 @@ class Settings(BaseSettings):
                 "ready Redis claim idle time must be >= the ready consumer processing lease"
             )
         if self.ready_redis_command_timeout_sec <= self.ready_redis_block_ms / 1000:
-            raise ValueError(
-                "ready Redis command timeout must exceed the blocking read window"
-            )
+            raise ValueError("ready Redis command timeout must exceed the blocking read window")
         return self
 
     @model_validator(mode="after")

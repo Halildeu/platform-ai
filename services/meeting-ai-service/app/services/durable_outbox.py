@@ -223,12 +223,13 @@ class PayloadCipher:
 class SqliteOutboxStore:
     """Process-safe local durable queue with lease-based delivery ownership."""
 
-    _SCHEMA_VERSION = 4
+    _SCHEMA_VERSION = 5
     _MIGRATIONS: ClassVar[dict[int, str]] = {
         1: "0001_analysis_delivery_outbox.sql",
         2: "0002_ready_event_inbox.sql",
         3: "0003_ready_event_redrive.sql",
         4: "0004_ready_event_inbox_encryption.sql",
+        5: "0005_ready_event_lease_fencing.sql",
     }
     _INBOX_SCRUB_MARKER = "ready-inbox-v3-plaintext-scrub"
 
@@ -286,6 +287,9 @@ class SqliteOutboxStore:
             if version == 4:
                 self._encrypt_ready_inbox_migration(connection, sql)
                 continue
+            if version == 5:
+                self._lease_fence_ready_inbox_migration(connection, sql)
+                continue
             try:
                 connection.executescript(
                     f"BEGIN IMMEDIATE;\n{sql}\nPRAGMA user_version={version};\nCOMMIT;"
@@ -318,9 +322,11 @@ class SqliteOutboxStore:
                     "finalizationVersion": row["finalization_version"],
                     "analysisRunId": row["analysis_run_id"],
                 }
+                tenant_id = row["tenant_id"]
+                lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
                 key_id, digest, nonce, ciphertext = self._cipher.encrypt_metadata(
                     purpose="ready-event-inbox",
-                    lookup_value=event_key,
+                    lookup_value=lookup_value,
                     payload=envelope,
                 )
                 connection.execute(
@@ -384,6 +390,66 @@ class SqliteOutboxStore:
                 (self._INBOX_SCRUB_MARKER,),
             )
             connection.execute("PRAGMA user_version=4")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _lease_fence_ready_inbox_migration(
+        self,
+        connection: sqlite3.Connection,
+        add_column_sql: str,
+    ) -> None:
+        """Add lease fencing and tenant-bind lookup digests from legacy v4 rows."""
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(add_column_sql.strip().rstrip(";"))
+            rows = connection.execute(
+                """
+                SELECT event_key_digest, identity_key_id, identity_nonce,
+                       identity_ciphertext
+                FROM meeting_transcript_ready_inbox
+                ORDER BY created_at, event_key_digest
+                """
+            ).fetchall()
+            for row in rows:
+                old_digest = str(row["event_key_digest"])
+                try:
+                    envelope = self._cipher.decrypt_metadata(
+                        purpose="ready-event-inbox",
+                        lookup_digest=old_digest,
+                        key_id=str(row["identity_key_id"]),
+                        nonce=bytes(row["identity_nonce"]),
+                        ciphertext=bytes(row["identity_ciphertext"]),
+                    )
+                    event_key = envelope["eventKey"]
+                    tenant_id = envelope.get("tenantId")
+                except (KeyError, TypeError, ValueError, OutboxIntegrityError) as exc:
+                    raise OutboxIntegrityError(
+                        "ready-event identity cannot be tenant-bound during migration"
+                    ) from exc
+                if not isinstance(event_key, str) or (
+                    tenant_id is not None and not isinstance(tenant_id, str)
+                ):
+                    raise OutboxIntegrityError(
+                        "ready-event identity has invalid tenant binding during migration"
+                    )
+                lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+                key_id, new_digest, nonce, ciphertext = self._cipher.encrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_value=lookup_value,
+                    payload=envelope,
+                )
+                connection.execute(
+                    """
+                    UPDATE meeting_transcript_ready_inbox
+                    SET event_key_digest = ?, identity_key_id = ?,
+                        identity_nonce = ?, identity_ciphertext = ?
+                    WHERE event_key_digest = ?
+                    """,
+                    (new_digest, key_id, nonce, ciphertext, old_digest),
+                )
+            connection.execute("PRAGMA user_version=5")
             connection.commit()
         except Exception:
             connection.rollback()
