@@ -19,6 +19,7 @@ MEETING = "11111111-1111-4111-8111-111111111111"
 SESSION = "22222222-2222-4222-8222-222222222222"
 TENANT = "33333333-3333-4333-8333-333333333333"
 EVENT_KEY = f"meeting.transcript|{SESSION}|meeting.transcript.ready|1"
+READ_GRANT = "v1." + "A" * 43
 
 
 def _payload(**overrides: object) -> bytes:
@@ -47,6 +48,7 @@ def _fields(payload: bytes | None = None, **overrides: object) -> dict[object, o
         b"tenantId": TENANT.encode(),
         b"orgId": TENANT.encode(),
         b"payload": payload or _payload(),
+        b"canonicalReadGrant": READ_GRANT.encode(),
     }
     fields.update(overrides)
     return fields
@@ -63,6 +65,20 @@ def test_parser_pins_v1_cross_field_identity_and_payload_bytes() -> None:
     assert event.payload_sha256 == hashlib.sha256(raw).hexdigest()
     assert str(event.analysis_run_id) == "5fd6d577-33a1-5d96-bf5f-51eec2915c58"
     assert event.finalization_version == 1
+    assert event.canonical_read_grant.get_secret_value() == READ_GRANT
+    assert READ_GRANT not in repr(event)
+
+
+@pytest.mark.parametrize("grant", [b"", b"v1.short", b"v1." + b"!" * 43])
+def test_parser_rejects_missing_or_malformed_transport_read_grant(grant: bytes) -> None:
+    fields = _fields()
+    fields[b"canonicalReadGrant"] = grant
+    with pytest.raises(ReadyEventContractError) as captured:
+        parse_transcript_ready_event(
+            fields,
+            analysis_spec_version="meeting-intelligence-v1",
+        )
+    assert READ_GRANT not in repr(captured.value)
 
 
 def test_analysis_run_id_changes_only_with_identity_tuple() -> None:

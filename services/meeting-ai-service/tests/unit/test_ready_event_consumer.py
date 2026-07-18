@@ -36,6 +36,7 @@ SESSION = "22222222-2222-4222-8222-222222222222"
 TENANT = "33333333-3333-4333-8333-333333333333"
 EVENT_KEY = f"meeting.transcript|{SESSION}|meeting.transcript.ready|1"
 RAW_TRANSCRIPT = "RAW-CANONICAL-TRANSCRIPT-SECRET Bütçe kararlaştırıldı."
+READ_GRANT = "v1." + "A" * 43
 
 
 def _event_lookup_digest() -> str:
@@ -179,6 +180,7 @@ def _fields(*, generated_at: str = "2026-07-18T01:02:03Z") -> dict[object, objec
         b"tenantId": TENANT.encode(),
         b"orgId": TENANT.encode(),
         b"payload": payload,
+        b"canonicalReadGrant": READ_GRANT.encode(),
     }
 
 
@@ -334,7 +336,7 @@ def test_upgrade_replay_outboxes_with_stored_analysis_run_id(tmp_path: Path) -> 
     assert message.analysis_run_id == "44444444-4444-4444-8444-444444444444"
 
 
-def test_ready_event_outbox_carries_deterministic_backend_tuple_without_capability(
+def test_ready_event_outbox_carries_deterministic_backend_tuple_and_encrypted_read_grant(
     tmp_path: Path,
 ) -> None:
     async def scenario():  # type: ignore[no-untyped-def]
@@ -351,6 +353,7 @@ def test_ready_event_outbox_carries_deterministic_backend_tuple_without_capabili
     assert message.payload["finalization_version"] == 1
     assert message.payload["finalized_at"] == "2026-07-18T01:00:00Z"
     assert message.payload["analysis_spec_version"] == "meeting-intelligence-v1"
+    assert message.payload["_canonical_read_grant"] == READ_GRANT
     assert not any("capability" in key for key in message.payload)
 
 

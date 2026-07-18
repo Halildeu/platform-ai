@@ -27,6 +27,7 @@ from app.services.meeting_service_client import DeliveryDisposition
 MEETING = "11111111-1111-4111-8111-111111111111"
 SESSION = "22222222-2222-4222-8222-222222222222"
 TENANT = "33333333-3333-4333-8333-333333333333"
+READ_GRANT = "v1." + "A" * 43
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -86,6 +87,7 @@ def _event(*, finalization_version: int = 1):  # type: ignore[no-untyped-def]
             "tenantId": TENANT,
             "orgId": TENANT,
             "payload": payload,
+            "canonicalReadGrant": READ_GRANT,
         },
         analysis_spec_version="meeting-intelligence-v1",
     )
@@ -155,6 +157,7 @@ def test_fetch_uses_separate_least_privilege_token_and_tenant_bound_path(
     assert request.headers["X-Tenant-Id"] == TENANT
     assert request.headers["X-Analysis-Run-Id"] == str(_event().analysis_run_id)
     assert request.headers["X-Analysis-Spec-Version"] == "meeting-intelligence-v1"
+    assert request.headers["X-Canonical-Read-Grant"] == READ_GRANT
     assert request.method == "GET"
     assert str(request.url).endswith(
         f"/tenants/{TENANT}/meetings/{MEETING}/sessions/{SESSION}/finalizations/1"
@@ -270,6 +273,7 @@ def test_delivery_capability_request_carries_exact_outboxed_tuple(
             meeting_id=MEETING,
             payload={
                 "_canonical_tenant_id": TENANT,
+                "_canonical_read_grant": READ_GRANT,
                 "meeting_id": MEETING,
                 "transcript_session_id": SESSION,
                 "transcript_sha256": _snapshot()["transcriptSha256"],
@@ -296,6 +300,7 @@ def test_delivery_capability_request_carries_exact_outboxed_tuple(
     assert headers["X-Analysis-Spec-Version"] == "meeting-intelligence-v1"
     assert headers["X-Transcript-Finalized-At"] == "2026-07-18T01:00:00Z"
     assert headers["X-Transcript-Sha256"] == _snapshot()["transcriptSha256"]
+    assert headers["X-Canonical-Read-Grant"] == READ_GRANT
 
 
 def test_delivery_refresh_retries_when_capability_has_no_delivery_window(
@@ -313,6 +318,7 @@ def test_delivery_refresh_retries_when_capability_has_no_delivery_window(
             meeting_id=MEETING,
             payload={
                 "_canonical_tenant_id": TENANT,
+                "_canonical_read_grant": READ_GRANT,
                 "meeting_id": MEETING,
                 "transcript_session_id": SESSION,
                 "transcript_sha256": _snapshot()["transcriptSha256"],
@@ -350,6 +356,7 @@ def test_delivery_window_covers_backend_timeout_and_clock_skew(tmp_path: Path) -
             meeting_id=MEETING,
             payload={
                 "_canonical_tenant_id": TENANT,
+                "_canonical_read_grant": READ_GRANT,
                 "meeting_id": MEETING,
                 "transcript_session_id": SESSION,
                 "transcript_sha256": _snapshot()["transcriptSha256"],

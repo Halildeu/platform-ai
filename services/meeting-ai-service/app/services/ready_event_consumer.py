@@ -334,6 +334,7 @@ class ReadyEventConsumerRuntime:
                     transcript=command.transcript,
                     result=result,
                     generated_at=command.generated_at or generated_at,
+                    canonical_read_grant=event.canonical_read_grant,
                 )
                 await asyncio.to_thread(
                     self._inbox.commit_outboxed,

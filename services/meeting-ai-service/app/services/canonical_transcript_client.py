@@ -107,6 +107,7 @@ class _CanonicalTranscriptQuery:
     finalization_version: int
     analysis_run_id: uuid.UUID
     analysis_spec_version: str
+    canonical_read_grant: SecretStr
     segment_count: int | None = None
     finalized_at: datetime | None = None
     transcript_sha256: str | None = None
@@ -146,6 +147,7 @@ class HttpCanonicalTranscriptClient:
                 finalization_version=event.finalization_version,
                 analysis_run_id=event.analysis_run_id,
                 analysis_spec_version=self._settings.analysis_spec_version,
+                canonical_read_grant=event.canonical_read_grant,
                 segment_count=event.segment_count,
             )
         )
@@ -215,6 +217,7 @@ class HttpCanonicalTranscriptClient:
                     "X-Transcript-Session-Id": str(query.session_id),
                     "X-Analysis-Run-Id": str(query.analysis_run_id),
                     "X-Analysis-Spec-Version": query.analysis_spec_version,
+                    "X-Canonical-Read-Grant": query.canonical_read_grant.get_secret_value(),
                 },
                 timeout=self._settings.transcript_service_timeout_sec,
             )
@@ -290,6 +293,7 @@ class HttpCanonicalTranscriptClient:
                         else ""
                     ),
                     "X-Transcript-Sha256": query.transcript_sha256 or "",
+                    "X-Canonical-Read-Grant": query.canonical_read_grant.get_secret_value(),
                 },
                 timeout=self._settings.transcript_service_timeout_sec,
             )
@@ -351,9 +355,24 @@ def _query_from_message(message: ClaimedMessage) -> _CanonicalTranscriptQuery:
         finalization_version=finalization_version,
         analysis_run_id=uuid.UUID(message.analysis_run_id),
         analysis_spec_version=analysis_spec_version,
+        canonical_read_grant=_canonical_read_grant(payload),
         finalized_at=finalized_at,
         transcript_sha256=transcript_sha256,
     )
+
+
+def _canonical_read_grant(payload: dict[str, object]) -> SecretStr:
+    grant = str(payload["_canonical_read_grant"])
+    if (
+        len(grant) != 46
+        or not grant.startswith("v1.")
+        or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            for character in grant[3:]
+        )
+    ):
+        raise ValueError("invalid canonical read grant")
+    return SecretStr(grant)
 
 
 def _aware_datetime(value: str) -> datetime:

@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 import httpx
+from pydantic import SecretStr
 
 from app.api.metrics import (
     mai_ingestion_delivery_total,
@@ -64,6 +65,7 @@ def build_ingestion_payload(
     transcript: str,
     result: AnalyzeResponse,
     generated_at: datetime,
+    canonical_read_grant: SecretStr | None = None,
 ) -> dict[str, object]:
     """Map the v5 AI response to backend BE-1c without storing raw transcript."""
     try:
@@ -116,6 +118,8 @@ def build_ingestion_payload(
             "_canonical_tenant_id": canonical_tenant_id,
         }
     )
+    if canonical_read_grant is not None:
+        payload["_canonical_read_grant"] = canonical_read_grant.get_secret_value()
     return payload
 
 

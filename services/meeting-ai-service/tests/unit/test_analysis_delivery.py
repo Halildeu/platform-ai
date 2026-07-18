@@ -30,6 +30,7 @@ MEETING_ID = "11111111-1111-4111-8111-111111111111"
 TENANT_ID = "33333333-3333-4333-8333-333333333333"
 SESSION_ID = "22222222-2222-4222-8222-222222222222"
 FINALIZED_AT = datetime(2026, 7, 18, 1, 0, tzinfo=UTC)
+READ_GRANT = "v1." + "A" * 43
 
 
 class FakeTransport:
@@ -325,6 +326,7 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
             transcript=transcript,
             result=_result(),
             generated_at=datetime(2026, 7, 18, 1, 1, tzinfo=UTC),
+            canonical_read_grant=SecretStr(READ_GRANT),
         )
         store.enqueue(analysis_run_id=run_id, meeting_id=MEETING_ID, payload=payload)
 
@@ -340,6 +342,7 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
                 capabilities.append(capability)
                 assert request.headers["X-Analysis-Run-Id"] == run_id
                 assert request.headers["X-Analysis-Spec-Version"] == settings.analysis_spec_version
+                assert request.headers["X-Canonical-Read-Grant"] == READ_GRANT
                 return httpx.Response(
                     200,
                     json={
@@ -385,9 +388,12 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
             await first._deliver(first_message)
             await first.stop()
 
-            await asyncio.sleep(0.11)
             restarted = AnalysisDeliveryRuntime(settings, store=store, http_client=client)
-            replay_message = store.claim_next(owner=restarted._owner, lease_sec=1.0)
+            replay_message = store.claim_next(
+                owner=restarted._owner,
+                lease_sec=1.0,
+                now=time.time() + settings.ingestion_max_backoff_sec + 1.0,
+            )
             assert replay_message is not None
             await restarted._deliver(replay_message)
             await restarted.stop()
@@ -402,6 +408,7 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
     assert capabilities == ["one-use-capability-1", "one-use-capability-2"]
     assert post_outcomes == ["201-response-lost", "200-replay"]
     assert b"one-use-capability" not in durable_bytes
+    assert READ_GRANT.encode() not in durable_bytes
     assert "Bütçe onaylandı.".encode() not in durable_bytes
 
 
