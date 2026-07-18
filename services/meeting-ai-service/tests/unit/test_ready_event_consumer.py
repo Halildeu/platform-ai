@@ -22,7 +22,6 @@ from app.services.analysis_application import AnalysisApplicationService
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
 from app.services.analyze import MeetingAnalysisService
 from app.services.canonical_transcript_client import (
-    CanonicalTranscriptFetchResult,
     CanonicalTranscriptRetryableError,
     CanonicalTranscriptSnapshot,
 )
@@ -36,7 +35,6 @@ SESSION = "22222222-2222-4222-8222-222222222222"
 TENANT = "33333333-3333-4333-8333-333333333333"
 EVENT_KEY = f"meeting.transcript|{SESSION}|meeting.transcript.ready|1"
 RAW_TRANSCRIPT = "RAW-CANONICAL-TRANSCRIPT-SECRET Bütçe kararlaştırıldı."
-READ_GRANT = "v1." + "A" * 43
 
 
 def _event_lookup_digest() -> str:
@@ -92,19 +90,17 @@ class FakeTranscriptClient:
         self.calls += 1
         if self.retry:
             raise CanonicalTranscriptRetryableError("transcript_http_503")
-        return CanonicalTranscriptFetchResult(
-            snapshot=CanonicalTranscriptSnapshot(
-                tenantId=str(event.tenant_id),
-                meetingId=str(event.meeting_id),
-                sessionId=str(event.session_id),
-                finalizationVersion=event.finalization_version,
-                finalizedAt="2026-07-18T01:00:00Z",
-                state="FINALIZED",
-                transcript=RAW_TRANSCRIPT,
-                transcriptSha256=hashlib.sha256(RAW_TRANSCRIPT.encode()).hexdigest(),
-                segmentCount=event.segment_count,
-                segments=[{"text": RAW_TRANSCRIPT, "start": 0.0, "end": 4.0}],
-            )
+        return CanonicalTranscriptSnapshot(
+            tenantId=str(event.tenant_id),
+            meetingId=str(event.meeting_id),
+            sessionId=str(event.session_id),
+            finalizationVersion=event.finalization_version,
+            finalizedAt="2026-07-18T01:00:00Z",
+            state="FINALIZED",
+            transcript=RAW_TRANSCRIPT,
+            transcriptSha256=hashlib.sha256(RAW_TRANSCRIPT.encode()).hexdigest(),
+            segmentCount=event.segment_count,
+            segments=[{"text": RAW_TRANSCRIPT, "start": 0.0, "end": 4.0}],
         )
 
     async def aclose(self) -> None:
@@ -149,7 +145,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
             "/analysis-capability"
         ),
         "transcript_service_token_url": "https://auth.test/token",
-        "transcript_service_client_id": "meeting-ai-ready",
+        "transcript_service_client_id": "meeting-ai",
         "transcript_service_client_secret": SecretStr("transcript-secret"),
     }
     values.update(overrides)
@@ -161,7 +157,7 @@ def _fields(*, generated_at: str = "2026-07-18T01:02:03Z") -> dict[object, objec
         {
             "schema": "meeting.event.v1",
             "eventType": "meeting.transcript.ready",
-            "analysisRunId": None,
+            "analysisRunId": "44444444-4444-4444-8444-444444444444",
             "meetingId": MEETING,
             "tenantId": TENANT,
             "orgId": TENANT,
@@ -180,7 +176,6 @@ def _fields(*, generated_at: str = "2026-07-18T01:02:03Z") -> dict[object, objec
         b"tenantId": TENANT.encode(),
         b"orgId": TENANT.encode(),
         b"payload": payload,
-        b"canonicalReadGrant": READ_GRANT.encode(),
     }
 
 
@@ -336,7 +331,7 @@ def test_upgrade_replay_outboxes_with_stored_analysis_run_id(tmp_path: Path) -> 
     assert message.analysis_run_id == "44444444-4444-4444-8444-444444444444"
 
 
-def test_ready_event_outbox_carries_deterministic_backend_tuple_and_encrypted_read_grant(
+def test_ready_event_outbox_carries_producer_backend_tuple_without_ephemeral_grants(
     tmp_path: Path,
 ) -> None:
     async def scenario():  # type: ignore[no-untyped-def]
@@ -347,13 +342,14 @@ def test_ready_event_outbox_carries_deterministic_backend_tuple_and_encrypted_re
 
     message = asyncio.run(scenario())
     assert message is not None
-    assert message.analysis_run_id == "5fd6d577-33a1-5d96-bf5f-51eec2915c58"
+    assert message.analysis_run_id == "44444444-4444-4444-8444-444444444444"
     assert message.payload["_canonical_tenant_id"] == TENANT
     assert message.payload["transcript_session_id"] == SESSION
     assert message.payload["finalization_version"] == 1
     assert message.payload["finalized_at"] == "2026-07-18T01:00:00Z"
     assert message.payload["analysis_spec_version"] == "meeting-intelligence-v1"
-    assert message.payload["_canonical_read_grant"] == READ_GRANT
+    assert message.payload["generated_at"] != "2026-07-18T01:02:03Z"
+    assert "_canonical_read_grant" not in message.payload
     assert not any("capability" in key for key in message.payload)
 
 
@@ -558,16 +554,20 @@ def test_owned_pel_scan_makes_retry_available_before_stale_claim_window(tmp_path
     assert ack_count == 0
 
 
-def test_autoclaim_uses_returned_scan_cursor(tmp_path: Path) -> None:
-    async def scenario() -> list[object]:
+def test_autoclaim_uses_returned_scan_cursor_and_dlqs_deleted_sources(tmp_path: Path) -> None:
+    async def scenario() -> tuple[list[object], FakeRedis, str]:
         runtime, _, redis, _ = _runtime(tmp_path)
         redis.autoclaim_result = (b"42-0", [], [b"deleted-1"])
         await runtime._claim_stale()
         redis.autoclaim_result = (b"0-0", [], [])
         await runtime._claim_stale()
-        return redis.autoclaim_start_ids
+        return redis.autoclaim_start_ids, redis, (await runtime.health()).status
 
-    assert asyncio.run(scenario()) == ["0-0", "42-0"]
+    cursors, redis, health_status = asyncio.run(scenario())
+    assert cursors == ["0-0", "42-0"]
+    assert redis.added[0]["fields"]["errorCode"] == "redis_pending_source_deleted"  # type: ignore[index]
+    assert redis.acked[-1][-1] == "deleted-1"
+    assert health_status == "degraded"
 
 
 def test_owned_pel_finishes_current_scan_even_when_a_future_retry_is_scheduled(

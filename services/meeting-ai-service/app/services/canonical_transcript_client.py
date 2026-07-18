@@ -95,11 +95,6 @@ class CanonicalTranscriptSnapshot(BaseModel):
 
 
 @dataclass(frozen=True)
-class CanonicalTranscriptFetchResult:
-    snapshot: CanonicalTranscriptSnapshot
-
-
-@dataclass(frozen=True)
 class _CanonicalTranscriptQuery:
     tenant_id: uuid.UUID
     meeting_id: uuid.UUID
@@ -107,14 +102,13 @@ class _CanonicalTranscriptQuery:
     finalization_version: int
     analysis_run_id: uuid.UUID
     analysis_spec_version: str
-    canonical_read_grant: SecretStr
     segment_count: int | None = None
     finalized_at: datetime | None = None
     transcript_sha256: str | None = None
 
 
 class CanonicalTranscriptPort(Protocol):
-    async def fetch(self, event: ParsedTranscriptReadyEvent) -> CanonicalTranscriptFetchResult: ...
+    async def fetch(self, event: ParsedTranscriptReadyEvent) -> CanonicalTranscriptSnapshot: ...
 
     async def aclose(self) -> None: ...
 
@@ -125,7 +119,7 @@ class HttpCanonicalTranscriptClient:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings
         self._client = ReloadingHttpClient(settings, client)
-        self._tokens = ServiceTokenClient(
+        self._snapshot_tokens = ServiceTokenClient(
             settings,
             self._client,
             ServiceTokenRequest(
@@ -137,8 +131,20 @@ class HttpCanonicalTranscriptClient:
                 timeout_sec=settings.transcript_service_timeout_sec,
             ),
         )
+        self._capability_tokens = ServiceTokenClient(
+            settings,
+            self._client,
+            ServiceTokenRequest(
+                token_url=settings.transcript_service_token_url,
+                client_id=settings.transcript_service_client_id,
+                client_secret=settings.transcript_service_client_secret,
+                audience=settings.transcript_service_audience,
+                permissions=tuple(settings.transcript_service_capability_permissions),
+                timeout_sec=settings.transcript_service_timeout_sec,
+            ),
+        )
 
-    async def fetch(self, event: ParsedTranscriptReadyEvent) -> CanonicalTranscriptFetchResult:
+    async def fetch(self, event: ParsedTranscriptReadyEvent) -> CanonicalTranscriptSnapshot:
         return await self._fetch(
             _CanonicalTranscriptQuery(
                 tenant_id=event.tenant_id,
@@ -147,7 +153,6 @@ class HttpCanonicalTranscriptClient:
                 finalization_version=event.finalization_version,
                 analysis_run_id=event.analysis_run_id,
                 analysis_spec_version=self._settings.analysis_spec_version,
-                canonical_read_grant=event.canonical_read_grant,
                 segment_count=event.segment_count,
             )
         )
@@ -189,15 +194,15 @@ class HttpCanonicalTranscriptClient:
             )
         return capability, None
 
-    async def _fetch(self, query: _CanonicalTranscriptQuery) -> CanonicalTranscriptFetchResult:
-        token, token_error = await self._tokens.get_token()
+    async def _fetch(self, query: _CanonicalTranscriptQuery) -> CanonicalTranscriptSnapshot:
+        token, token_error = await self._snapshot_tokens.get_token()
         if token_error is not None:
             if token_error.disposition is DeliveryDisposition.RETRY:
                 raise CanonicalTranscriptRetryableError(
-                    token_error.error_code,
+                    f"transcript_{token_error.error_code}",
                     token_error.retry_after_sec,
                 )
-            raise CanonicalTranscriptTerminalError(token_error.error_code)
+            raise CanonicalTranscriptTerminalError(f"transcript_{token_error.error_code}")
         assert token is not None
 
         path = self._settings.transcript_service_snapshot_path_template.format(
@@ -208,7 +213,8 @@ class HttpCanonicalTranscriptClient:
         )
         url = self._settings.transcript_service_base_url.rstrip("/") + path
         try:
-            response = await self._client.get(
+            async with self._client.stream(
+                "GET",
                 url,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -217,17 +223,20 @@ class HttpCanonicalTranscriptClient:
                     "X-Transcript-Session-Id": str(query.session_id),
                     "X-Analysis-Run-Id": str(query.analysis_run_id),
                     "X-Analysis-Spec-Version": query.analysis_spec_version,
-                    "X-Canonical-Read-Grant": query.canonical_read_grant.get_secret_value(),
                 },
                 timeout=self._settings.transcript_service_timeout_sec,
-            )
+            ) as response:
+                body = await _bounded_response_body(
+                    response,
+                    self._settings.transcript_service_max_response_bytes,
+                )
         except (httpx.HTTPError, MeetingServiceTlsError) as exc:
             raise CanonicalTranscriptRetryableError(
                 f"transcript_network_{type(exc).__name__}"
             ) from exc
 
         if response.status_code == 401:
-            self._tokens.invalidate()
+            self._snapshot_tokens.invalidate()
             raise CanonicalTranscriptRetryableError("transcript_http_401")
         if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
             raise CanonicalTranscriptRetryableError(
@@ -237,7 +246,7 @@ class HttpCanonicalTranscriptClient:
         if response.status_code != 200:
             raise CanonicalTranscriptTerminalError(f"transcript_http_{response.status_code}")
         try:
-            snapshot = CanonicalTranscriptSnapshot.model_validate_json(response.content)
+            snapshot = CanonicalTranscriptSnapshot.model_validate_json(body)
         except (ValidationError, ValueError):
             raise CanonicalTranscriptTerminalError("transcript_invalid_response") from None
         if len(snapshot.transcript) > self._settings.max_transcript_chars:
@@ -255,19 +264,20 @@ class HttpCanonicalTranscriptClient:
             )
         ):
             raise CanonicalTranscriptTerminalError("transcript_identity_mismatch")
-        return CanonicalTranscriptFetchResult(snapshot=snapshot)
+        return snapshot
 
     async def _issue_capability(
         self, query: _CanonicalTranscriptQuery
     ) -> tuple[SecretStr, datetime]:
-        token, token_error = await self._tokens.get_token()
+        token, token_error = await self._capability_tokens.get_token()
         if token_error is not None:
+            error_code = f"transcript_capability_{token_error.error_code}"
             if token_error.disposition is DeliveryDisposition.RETRY:
                 raise CanonicalTranscriptRetryableError(
-                    token_error.error_code,
+                    error_code,
                     token_error.retry_after_sec,
                 )
-            raise CanonicalTranscriptTerminalError(token_error.error_code)
+            raise CanonicalTranscriptTerminalError(error_code)
         assert token is not None
 
         path = self._settings.transcript_service_capability_path_template.format(
@@ -285,15 +295,9 @@ class HttpCanonicalTranscriptClient:
                     "X-Tenant-Id": str(query.tenant_id),
                     "X-Meeting-Id": str(query.meeting_id),
                     "X-Transcript-Session-Id": str(query.session_id),
+                    "X-Transcript-Finalization-Version": str(query.finalization_version),
                     "X-Analysis-Run-Id": str(query.analysis_run_id),
                     "X-Analysis-Spec-Version": query.analysis_spec_version,
-                    "X-Transcript-Finalized-At": (
-                        query.finalized_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
-                        if query.finalized_at is not None
-                        else ""
-                    ),
-                    "X-Transcript-Sha256": query.transcript_sha256 or "",
-                    "X-Canonical-Read-Grant": query.canonical_read_grant.get_secret_value(),
                 },
                 timeout=self._settings.transcript_service_timeout_sec,
             )
@@ -303,24 +307,25 @@ class HttpCanonicalTranscriptClient:
             ) from exc
 
         if response.status_code == 401:
-            self._tokens.invalidate()
+            self._capability_tokens.invalidate()
             raise CanonicalTranscriptRetryableError("transcript_capability_http_401")
         if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
             raise CanonicalTranscriptRetryableError(
                 f"transcript_capability_http_{response.status_code}",
                 _retry_after_seconds(response),
             )
-        if response.status_code != 200:
+        if response.status_code != 204:
             raise CanonicalTranscriptTerminalError(
                 f"transcript_capability_http_{response.status_code}"
             )
         try:
             capability = response.headers["X-Analysis-Job-Capability"].strip()
-            capability_expires_at = _aware_datetime(
-                response.headers["X-Analysis-Job-Capability-Expires-At"]
-            )
-            if not capability:
-                raise ValueError("empty capability")
+            expires_at_header = response.headers[
+                "X-Analysis-Job-Capability-Expires-At"
+            ].strip()
+            if not capability or len(capability) > 8192 or len(expires_at_header) > 128:
+                raise ValueError("invalid capability headers")
+            capability_expires_at = _aware_datetime(expires_at_header)
         except (KeyError, ValueError):
             raise CanonicalTranscriptTerminalError(
                 "transcript_capability_invalid_response"
@@ -355,24 +360,9 @@ def _query_from_message(message: ClaimedMessage) -> _CanonicalTranscriptQuery:
         finalization_version=finalization_version,
         analysis_run_id=uuid.UUID(message.analysis_run_id),
         analysis_spec_version=analysis_spec_version,
-        canonical_read_grant=_canonical_read_grant(payload),
         finalized_at=finalized_at,
         transcript_sha256=transcript_sha256,
     )
-
-
-def _canonical_read_grant(payload: dict[str, object]) -> SecretStr:
-    grant = str(payload["_canonical_read_grant"])
-    if (
-        len(grant) != 46
-        or not grant.startswith("v1.")
-        or any(
-            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-            for character in grant[3:]
-        )
-    ):
-        raise ValueError("invalid canonical read grant")
-    return SecretStr(grant)
 
 
 def _aware_datetime(value: str) -> datetime:
@@ -381,3 +371,24 @@ def _aware_datetime(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must carry a timezone")
     return parsed
+
+
+async def _bounded_response_body(response: httpx.Response, max_bytes: int) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            parsed_content_length = int(content_length)
+            if parsed_content_length < 0:
+                raise ValueError("negative content length")
+            if parsed_content_length > max_bytes:
+                raise CanonicalTranscriptTerminalError("transcript_response_too_large")
+        except ValueError:
+            raise CanonicalTranscriptTerminalError("transcript_invalid_content_length") from None
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > max_bytes:
+            raise CanonicalTranscriptTerminalError("transcript_response_too_large")
+        chunks.append(chunk)
+    return b"".join(chunks)

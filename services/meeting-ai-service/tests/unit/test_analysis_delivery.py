@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import time
 from collections import deque
@@ -30,7 +29,6 @@ MEETING_ID = "11111111-1111-4111-8111-111111111111"
 TENANT_ID = "33333333-3333-4333-8333-333333333333"
 SESSION_ID = "22222222-2222-4222-8222-222222222222"
 FINALIZED_AT = datetime(2026, 7, 18, 1, 0, tzinfo=UTC)
-READ_GRANT = "v1." + "A" * 43
 
 
 class FakeTransport:
@@ -307,12 +305,11 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
                 "/analysis-capability"
             ),
             transcript_service_token_url="https://auth.test/token",
-            transcript_service_client_id="meeting-ai-ready",
+            transcript_service_client_id="meeting-ai",
             transcript_service_client_secret=SecretStr("transcript-secret"),
         )
         store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
         transcript = "Bütçe onaylandı."
-        transcript_sha = hashlib.sha256(transcript.encode()).hexdigest()
         finalized_at = datetime(2026, 7, 18, 1, 0, tzinfo=UTC)
         run_id = "44444444-4444-4444-8444-444444444444"
         payload = build_ingestion_payload(
@@ -326,7 +323,6 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
             transcript=transcript,
             result=_result(),
             generated_at=datetime(2026, 7, 18, 1, 1, tzinfo=UTC),
-            canonical_read_grant=SecretStr(READ_GRANT),
         )
         store.enqueue(analysis_run_id=run_id, meeting_id=MEETING_ID, payload=payload)
 
@@ -340,23 +336,13 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
             if request.url.host == "transcript.test":
                 capability = f"one-use-capability-{len(capabilities) + 1}"
                 capabilities.append(capability)
+                assert request.method == "POST"
+                assert request.content == b""
                 assert request.headers["X-Analysis-Run-Id"] == run_id
                 assert request.headers["X-Analysis-Spec-Version"] == settings.analysis_spec_version
-                assert request.headers["X-Canonical-Read-Grant"] == READ_GRANT
+                assert "X-Canonical-Read-Grant" not in request.headers
                 return httpx.Response(
-                    200,
-                    json={
-                        "tenantId": TENANT_ID,
-                        "meetingId": MEETING_ID,
-                        "sessionId": SESSION_ID,
-                        "finalizationVersion": 1,
-                        "finalizedAt": "2026-07-18T01:00:00Z",
-                        "state": "FINALIZED",
-                        "transcript": transcript,
-                        "transcriptSha256": transcript_sha,
-                        "segmentCount": 1,
-                        "segments": [{"text": transcript, "start": 0.0, "end": 1.0}],
-                    },
+                    204,
                     headers={
                         "X-Analysis-Job-Capability": capability,
                         "X-Analysis-Job-Capability-Expires-At": "2099-07-18T01:15:00Z",
@@ -379,7 +365,20 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
                 raise httpx.ReadError("response lost after commit", request=request)
             assert existing == body
             post_outcomes.append("200-replay")
-            return httpx.Response(200, json={"idempotent_replay": True})
+            return httpx.Response(
+                200,
+                json={
+                    "analysis_run_id": run_id,
+                    "meeting_id": MEETING_ID,
+                    "persisted": True,
+                    "storage_mode": "persisted",
+                    "idempotent_replay": True,
+                    "decision_count": len(body["decisions"]),  # type: ignore[arg-type]
+                    "action_count": len(body["actions"]),  # type: ignore[arg-type]
+                    "supersedes_analysis_run_id": body["supersedes_analysis_run_id"],
+                    "generated_at": body["generated_at"],
+                },
+            )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             first = AnalysisDeliveryRuntime(settings, store=store, http_client=client)
@@ -408,7 +407,6 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
     assert capabilities == ["one-use-capability-1", "one-use-capability-2"]
     assert post_outcomes == ["201-response-lost", "200-replay"]
     assert b"one-use-capability" not in durable_bytes
-    assert READ_GRANT.encode() not in durable_bytes
     assert "Bütçe onaylandı.".encode() not in durable_bytes
 
 

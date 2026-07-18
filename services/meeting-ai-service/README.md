@@ -136,11 +136,14 @@ session, finalization, finalized-at, and analysis-spec tuple. The direct `/analy
 route cannot establish that trusted tuple and returns `422` instead of queueing a
 result that meeting-service must reject or allowing a caller to select another
 tenant's finalization. Network delivery to meeting-service runs in a lifespan worker.
-The same deterministic `analysisRunId` is reused for every attempt and sent as
+The producer-owned `analysisRunId` is reused for every attempt and sent as
 `Idempotency-Key`; every POST obtains a fresh, tuple-bound one-use capability from
-transcript-service. A `200` replay and `201` create both ACK the local row. Retryable
-network/401/429/5xx results use exponential backoff and jitter. Terminal 4xx or the
-attempt limit moves the encrypted row to DLQ.
+transcript-service. A `200` replay or `201` create ACKs the local row only when the
+response body exactly confirms the run, meeting, persisted mode, replay status,
+child counts, supersession, and generated timestamp. An ambiguous success is retried
+with the same run and a fresh capability. Retryable network/401/429/5xx results use
+exponential backoff and jitter. Terminal 4xx or the attempt limit moves the encrypted
+row to DLQ.
 
 The outbox contains no raw transcript. It stores the transcript SHA-256 and the
 already-redacted analysis payload. That payload is still sensitive and is encrypted
@@ -203,9 +206,9 @@ in delivery error codes or logs.
 `MAI_READY_CONSUMER_ENABLED=false` is the default. When explicitly enabled, the
 service consumes only `meeting.transcript.ready` from the configured Redis Stream
 consumer group. The thin event is not an authorization grant. The worker obtains a
-separate auth-service client-credentials token with the configured transcript read
-permission, then fetches a tenant/meeting/session/finalization-bound canonical snapshot
-from transcript-service.
+dedicated auth-service client-credentials token requesting only
+`transcript:canonical:read`, then fetches a
+tenant/meeting/session/finalization-bound canonical snapshot from transcript-service.
 
 The producer stream may be shared. Records whose outer `eventType` is a different,
 well-formed event are ACKed for this consumer group as `ignored`; they are not written
@@ -228,9 +231,19 @@ SQLite commits either
 `BEGIN IMMEDIATE` transaction. A stale lease reclaim increments both the recovery
 counter and the shared failure budget. Once `MAI_READY_CONSUMER_MAX_FAILURES` is
 reached, the inbox row becomes `RETRY_EXHAUSTED` before another worker can claim it;
-an audit-referenced operator redrive resets both counters. The stable analysis run
-UUIDv5 is derived from tenant ID, meeting ID, session ID, finalization version, and
-`MAI_ANALYSIS_SPEC_VERSION`.
+an audit-referenced operator redrive resets both counters. The analysis run ID is
+minted by transcript-service during canonical finalization and carried by the
+content-free ready event. The consumer never derives or chooses it.
+
+The ready event is content-free and credential-free. In particular,
+`canonicalReadGrant` is rejected rather than copied into Redis, logs, SQLite, or the
+delivery outbox. The exact snapshot GET is authorized by the service token and the
+producer-owned analysis-run binding. It returns only the validated snapshot; capability
+headers on that response are ignored. Delivery uses a separate token cache requesting
+only `transcript:analysis-job-capability:issue` and a bodyless JIT POST to the same
+tenant/meeting/session/finalization tuple plus `/analysis-capability`. The read and
+capability requests may use the same service client ID and secret, but their token forms,
+caches, invalidation, and error classifications remain separate.
 
 Retry deadlines are enforced by scanning the current consumer's own PEL separately
 from `XAUTOCLAIM` stale-owner recovery. Result-outbox capacity is backpressure, not an
@@ -253,22 +266,37 @@ Required activation configuration, in addition to durable delivery:
 - `MAI_TRANSCRIPT_SERVICE_BASE_URL`
 - `MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE`, containing `{tenant_id}`,
   `{meeting_id}`, `{session_id}`, and `{finalization_version}`
-- `MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE`, containing the same identity
-  placeholders and pointing to the dedicated one-use analysis-capability endpoint
+- `MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE`, containing the same exact tuple
+  placeholders (recommended: snapshot path plus `/analysis-capability`)
 - `MAI_TRANSCRIPT_SERVICE_TOKEN_URL`, `MAI_TRANSCRIPT_SERVICE_CLIENT_ID`,
   `MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET`
-- `MAI_TRANSCRIPT_SERVICE_AUDIENCE`, `MAI_TRANSCRIPT_SERVICE_SCOPE`
+- `MAI_TRANSCRIPT_SERVICE_AUDIENCE`, `MAI_TRANSCRIPT_SERVICE_SCOPE` (exactly
+  `transcript:canonical:read`), and `MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE` (exactly
+  `transcript:analysis-job-capability:issue`)
 
-The HTTP adapter expects a JSON snapshot with exact tenant, meeting, session,
-`finalizationVersion=1`, `state=FINALIZED`, `segmentCount`, raw in-memory `transcript`,
-and `transcriptSha256=sha256(UTF-8 transcript)`. Identity, state, count, segments,
-reconstructed text, and hash are verified before analysis. The snapshot GET never
-mints a delivery capability. A one-use capability is requested only immediately
-before result delivery and is bound to the canonical tuple. This adapter must remain
-disabled until transcript-service freezes both internal endpoints and
-auth-service/transcript-service enforce the
-tenant/job binding for the token; an event or caller-supplied tenant header is not
-accepted as authority.
+The HTTP adapter expects a bounded JSON snapshot with exact tenant, meeting, session,
+positive `finalizationVersion`, `state=FINALIZED`, `segmentCount`, raw in-memory
+`transcript`, and `transcriptSha256=sha256(UTF-8 transcript)`. The response is stopped
+at `MAI_TRANSCRIPT_SERVICE_MAX_RESPONSE_BYTES`, including chunked responses without a
+`Content-Length`. Identity, state, count, segments, reconstructed text, and hash are
+verified before analysis. The GET never parses or returns a write capability.
+
+Immediately before result delivery, the JIT capability POST carries only
+`X-Tenant-Id`, `X-Meeting-Id`, `X-Transcript-Session-Id`,
+`X-Transcript-Finalization-Version`, `X-Analysis-Run-Id`, and
+`X-Analysis-Spec-Version`, plus authorization. It sends no body, transcript, hash, or
+other PII. Exactly `204` is success. The adapter accepts the one-use capability and
+expiry only from bounded `X-Analysis-Job-Capability` and
+`X-Analysis-Job-Capability-Expires-At` headers, applies the delivery timeout plus clock
+skew guard, and never persists the capability. Capability refresh therefore does not
+transfer or parse the transcript a second time. This adapter must remain disabled until
+transcript-service freezes both internal endpoints and auth-service/transcript-service
+enforce tenant/job binding from an independent authority. An event tuple or
+caller-supplied tenant header alone is not authority.
+The persisted `generated_at` is stamped after analysis completes, not copied from the
+ready-event publication time. When the ready consumer is active, startup also requires
+the result-outbox lease to exceed two meeting-service plus two transcript-service HTTP
+timeout windows so another worker cannot reclaim an in-flight cold delivery.
 
 Only `RETRY_EXHAUSTED` ready-event DLQ rows can be operator-rearmed. Poison,
 contract-terminal, and payload-conflict rows remain permanently fail-closed. Rearming

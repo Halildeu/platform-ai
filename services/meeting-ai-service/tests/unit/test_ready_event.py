@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
 from app.models.ready_event import (
     ReadyEventContractError,
-    analysis_run_id_for,
     parse_transcript_ready_event,
     payload_sha256,
 )
@@ -18,15 +18,15 @@ from app.models.ready_event import (
 MEETING = "11111111-1111-4111-8111-111111111111"
 SESSION = "22222222-2222-4222-8222-222222222222"
 TENANT = "33333333-3333-4333-8333-333333333333"
+RUN_ID = "44444444-4444-4444-8444-444444444444"
 EVENT_KEY = f"meeting.transcript|{SESSION}|meeting.transcript.ready|1"
-READ_GRANT = "v1." + "A" * 43
 
 
 def _payload(**overrides: object) -> bytes:
     body: dict[str, object] = {
         "schema": "meeting.event.v1",
         "eventType": "meeting.transcript.ready",
-        "analysisRunId": None,
+        "analysisRunId": RUN_ID,
         "meetingId": MEETING,
         "tenantId": TENANT,
         "orgId": TENANT,
@@ -48,7 +48,6 @@ def _fields(payload: bytes | None = None, **overrides: object) -> dict[object, o
         b"tenantId": TENANT.encode(),
         b"orgId": TENANT.encode(),
         b"payload": payload or _payload(),
-        b"canonicalReadGrant": READ_GRANT.encode(),
     }
     fields.update(overrides)
     return fields
@@ -63,59 +62,55 @@ def test_parser_pins_v1_cross_field_identity_and_payload_bytes() -> None:
 
     assert event.event_key == EVENT_KEY
     assert event.payload_sha256 == hashlib.sha256(raw).hexdigest()
-    assert str(event.analysis_run_id) == "5fd6d577-33a1-5d96-bf5f-51eec2915c58"
+    assert str(event.analysis_run_id) == RUN_ID
     assert event.finalization_version == 1
-    assert event.canonical_read_grant.get_secret_value() == READ_GRANT
-    assert READ_GRANT not in repr(event)
 
 
-@pytest.mark.parametrize("grant", [b"", b"v1.short", b"v1." + b"!" * 43])
-def test_parser_rejects_missing_or_malformed_transport_read_grant(grant: bytes) -> None:
+def test_parser_accepts_vendored_backend_v1_golden_contract() -> None:
+    raw = (
+        Path(__file__).parents[1] / "contracts" / "backend-transcript-ready-v1.json"
+    ).read_bytes()
+    payload = json.loads(raw)
+    session_id = payload["transcriptSessionId"]
+    event = parse_transcript_ready_event(
+        {
+            "eventKey": (
+                f"meeting.transcript|{session_id}|meeting.transcript.ready|"
+                f"{payload['finalizationVersion']}"
+            ),
+            "eventType": payload["eventType"],
+            "aggregateId": session_id,
+            "meetingId": payload["meetingId"],
+            "tenantId": payload["tenantId"],
+            "orgId": payload["orgId"],
+            "payload": raw,
+        },
+        analysis_spec_version="meeting-intelligence-v1",
+    )
+
+    assert str(event.analysis_run_id) == payload["analysisRunId"]
+    assert str(event.tenant_id) == payload["tenantId"]
+
+
+def test_parser_rejects_transport_read_grant() -> None:
     fields = _fields()
-    fields[b"canonicalReadGrant"] = grant
+    fields[b"canonicalReadGrant"] = b"must-not-enter-the-stream"
     with pytest.raises(ReadyEventContractError) as captured:
         parse_transcript_ready_event(
             fields,
             analysis_spec_version="meeting-intelligence-v1",
         )
-    assert READ_GRANT not in repr(captured.value)
+    assert "must-not-enter-the-stream" not in repr(captured.value)
 
 
-def test_analysis_run_id_changes_only_with_identity_tuple() -> None:
-    base = analysis_run_id_for(
-        tenant_id=uuid.UUID(TENANT),
-        meeting_id=uuid.UUID(MEETING),
-        session_id=uuid.UUID(SESSION),
-        finalization_version=1,
+def test_parser_prefers_producer_minted_analysis_job_identity() -> None:
+    producer_run_id = uuid.uuid4()
+    event = parse_transcript_ready_event(
+        _fields(_payload(analysisRunId=str(producer_run_id))),
         analysis_spec_version="meeting-intelligence-v1",
     )
-    replay = analysis_run_id_for(
-        tenant_id=uuid.UUID(TENANT),
-        meeting_id=uuid.UUID(MEETING),
-        session_id=uuid.UUID(SESSION),
-        finalization_version=1,
-        analysis_spec_version="meeting-intelligence-v1",
-    )
-    changed_spec = analysis_run_id_for(
-        tenant_id=uuid.UUID(TENANT),
-        meeting_id=uuid.UUID(MEETING),
-        session_id=uuid.UUID(SESSION),
-        finalization_version=1,
-        analysis_spec_version="meeting-intelligence-v2",
-    )
-    assert replay == base
-    assert changed_spec != base
-    assert (
-        analysis_run_id_for(
-            tenant_id=uuid.uuid4(),
-            meeting_id=uuid.UUID(MEETING),
-            session_id=uuid.UUID(SESSION),
-            finalization_version=1,
-            analysis_spec_version="meeting-intelligence-v1",
-        )
-        != base
-    )
-    assert base.version == 5
+
+    assert event.analysis_run_id == producer_run_id
 
 
 @pytest.mark.parametrize(
@@ -124,7 +119,8 @@ def test_analysis_run_id_changes_only_with_identity_tuple() -> None:
         ({b"tenantId": uuid.uuid4().bytes}, None),
         ({b"eventKey": b"wrong"}, None),
         ({}, _payload(finalizationVersion=0)),
-        ({}, _payload(analysisRunId="not-allowed")),
+        ({}, _payload(analysisRunId=None)),
+        ({}, _payload(analysisRunId="not-a-uuid")),
         ({}, _payload(orgId=str(uuid.uuid4()))),
     ],
 )
@@ -141,7 +137,8 @@ def test_parser_rejects_cross_tenant_noncanonical_or_future_contract(
 
 
 def test_parser_accepts_later_finalization_cycle() -> None:
-    raw = _payload(finalizationVersion=2)
+    later_run_id = uuid.uuid4()
+    raw = _payload(finalizationVersion=2, analysisRunId=str(later_run_id))
     event = parse_transcript_ready_event(
         _fields(
             raw,
@@ -152,13 +149,7 @@ def test_parser_accepts_later_finalization_cycle() -> None:
 
     assert event.finalization_version == 2
     assert event.event_key.endswith("|2")
-    assert event.analysis_run_id != analysis_run_id_for(
-        tenant_id=uuid.UUID(TENANT),
-        meeting_id=uuid.UUID(MEETING),
-        session_id=uuid.UUID(SESSION),
-        finalization_version=1,
-        analysis_spec_version="meeting-intelligence-v1",
-    )
+    assert event.analysis_run_id == later_run_id
 
 
 def test_same_semantic_json_with_different_bytes_gets_a_different_hash() -> None:

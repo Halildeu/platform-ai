@@ -62,10 +62,38 @@ def _message() -> ClaimedMessage:
     return ClaimedMessage(
         analysis_run_id="22222222-2222-4222-8222-222222222222",
         meeting_id="11111111-1111-4111-8111-111111111111",
-        payload={"summary": "A"},
+        payload={
+            "summary": "A",
+            "generated_at": "2026-07-18T01:02:03Z",
+            "decisions": [],
+            "actions": [],
+            "supersedes_analysis_run_id": None,
+        },
         attempt_count=1,
         created_at=1.0,
     )
+
+
+def _acknowledgment(
+    message: ClaimedMessage | None = None,
+    *,
+    replay: bool = False,
+    **overrides: object,
+) -> dict[str, object]:
+    claimed = message or _message()
+    body: dict[str, object] = {
+        "analysis_run_id": claimed.analysis_run_id,
+        "meeting_id": claimed.meeting_id,
+        "persisted": True,
+        "storage_mode": "persisted",
+        "idempotent_replay": replay,
+        "decision_count": len(claimed.payload.get("decisions", [])),  # type: ignore[arg-type]
+        "action_count": len(claimed.payload.get("actions", [])),  # type: ignore[arg-type]
+        "supersedes_analysis_run_id": claimed.payload.get("supersedes_analysis_run_id"),
+        "generated_at": claimed.payload["generated_at"],
+    }
+    body.update(overrides)
+    return body
 
 
 def test_token_is_cached_and_idempotency_header_is_stable(tmp_path: Path) -> None:
@@ -79,7 +107,7 @@ def test_token_is_cached_and_idempotency_header_is_stable(tmp_path: Path) -> Non
                 token_calls += 1
                 return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
             ingestion_headers.append(request.headers)
-            return httpx.Response(201, json={"idempotent_replay": False})
+            return httpx.Response(201, json=_acknowledgment())
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             service = MeetingServiceClient(_settings(tmp_path), client)
@@ -90,6 +118,35 @@ def test_token_is_cached_and_idempotency_header_is_stable(tmp_path: Path) -> Non
         assert all(h["Authorization"] == "Bearer token" for h in ingestion_headers)
 
     asyncio.run(scenario())
+
+
+def test_success_acknowledgment_is_exact_or_retried_with_stable_run(tmp_path: Path) -> None:
+    async def scenario(status: int, body: object) -> DeliveryAttempt:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+            return httpx.Response(status, json=body)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await MeetingServiceClient(_settings(tmp_path), client).deliver(_message())
+
+    replay_body = _acknowledgment(replay=True)
+    replay_body.pop("supersedes_analysis_run_id")
+    replay = asyncio.run(scenario(200, replay_body))
+    wrong_run = asyncio.run(
+        scenario(
+            201,
+            _acknowledgment(analysis_run_id="99999999-9999-4999-8999-999999999999"),
+        )
+    )
+    wrong_count = asyncio.run(scenario(201, _acknowledgment(action_count=1)))
+    mismatched_status = asyncio.run(scenario(201, _acknowledgment(replay=True)))
+    malformed = asyncio.run(scenario(201, {"persisted": True}))
+
+    assert replay.disposition is DeliveryDisposition.REPLAYED
+    for invalid in (wrong_run, wrong_count, mismatched_status, malformed):
+        assert invalid.disposition is DeliveryDisposition.RETRY
+        assert invalid.error_code == "ingestion_invalid_acknowledgment"
 
 
 def test_each_post_uses_fresh_capability_and_strips_internal_tenant_metadata(
@@ -105,7 +162,7 @@ def test_each_post_uses_fresh_capability_and_strips_internal_tenant_metadata(
                 return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
             headers.append(request.headers)
             bodies.append(json.loads(request.content))
-            return httpx.Response(201)
+            return httpx.Response(201, json=_acknowledgment(message))
 
         message = _message()
         message.payload["_canonical_tenant_id"] = "33333333-3333-4333-8333-333333333333"
@@ -162,7 +219,7 @@ def test_short_lived_token_is_not_reused_and_invalid_token_is_terminal(tmp_path:
                     200,
                     json={"access_token": f"token-{token_calls}", "expires_in": 5},
                 )
-            return httpx.Response(201)
+            return httpx.Response(201, json=_acknowledgment())
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             service = MeetingServiceClient(_settings(tmp_path), client)
@@ -216,7 +273,7 @@ def test_token_request_body_matches_auth_service_contract(tmp_path: Path) -> Non
                 parsed = parse_qs(request.content.decode(), keep_blank_values=True)
                 captured.update(parsed)
                 return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
-            return httpx.Response(201, json={"idempotent_replay": False})
+            return httpx.Response(201, json=_acknowledgment())
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             service = MeetingServiceClient(_settings(tmp_path), client)
@@ -244,7 +301,7 @@ def test_multiple_permissions_emit_repeated_form_fields(tmp_path: Path) -> None:
 
                 captured.update(parse_qs(request.content.decode(), keep_blank_values=True))
                 return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
-            return httpx.Response(201, json={"idempotent_replay": False})
+            return httpx.Response(201, json=_acknowledgment())
 
         settings = _settings(tmp_path)
         settings.meeting_service_scope = (
@@ -546,7 +603,7 @@ def test_real_mtls_handshake_requires_trusted_client_certificate(tmp_path: Path)
                 body = b'{"access_token":"ephemeral-test-token","expires_in":60}'
             else:
                 status = "201 Created"
-                body = b'{"idempotent_replay":false}'
+                body = json.dumps(_acknowledgment()).encode()
             writer.write(
                 f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\n"
                 f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body

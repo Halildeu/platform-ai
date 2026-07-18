@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
-
-import anyio
 
 from app.core.config import Settings
 from app.models.schemas import AnalyzeResponse
@@ -53,6 +53,7 @@ class AnalysisApplicationService:
     def __init__(self, settings: Settings, analyzer: MeetingAnalysisService) -> None:
         self._settings = settings
         self._analyzer = analyzer
+        self._analysis_slots = asyncio.Semaphore(settings.analysis_max_concurrency)
 
     async def execute(
         self,
@@ -62,16 +63,33 @@ class AnalysisApplicationService:
     ) -> AnalysisExecution:
         if len(command.transcript) > self._settings.max_transcript_chars:
             raise AnalysisTranscriptTooLargeError("transcript exceeds configured limit")
+        started_at = time.monotonic()
         try:
-            result = await asyncio.wait_for(
-                anyio.to_thread.run_sync(
+            await asyncio.wait_for(
+                self._analysis_slots.acquire(),
+                timeout=self._settings.request_timeout,
+            )
+        except (asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041
+            raise AnalysisTimeoutError("analysis deadline exceeded") from exc
+        loop = asyncio.get_running_loop()
+        try:
+            future = loop.run_in_executor(
+                None,
+                functools.partial(
                     self._analyzer.analyze,
                     command.transcript,
                     command.segments,
-                    abandon_on_cancel=True,
                 ),
-                timeout=self._settings.request_timeout,
             )
+        except BaseException:
+            self._analysis_slots.release()
+            raise
+        future.add_done_callback(lambda _future: self._analysis_slots.release())
+        remaining = self._settings.request_timeout - (time.monotonic() - started_at)
+        if remaining <= 0:
+            raise AnalysisTimeoutError("analysis deadline exceeded")
+        try:
+            result = await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
         except (asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041
             raise AnalysisTimeoutError("analysis deadline exceeded") from exc
         run_id = await persist(command, result)

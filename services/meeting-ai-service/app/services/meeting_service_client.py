@@ -6,15 +6,17 @@ import asyncio
 import email.utils
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
+from uuid import UUID
 
 import httpx
-from pydantic import SecretStr
+from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
 
 from app.core.config import Settings
 from app.services.durable_outbox import ClaimedMessage
@@ -32,6 +34,22 @@ class DeliveryAttempt:
     disposition: DeliveryDisposition
     error_code: str = ""
     retry_after_sec: float | None = None
+
+
+class _IngestionAcknowledgment(BaseModel):
+    """Exact meeting-service success contract; response bodies are never logged."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    analysis_run_id: UUID
+    meeting_id: UUID
+    persisted: bool
+    storage_mode: Literal["persisted"]
+    idempotent_replay: bool
+    decision_count: int
+    action_count: int
+    supersedes_analysis_run_id: UUID | None = None
+    generated_at: datetime
 
 
 class AnalysisJobCapabilityProvider(Protocol):
@@ -160,6 +178,25 @@ class ReloadingHttpClient:
         client = await self._acquire_client()
         try:
             return await client.get(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            await self._release_client(client)
+
+    @asynccontextmanager
+    async def stream(
+        self,
+        method: str,
+        url: str,
+        **kwargs: object,
+    ) -> AsyncIterator[httpx.Response]:
+        if self._external_client is not None:
+            async with self._external_client.stream(method, url, **kwargs) as response:  # type: ignore[arg-type]
+                yield response
+            return
+
+        client = await self._acquire_client()
+        try:
+            async with client.stream(method, url, **kwargs) as response:  # type: ignore[arg-type]
+                yield response
         finally:
             await self._release_client(client)
 
@@ -381,6 +418,13 @@ class MeetingServiceClient:
             )
 
         if response.status_code in (200, 201):
+            if not _valid_ingestion_acknowledgment(response, message, body):
+                # The write may already be committed. Retry the stable run with a
+                # fresh one-use capability instead of acknowledging ambiguous data.
+                return DeliveryAttempt(
+                    DeliveryDisposition.RETRY,
+                    error_code="ingestion_invalid_acknowledgment",
+                )
             if response.status_code == 200:
                 return DeliveryAttempt(DeliveryDisposition.REPLAYED)
             return DeliveryAttempt(DeliveryDisposition.DELIVERED)
@@ -405,6 +449,61 @@ class MeetingServiceClient:
         await self._client.aclose()
         if self._owns_capability_provider and self._capability_provider is not None:
             await self._capability_provider.aclose()
+
+
+def _valid_ingestion_acknowledgment(
+    response: httpx.Response,
+    message: ClaimedMessage,
+    request_body: dict[str, object],
+) -> bool:
+    try:
+        acknowledgment = _IngestionAcknowledgment.model_validate_json(response.content)
+        expected_run_id = UUID(message.analysis_run_id)
+        expected_meeting_id = UUID(message.meeting_id)
+        expected_generated_at = _parse_utc_instant(request_body["generated_at"])
+        expected_supersedes = _optional_uuid(request_body.get("supersedes_analysis_run_id"))
+        expected_decision_count = _collection_size(request_body.get("decisions"))
+        expected_action_count = _collection_size(request_body.get("actions"))
+    except (KeyError, TypeError, ValueError, ValidationError):
+        return False
+
+    expected_replay = response.status_code == 200
+    return (
+        acknowledgment.analysis_run_id == expected_run_id
+        and acknowledgment.meeting_id == expected_meeting_id
+        and acknowledgment.persisted is True
+        and acknowledgment.storage_mode == "persisted"
+        and acknowledgment.idempotent_replay is expected_replay
+        and acknowledgment.decision_count == expected_decision_count
+        and acknowledgment.action_count == expected_action_count
+        and acknowledgment.supersedes_analysis_run_id == expected_supersedes
+        and acknowledgment.generated_at.astimezone(UTC) == expected_generated_at
+    )
+
+
+def _collection_size(value: object) -> int:
+    if value is None:
+        return 0
+    if not isinstance(value, list):
+        raise TypeError("expected a list")
+    return len(value)
+
+
+def _optional_uuid(value: object) -> UUID | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("expected a UUID string")
+    return UUID(value)
+
+
+def _parse_utc_instant(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise TypeError("expected an ISO-8601 instant")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("instant must carry a timezone")
+    return parsed.astimezone(UTC)
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:

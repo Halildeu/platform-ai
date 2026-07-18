@@ -912,8 +912,9 @@ class SqliteReadyEventInbox:
                       AND updated_at <= ?
                       AND (state = 'OUTBOXED' OR dlq_published_at IS NOT NULL)
                     ORDER BY updated_at, event_key_digest
+                    LIMIT ?
                     """,
-                    (cutoff,),
+                    (cutoff, min(batch_size * 10, 100_000)),
                 )
                 digests: list[str] = []
                 for row in rows:

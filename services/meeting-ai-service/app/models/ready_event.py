@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
-
-_ANALYSIS_RUN_NAMESPACE = uuid.UUID("c168bba6-cdf1-5a38-9162-7de65eb0325c")
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ReadyEventContractError(ValueError):
@@ -24,7 +22,7 @@ class TranscriptReadyEnvelope(BaseModel):
 
     schema_name: Literal["meeting.event.v1"] = Field(alias="schema")
     event_type: Literal["meeting.transcript.ready"] = Field(alias="eventType")
-    analysis_run_id: None = Field(alias="analysisRunId")
+    analysis_run_id: uuid.UUID = Field(alias="analysisRunId")
     meeting_id: uuid.UUID = Field(alias="meetingId")
     tenant_id: uuid.UUID = Field(alias="tenantId")
     org_id: uuid.UUID = Field(alias="orgId")
@@ -37,8 +35,6 @@ class TranscriptReadyEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_identity(self) -> TranscriptReadyEnvelope:
-        if self.org_id != self.tenant_id:
-            raise ValueError("orgId must equal tenantId for transcript-ready v1")
         if self.generated_at.tzinfo is None:
             raise ValueError("generatedAt must carry a timezone")
         return self
@@ -55,29 +51,10 @@ class ParsedTranscriptReadyEvent:
     segment_count: int
     generated_at: datetime
     analysis_run_id: uuid.UUID
-    canonical_read_grant: SecretStr = field(repr=False)
 
     @property
     def lookup_key(self) -> str:
         return f"{self.tenant_id}|{self.event_key}"
-
-
-def analysis_run_id_for(
-    *,
-    tenant_id: uuid.UUID,
-    meeting_id: uuid.UUID,
-    session_id: uuid.UUID,
-    finalization_version: int,
-    analysis_spec_version: str,
-) -> uuid.UUID:
-    """Stable UUIDv5 over the canonical analysis identity tuple."""
-    if finalization_version < 1:
-        raise ValueError("finalization_version must be positive")
-    spec = analysis_spec_version.strip()
-    if not spec or len(spec) > 64:
-        raise ValueError("analysis_spec_version must contain 1..64 characters")
-    name = f"{tenant_id}/{meeting_id}/{session_id}/{finalization_version}/{spec}"
-    return uuid.uuid5(_ANALYSIS_RUN_NAMESPACE, name)
 
 
 def parse_transcript_ready_event(
@@ -94,11 +71,12 @@ def parse_transcript_ready_event(
         "tenantId",
         "orgId",
         "payload",
-        "canonicalReadGrant",
     }
     missing = required - decoded.keys()
     if missing:
         raise ReadyEventContractError("ready event is missing required transport fields")
+    if "canonicalReadGrant" in decoded:
+        raise ReadyEventContractError("ready event must not carry a canonical read grant")
 
     raw_payload = _bytes(decoded["payload"])
     try:
@@ -112,7 +90,6 @@ def parse_transcript_ready_event(
     meeting_id = _uuid(decoded["meetingId"], "meetingId")
     tenant_id = _uuid(decoded["tenantId"], "tenantId")
     org_id = _uuid(decoded["orgId"], "orgId")
-    canonical_read_grant = _read_grant(decoded["canonicalReadGrant"])
     expected_key = (
         f"meeting.transcript|{envelope.transcript_session_id}"
         f"|meeting.transcript.ready|{envelope.finalization_version}"
@@ -128,13 +105,6 @@ def parse_transcript_ready_event(
     if tenant_id != envelope.tenant_id or org_id != envelope.org_id:
         raise ReadyEventContractError("ready tenant/org identity does not match its payload")
 
-    run_id = analysis_run_id_for(
-        tenant_id=envelope.tenant_id,
-        meeting_id=envelope.meeting_id,
-        session_id=envelope.transcript_session_id,
-        finalization_version=envelope.finalization_version,
-        analysis_spec_version=analysis_spec_version,
-    )
     return ParsedTranscriptReadyEvent(
         event_key=event_key,
         payload_sha256=hashlib.sha256(raw_payload).hexdigest(),
@@ -144,8 +114,7 @@ def parse_transcript_ready_event(
         finalization_version=envelope.finalization_version,
         segment_count=envelope.segment_count,
         generated_at=envelope.generated_at,
-        analysis_run_id=run_id,
-        canonical_read_grant=canonical_read_grant,
+        analysis_run_id=envelope.analysis_run_id,
     )
 
 
@@ -192,20 +161,3 @@ def _bytes(value: object) -> bytes:
     if isinstance(value, str):
         return value.encode("utf-8")
     raise ReadyEventContractError("ready event payload must be UTF-8 JSON")
-
-
-def _read_grant(value: object) -> SecretStr:
-    try:
-        grant = _decode(value)
-    except UnicodeDecodeError as exc:
-        raise ReadyEventContractError("ready canonical read grant is invalid") from exc
-    if (
-        len(grant) != 46
-        or not grant.startswith("v1.")
-        or any(
-            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-            for character in grant[3:]
-        )
-    ):
-        raise ReadyEventContractError("ready canonical read grant is invalid")
-    return SecretStr(grant)

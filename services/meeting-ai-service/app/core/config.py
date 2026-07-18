@@ -18,11 +18,50 @@ import base64
 import binascii
 import json
 from pathlib import Path
+from string import Formatter
 from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_TRANSCRIPT_TUPLE_PLACEHOLDERS = {
+    "tenant_id",
+    "meeting_id",
+    "session_id",
+    "finalization_version",
+}
+
+
+def _validate_transcript_path_template(name: str, value: str) -> None:
+    try:
+        parsed_fields = [
+            (field_name, format_spec, conversion)
+            for _, field_name, format_spec, conversion in Formatter().parse(value)
+            if field_name is not None
+        ]
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a valid path template") from exc
+    field_names = [field_name for field_name, _, _ in parsed_fields]
+    if (
+        not value.startswith("/")
+        or len(field_names) != len(_TRANSCRIPT_TUPLE_PLACEHOLDERS)
+        or set(field_names) != _TRANSCRIPT_TUPLE_PLACEHOLDERS
+        or any(format_spec or conversion for _, format_spec, conversion in parsed_fields)
+    ):
+        raise ValueError(
+            f"{name} must be an absolute path containing exactly the tenant_id, "
+            "meeting_id, session_id, and finalization_version placeholders"
+        )
+    rendered = value.format(
+        tenant_id="tenant",
+        meeting_id="meeting",
+        session_id="session",
+        finalization_version="1",
+    )
+    parsed = urlsplit(rendered)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        raise ValueError(f"{name} must be an absolute path without URL authority or query data")
 
 
 class Settings(BaseSettings):
@@ -56,6 +95,7 @@ class Settings(BaseSettings):
     backend: str = Field(default="mock", pattern="^(mock|anthropic|openai|ollama)$")
     model_name: str = Field(default="placeholder-skeleton")
     max_transcript_chars: int = Field(default=100_000, ge=1, le=2_000_000)
+    analysis_max_concurrency: int = Field(default=2, ge=1, le=32)
     redact_pii: bool = Field(default=True)
     log_level: str = Field(default="INFO")
     request_timeout: int = Field(default=60, ge=1, le=300)
@@ -109,7 +149,7 @@ class Settings(BaseSettings):
     ingestion_max_backoff_sec: float = Field(default=300.0, ge=1.0, le=86_400.0)
     ingestion_jitter_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
     ingestion_poll_interval_sec: float = Field(default=1.0, ge=0.05, le=60.0)
-    ingestion_lease_sec: float = Field(default=30.0, ge=1.0, le=3_600.0)
+    ingestion_lease_sec: float = Field(default=45.0, ge=1.0, le=3_600.0)
     ingestion_shutdown_grace_sec: float = Field(default=5.0, ge=0.1, le=120.0)
     ingestion_max_rows: int = Field(default=10_000, ge=1, le=1_000_000)
     ingestion_stale_after_sec: float = Field(default=300.0, ge=1.0, le=604_800.0)
@@ -190,7 +230,15 @@ class Settings(BaseSettings):
     transcript_service_client_secret: SecretStr = Field(default=SecretStr(""))
     transcript_service_audience: str = Field(default="transcript-service")
     transcript_service_scope: str = Field(default="transcript:canonical:read")
+    transcript_service_capability_scope: str = Field(
+        default="transcript:analysis-job-capability:issue"
+    )
     transcript_service_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
+    transcript_service_max_response_bytes: int = Field(
+        default=4_000_000,
+        ge=1_024,
+        le=64_000_000,
+    )
     transcript_service_capability_clock_skew_sec: float = Field(
         default=5.0,
         ge=0.0,
@@ -200,6 +248,14 @@ class Settings(BaseSettings):
     @property
     def transcript_service_permissions(self) -> list[str]:
         return [p.strip() for p in self.transcript_service_scope.split(",") if p.strip()]
+
+    @property
+    def transcript_service_capability_permissions(self) -> list[str]:
+        return [
+            permission.strip()
+            for permission in self.transcript_service_capability_scope.split(",")
+            if permission.strip()
+        ]
 
     def ollama_options(self) -> dict[str, object]:
         """Decoding options for Ollama `/api/generate` (deterministic extraction).
@@ -346,37 +402,35 @@ class Settings(BaseSettings):
         if not (
             self.transcript_service_client_id
             and self.transcript_service_client_secret.get_secret_value()
-            and self.transcript_service_permissions
         ):
             raise ValueError(
-                "ready consumer requires transcript-service client credentials and permission"
+                "ready consumer requires transcript-service client credentials"
             )
-        required_placeholders = {
-            "{tenant_id}",
-            "{meeting_id}",
-            "{session_id}",
-            "{finalization_version}",
-        }
-        if not self.transcript_service_snapshot_path_template.startswith("/") or any(
-            placeholder not in self.transcript_service_snapshot_path_template
-            for placeholder in required_placeholders
-        ):
+        if self.transcript_service_permissions != ["transcript:canonical:read"]:
             raise ValueError(
-                "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE must be an absolute path "
-                "containing tenant_id, meeting_id, session_id, and "
-                "finalization_version placeholders"
+                "MAI_TRANSCRIPT_SERVICE_SCOPE must request only transcript:canonical:read"
             )
-        if not self.transcript_service_capability_path_template.startswith("/") or any(
-            placeholder not in self.transcript_service_capability_path_template
-            for placeholder in required_placeholders
-        ):
+        if self.transcript_service_capability_permissions != [
+            "transcript:analysis-job-capability:issue"
+        ]:
             raise ValueError(
-                "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE must be an absolute path "
-                "containing tenant_id, meeting_id, session_id, and "
-                "finalization_version placeholders"
+                "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE must request only "
+                "transcript:analysis-job-capability:issue"
             )
+        _validate_transcript_path_template(
+            "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE",
+            self.transcript_service_snapshot_path_template,
+        )
+        _validate_transcript_path_template(
+            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+            self.transcript_service_capability_path_template,
+        )
         if self.ready_consumer_max_backoff_sec < self.ready_consumer_base_backoff_sec:
             raise ValueError("ready consumer max backoff must be >= base backoff")
+        if self.transcript_service_max_response_bytes < self.max_transcript_chars * 8:
+            raise ValueError(
+                "transcript response byte limit must be at least eight times the character limit"
+            )
         if self.ready_producer_replay_horizon_sec <= 0:
             raise ValueError("MAI_READY_PRODUCER_REPLAY_HORIZON_SEC must be explicitly configured")
         if self.ready_consumer_retention_sec < self.ready_producer_replay_horizon_sec:
@@ -384,7 +438,16 @@ class Settings(BaseSettings):
         minimum_lease = self.request_timeout + (2 * self.transcript_service_timeout_sec)
         if self.ready_consumer_lease_sec <= minimum_lease:
             raise ValueError(
-                "ready consumer lease must exceed analysis timeout plus two transcript HTTP windows"
+                "ready consumer lease must exceed analysis timeout plus two transcript "
+                "HTTP windows"
+            )
+        delivery_minimum_lease = (
+            2 * self.ingestion_timeout_sec + 2 * self.transcript_service_timeout_sec
+        )
+        if self.ingestion_lease_sec <= delivery_minimum_lease:
+            raise ValueError(
+                "ingestion lease must be greater than two meeting-service and two "
+                "transcript-service HTTP timeout windows when the ready consumer is enabled"
             )
         if self.ready_redis_claim_idle_ms / 1000 < self.ready_consumer_lease_sec:
             raise ValueError(

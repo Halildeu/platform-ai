@@ -142,6 +142,7 @@ def _ready_values(tmp_path: Path) -> dict[str, object]:
     values = _ingestion_values(tmp_path)
     values.update(
         {
+            "ingestion_lease_sec": 25.0,
             "ready_consumer_enabled": True,
             "ready_producer_replay_horizon_sec": 604_800.0,
             "ready_redis_url": SecretStr("redis://redis.test:6379/0"),
@@ -156,11 +157,23 @@ def _ready_values(tmp_path: Path) -> dict[str, object]:
                 "/analysis-capability"
             ),
             "transcript_service_token_url": "https://auth.test/token",
-            "transcript_service_client_id": "meeting-ai-ready",
+            "transcript_service_client_id": "meeting-ai",
             "transcript_service_client_secret": SecretStr("transcript-secret-value"),
         }
     )
     return values
+
+
+def test_ready_consumer_delivery_lease_covers_all_four_http_windows(tmp_path: Path) -> None:
+    values = _ready_values(tmp_path)
+    values["ingestion_timeout_sec"] = 5.0
+    values["transcript_service_timeout_sec"] = 7.0
+    values["ingestion_lease_sec"] = 24.0
+    with pytest.raises(ValidationError, match="two meeting-service and two transcript-service"):
+        Settings(**values)
+
+    values["ingestion_lease_sec"] = 25.0
+    assert Settings(**values).ingestion_lease_sec == 25.0
 
 
 def test_ready_consumer_is_default_off_and_fails_closed_on_partial_config(
@@ -172,6 +185,35 @@ def test_ready_consumer_is_default_off_and_fails_closed_on_partial_config(
     values = _ready_values(tmp_path)
     values["transcript_service_snapshot_path_template"] = "/api/v1/internal/snapshot"
     with pytest.raises(ValidationError, match="placeholders"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_capability_path_template"] = (
+        "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+        "/sessions/{session_id}/analysis-capability"
+    )
+    with pytest.raises(ValidationError, match="CAPABILITY_PATH_TEMPLATE.*placeholders"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_capability_path_template"] = (
+        "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+        "/sessions/{session_id}/finalizations/{finalization_version}"
+        "/analysis-capability?tenant={tenant_id}"
+    )
+    with pytest.raises(ValidationError, match="CAPABILITY_PATH_TEMPLATE.*placeholders"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_scope"] = (
+        "transcript:canonical:read,transcript:analysis-job-capability:issue"
+    )
+    with pytest.raises(ValidationError, match="SCOPE must request only"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_capability_scope"] = "transcript:canonical:read"
+    with pytest.raises(ValidationError, match="CAPABILITY_SCOPE must request only"):
         Settings(**values)
 
     values = _ready_values(tmp_path)
@@ -207,6 +249,13 @@ def test_ready_consumer_secret_values_are_redacted_and_prod_requires_tls_redis(
     values = _ready_values(tmp_path)
     settings = Settings(**values)
     assert settings.transcript_service_permissions == ["transcript:canonical:read"]
+    assert settings.transcript_service_capability_permissions == [
+        "transcript:analysis-job-capability:issue"
+    ]
+    assert settings.transcript_service_client_id == "meeting-ai"
+    assert settings.transcript_service_client_secret.get_secret_value() == (
+        "transcript-secret-value"
+    )
     assert "transcript-secret-value" not in repr(settings)
     assert "redis.test" not in repr(settings)
 

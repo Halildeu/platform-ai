@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import random
 import socket
@@ -10,6 +11,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -312,11 +314,8 @@ class ReadyEventConsumerRuntime:
         analysis_run_id = claim.analysis_run_id
         assert analysis_run_id is not None
         try:
-            fetch_result = await self._transcripts.fetch(event)
-            snapshot = fetch_result.snapshot
+            snapshot = await self._transcripts.fetch(event)
             segments = [segment.model_dump() for segment in snapshot.segments]
-            generated_at = event.generated_at
-
             async def persist_result(
                 command: AnalysisCommand,
                 result: AnalyzeResponse,
@@ -333,8 +332,7 @@ class ReadyEventConsumerRuntime:
                     analysis_spec_version=self.settings.analysis_spec_version,
                     transcript=command.transcript,
                     result=result,
-                    generated_at=command.generated_at or generated_at,
-                    canonical_read_grant=event.canonical_read_grant,
+                    generated_at=datetime.now(UTC),
                 )
                 await asyncio.to_thread(
                     self._inbox.commit_outboxed,
@@ -355,7 +353,6 @@ class ReadyEventConsumerRuntime:
                     session_id=str(event.session_id),
                     finalization_version=event.finalization_version,
                     analysis_run_id=analysis_run_id,
-                    generated_at=generated_at,
                     segments=segments,
                 ),
                 persist=persist_result,
@@ -429,7 +426,7 @@ class ReadyEventConsumerRuntime:
             logger.error(
                 "Unexpected ready-event processing failure",
                 extra={
-                    "event_key": event.event_key,
+                    "event_key_sha256": hashlib.sha256(event.event_key.encode()).hexdigest(),
                     "err_class": type(exc).__name__,
                 },
             )
@@ -563,6 +560,9 @@ class ReadyEventConsumerRuntime:
             await self._redis.xadd(
                 name=self.settings.ready_redis_dead_letter_stream,
                 fields={
+                    "dlqKey": hashlib.sha256(
+                        f"{message_id}|{error_code[:128]}".encode()
+                    ).hexdigest(),
                     "sourceMessageId": message_id,
                     "eventKey": event_key,
                     "errorCode": error_code[:128],
@@ -655,6 +655,7 @@ class ReadyEventConsumerRuntime:
 
     async def _claim_stale(self) -> list[tuple[str, dict[object, object]]]:
         assert self._redis is not None
+        assert self._inbox is not None
         result = await self._redis.xautoclaim(
             name=self.settings.ready_redis_stream,
             groupname=self.settings.ready_redis_group,
@@ -663,8 +664,24 @@ class ReadyEventConsumerRuntime:
             start_id=self._autoclaim_cursor,
             count=self.settings.ready_redis_batch_size,
         )
-        cursor, messages = _normalize_autoclaim(result)
+        cursor, messages, deleted_ids = _normalize_autoclaim(result)
         self._autoclaim_cursor = cursor
+        for source_message_id in deleted_ids:
+            synthetic_key, published = await asyncio.to_thread(
+                self._inbox.record_poison,
+                source_message_id=source_message_id,
+                payload_sha256=hashlib.sha256(b"").hexdigest(),
+                error_code="redis_pending_source_deleted",
+            )
+            await self._dead_letter_and_ack(
+                message_id=source_message_id,
+                event_key=synthetic_key,
+                lookup_key=synthetic_key,
+                error_code="redis_pending_source_deleted",
+                failure_count=0,
+                already_published=published,
+            )
+            mai_ready_consumer_events_total.labels(outcome="source_deleted").inc()
         return messages
 
     async def _read_owned_pending(self) -> list[tuple[str, dict[object, object]]]:
@@ -822,10 +839,15 @@ def _normalize_records(
 
 def _normalize_autoclaim(
     value: object,
-) -> tuple[str, list[tuple[str, dict[object, object]]]]:
+) -> tuple[str, list[tuple[str, dict[object, object]]], list[str]]:
     if not isinstance(value, list | tuple) or len(value) < 2:
-        return "0-0", []
-    return _text(value[0]), _normalize_messages(value[1])
+        return "0-0", [], []
+    deleted_ids = (
+        [_text(item) for item in value[2]]
+        if len(value) >= 3 and isinstance(value[2], list | tuple)
+        else []
+    )
+    return _text(value[0]), _normalize_messages(value[1]), deleted_ids
 
 
 def _normalize_messages(value: object) -> list[tuple[str, dict[object, object]]]:
