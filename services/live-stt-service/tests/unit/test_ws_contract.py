@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from starlette.websockets import WebSocketDisconnect
 
+from app.core import config as config_module
 from app.core.config import Settings, get_settings
 from app.main import app
 from app.services import streaming_models
@@ -28,13 +29,17 @@ SCHEMA_PATH = (
     Path(__file__).resolve().parents[4] / "docs" / "contracts" / "ws-stream-events.schema.json"
 )
 VALIDATOR = Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
+STREAM_PATH = "/ws/stream?protocol=source-ranges-v1"
 
 
 @pytest.fixture(autouse=True)
-def clear_dependency_overrides() -> Iterator[None]:
+def clear_dependency_overrides(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("STT_STREAM_FINAL_WORKER_BACKEND", "inline")
+    config_module._settings = None
     app.dependency_overrides.clear()
     yield
     app.dependency_overrides.clear()
+    config_module._settings = None
 
 
 def assert_valid(event: dict[str, Any]) -> None:
@@ -57,10 +62,19 @@ def test_schema_file_is_valid_jsonschema() -> None:
     Draft202012Validator.check_schema(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
 
 
+def test_handshake_without_source_range_protocol_fails_closed() -> None:
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        error = ws.receive_json()
+        assert_valid(error)
+        assert error == {"type": "error", "msg": "protocol_required"}
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+
+
 def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real WS handshake: loading + loading + ready, each schema-valid."""
     monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         first = ws.receive_json()
         second = ws.receive_json()
         ready = ws.receive_json()
@@ -71,7 +85,8 @@ def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> Non
     assert first["stage"] == "live_model"
     assert second["stage"] == "final_model"
     assert ready["partial_mode"] == "stable-v1"
-    assert ready["capabilities"] == ["eof"]
+    assert ready["protocol"] == "source-ranges-v1"
+    assert ready["capabilities"] == ["eof", "source-ranges-v1"]
     assert ready["supports_eof"] is True
 
 
@@ -106,7 +121,7 @@ def test_partial_and_final_payload_shapes_match_contract() -> None:
 def test_eof_without_audio_emits_ack_then_drained(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_fast_stream_timing(monkeypatch)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -135,7 +150,7 @@ def test_eof_flushes_late_final_before_drained(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -156,7 +171,7 @@ def test_unknown_text_control_is_rejected_without_drained(
 ) -> None:
     _patch_fast_stream_timing(monkeypatch)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -198,7 +213,7 @@ def test_second_or_post_eof_frame_is_rejected_without_drained(
         blocking_transcribe,
     )
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -240,7 +255,7 @@ def test_terminal_final_model_error_never_emits_drained(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", failing_final)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -310,7 +325,7 @@ def test_stream_emits_same_seq_word_progressive_partials(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -357,7 +372,7 @@ def test_stream_default_gate_accepts_quiet_desktop_microphone(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -402,7 +417,7 @@ def test_stream_final_pass_bypasses_whisper_vad_after_rms_gate(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -443,7 +458,7 @@ def test_stream_keeps_receiving_audio_while_live_model_is_busy(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -498,7 +513,7 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -553,7 +568,7 @@ def test_stream_appends_growing_no_overlap_live_windows(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -594,7 +609,7 @@ def test_stream_appends_short_no_overlap_live_continuations(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -635,7 +650,7 @@ def test_stream_revises_competing_same_opener_tail_without_fabricating_text(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -670,7 +685,7 @@ def test_stream_keeps_short_stable_draft_over_unrelated_short_final(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -705,7 +720,7 @@ def test_stream_keeps_medium_draft_over_short_unrelated_final(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -739,7 +754,7 @@ def test_stream_commits_final_on_speech_ending_silence(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -780,7 +795,7 @@ def test_stream_forced_commit_still_emits_final(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -820,7 +835,7 @@ def test_stream_silence_commit_does_not_carry_tail_into_next_utterance(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 

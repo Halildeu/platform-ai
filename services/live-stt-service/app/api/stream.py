@@ -52,6 +52,7 @@ SHORT_FINAL_PRESERVE_MIN_PREVIOUS_WORDS = 5
 SHORT_FINAL_PRESERVE_MAX_RATIO = 0.65
 SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO = 0.45
 EOF_CONTROL = {"type": "eof"}
+STREAM_PROTOCOL = "source-ranges-v1"
 _OVERLAP_SUFFIXES = (
     "lerinizden",
     "larınızdan",
@@ -542,6 +543,11 @@ async def stream_endpoint(
 ) -> None:
     await websocket.accept()
 
+    if websocket.query_params.get("protocol") != STREAM_PROTOCOL:
+        await websocket.send_json({"type": "error", "msg": "protocol_required"})
+        await websocket.close(code=1008)
+        return
+
     live_service = get_live_service(settings)
     final_service = get_final_service(settings)
     debug_enabled = settings.stream_debug
@@ -569,7 +575,8 @@ async def stream_endpoint(
             "live_model": settings.live_model_name,
             "final_model": settings.final_model_name,
             "partial_mode": "stable-v1",
-            "capabilities": ["eof"],
+            "protocol": STREAM_PROTOCOL,
+            "capabilities": ["eof", STREAM_PROTOCOL],
             "supports_eof": True,
         }
     )
@@ -734,13 +741,17 @@ async def stream_endpoint(
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
         started = time.perf_counter()
         try:
-            text = await asyncio.wait_for(
-                run_in_threadpool(
-                    final_service.transcribe_array,
-                    audio,
-                    settings.stream_final_vad_filter,
-                ),
-                timeout=settings.stream_final_timeout_sec,
+            final_call = run_in_threadpool(
+                final_service.transcribe_array,
+                audio,
+                settings.stream_final_vad_filter,
+            )
+            text = (
+                await final_call
+                if getattr(final_service, "hard_timeout", False)
+                else await asyncio.wait_for(
+                    final_call, timeout=settings.stream_final_timeout_sec
+                )
             )
         except Exception as exc:  # Keep non-terminal streams alive by falling back to draft.
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.

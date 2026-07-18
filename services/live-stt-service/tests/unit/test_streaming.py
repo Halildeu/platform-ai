@@ -4,9 +4,12 @@
 
 from __future__ import annotations
 
+import queue
+import threading
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from app.api import stream as stream_api
 from app.api.stream import (
@@ -19,13 +22,22 @@ from app.api.stream import (
     _select_partial_text,
     _stabilize_rolling_partial,
 )
+from app.core import config as config_module
 from app.core.config import Settings
 from app.services.hallucination import is_hallucination
 from app.services.streaming_models import (
     DirectWhisperService,
+    SupervisedFinalWhisperService,
     get_final_service,
     get_live_service,
 )
+from app.services.worker import WorkerTimeoutError
+
+
+@pytest.fixture(autouse=True)
+def use_inline_final_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STT_STREAM_FINAL_WORKER_BACKEND", "inline")
+    config_module._settings = None
 
 
 def test_hallucination_filter_blocks_known_artifacts() -> None:
@@ -401,7 +413,7 @@ def test_commit_text_blocks_repeated_final_and_bad_rolling_draft() -> None:
 
 
 def test_streaming_defaults_follow_adr_0031() -> None:
-    s = Settings()
+    s = Settings(stream_final_worker_backend="process")
     assert s.live_model_name == "medium"
     assert s.live_compute_type == "int8"
     assert s.live_beam_size == 1
@@ -410,6 +422,7 @@ def test_streaming_defaults_follow_adr_0031() -> None:
     assert s.final_beam_size == 1
     assert s.stream_debug is False  # KVKK: verbose debug opt-in only
     assert s.stream_final_vad_filter is False
+    assert s.stream_final_worker_backend == "process"
     assert s.cors_origins == ""  # CORS disabled unless configured
     assert s.live_infer_interval_ms <= 700
     assert s.live_window_sec <= 2.5
@@ -434,6 +447,61 @@ def test_live_and_final_services_are_distinct_singletons() -> None:
     assert live is not final
     assert live.model_loaded is False  # nothing loaded at construction
     assert final.model_loaded is False
+
+
+def test_supervised_final_worker_timeout_terminates_and_respawns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.alive = True
+            self.terminated = False
+            self.killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.alive = False
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedFinalWhisperService)
+    service._timeout_sec = 0.01
+    service._load_timeout_sec = 0.01
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    old_process = service._process
+    restarts: list[FakeProcess] = []
+
+    def fake_start() -> None:
+        process = FakeProcess()
+        restarts.append(process)
+        service._process = process
+        service._task_queue = queue.Queue(maxsize=1)
+        service._result_queue = queue.Queue(maxsize=1)
+        service._model_loaded = False
+
+    monkeypatch.setattr(service, "_start", fake_start)
+
+    with pytest.raises(WorkerTimeoutError, match="exceeded timeout"):
+        service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+
+    assert old_process.terminated is True
+    assert old_process.killed is False
+    assert len(restarts) == 1
+    assert service._process is restarts[0]
+    assert service.model_loaded is False
 
 
 def test_direct_stream_service_passes_role_specific_beam_size() -> None:

@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     # acknowledged; an unbounded model call would otherwise make that contract
     # impossible to size safely.
     stream_final_timeout_sec: float = Field(default=30.0, ge=1.0, le=60.0)
+    # Production final decoding runs in a supervised child process so a native/GPU
+    # hang can be terminated rather than merely abandoning a Python waiter.
+    stream_final_worker_backend: str = Field(default="process", pattern="^(process|inline)$")
+    stream_model_load_timeout_sec: float = Field(default=180.0, ge=1.0, le=600.0)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.
     live_infer_interval_ms: int = Field(default=700, ge=1, le=5000)
@@ -176,6 +180,13 @@ class Settings(BaseSettings):
             raise ValueError("min_infer_sec must be <= live_window_sec")
         if self.tail_overlap_sec >= self.final_window_sec:
             raise ValueError("tail_overlap_sec must be < final_window_sec")
+        if (
+            self.environment in {"staging", "production"}
+            and self.stream_final_worker_backend != "process"
+        ):
+            raise ValueError(
+                "stream_final_worker_backend must be process in staging/production"
+            )
         return self
 
 

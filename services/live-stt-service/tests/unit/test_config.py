@@ -25,6 +25,8 @@ def test_defaults() -> None:
     assert s.beam_size == 5
     assert s.vad_filter is True
     assert s.stream_final_vad_filter is False
+    assert s.stream_final_worker_backend == "process"
+    assert s.stream_model_load_timeout_sec == 180.0
     assert s.worker_backend == "process"
     assert s.worker_max_workers == 1
     assert s.worker_kill_grace_sec == 2.0
@@ -118,6 +120,13 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
         cfg.Settings(min_infer_sec=2.1, live_window_sec=2.0)
     with pytest.raises(ValueError):
         cfg.Settings(tail_overlap_sec=10.0, final_window_sec=10.0)
+    with pytest.raises(ValueError):
+        cfg.Settings(stream_final_worker_backend="thread")
+    with pytest.raises(ValueError, match="must be process"):
+        cfg.Settings(
+            environment="staging",
+            stream_final_worker_backend="inline",
+        )
 
 
 def test_settings_cached() -> None:

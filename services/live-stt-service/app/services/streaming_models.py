@@ -1,11 +1,8 @@
 """Two-stage streaming model services (#128).
 
-The WebSocket streaming path uses two direct, in-process Whisper models —
-a fast *live draft* model and an accurate *final revision* model — instead of
-the request/response worker pool (`worker.py`). Rationale: streaming needs
-sub-second repeated inference over a rolling buffer; per-request process
-dispatch would dominate latency. The models are lazy-loaded once and inference
-is single-flight per model behind a lock.
+The draft model stays in-process for sub-second rolling inference. The final
+model is supervised in a child process by default so a native/GPU hang can be
+terminated and respawned without retaining unbounded audio snapshots.
 
 Defaults follow ADR-0031: draft = `medium` int8, final = `large-v3-turbo`
 (fp16). Both are intended for the GPU host; the module loads nothing at import
@@ -16,12 +13,18 @@ from __future__ import annotations
 
 import logging
 import math
+import multiprocessing as mp
+import queue
 import threading
+import time
+import uuid
+from typing import Any
 
 import numpy as np
 
 from app.core.config import Settings
 from app.services.hallucination import is_hallucination
+from app.services.worker import WorkerCrashedError, WorkerTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +150,188 @@ class DirectWhisperService:
             ).strip()
 
 
+def _supervised_final_worker_main(
+    config: dict[str, object], task_queue: Any, result_queue: Any
+) -> None:
+    service = DirectWhisperService(
+        str(config["model_name"]),
+        str(config["device"]),
+        str(config["compute_type"]),
+        str(config["language"]),
+        int(config["beam_size"]),
+        role="final",
+        no_speech_threshold=float(config["no_speech_threshold"]),
+        log_prob_threshold=float(config["log_prob_threshold"]),
+        compression_ratio_threshold=float(config["compression_ratio_threshold"]),
+        condition_on_previous_text=bool(config["condition_on_previous_text"]),
+    )
+    while True:
+        task = task_queue.get()
+        if task.get("type") == "stop":
+            return
+        job_id = str(task.get("job_id", ""))
+        try:
+            if task.get("type") == "load":
+                service.ensure_model()
+                text = ""
+            else:
+                raw = task.get("audio")
+                if not isinstance(raw, bytes):
+                    raise ValueError("streaming final audio payload is invalid")
+                audio = np.frombuffer(raw, dtype="<f4").copy()
+                text = service.transcribe_array(audio, bool(task.get("vad", False)))
+            result_queue.put({"job_id": job_id, "ok": True, "text": text})
+        except BaseException as exc:  # noqa: BLE001 - child reports class only
+            result_queue.put(
+                {"job_id": job_id, "ok": False, "error_class": type(exc).__name__}
+            )
+
+
+class SupervisedFinalWhisperService:
+    """Single-flight final model with terminate/kill/respawn timeout semantics."""
+
+    role = "final"
+    hard_timeout = True
+
+    def __init__(self, settings: Settings) -> None:
+        self._config: dict[str, object] = {
+            "model_name": settings.final_model_name,
+            "device": settings.final_device,
+            "compute_type": settings.final_compute_type,
+            "language": settings.language,
+            "beam_size": settings.final_beam_size,
+            "no_speech_threshold": settings.no_speech_threshold,
+            "log_prob_threshold": settings.log_prob_threshold,
+            "compression_ratio_threshold": settings.compression_ratio_threshold,
+            "condition_on_previous_text": settings.condition_on_previous_text,
+        }
+        self._timeout_sec = settings.stream_final_timeout_sec
+        self._load_timeout_sec = settings.stream_model_load_timeout_sec
+        self._kill_grace_sec = settings.worker_kill_grace_sec
+        self._ctx = mp.get_context("spawn")
+        self._call_lock = threading.Lock()
+        self._process: Any | None = None
+        self._task_queue: Any = None
+        self._result_queue: Any = None
+        self._model_loaded = False
+        self._start()
+
+    def _start(self) -> None:
+        self._task_queue = self._ctx.Queue(maxsize=1)
+        self._result_queue = self._ctx.Queue(maxsize=1)
+        self._process = self._ctx.Process(
+            target=_supervised_final_worker_main,
+            args=(self._config, self._task_queue, self._result_queue),
+            name="stt-stream-final-worker",
+            daemon=True,
+        )
+        self._process.start()
+        self._model_loaded = False
+
+    def _is_alive(self) -> bool:
+        return self._process is not None and self._process.is_alive()
+
+    @staticmethod
+    def _close_queue(queue_object: Any) -> None:
+        close = getattr(queue_object, "close", None)
+        if callable(close):
+            close()
+        cancel_join_thread = getattr(queue_object, "cancel_join_thread", None)
+        if callable(cancel_join_thread):
+            cancel_join_thread()
+
+    def _terminate_and_restart(self) -> None:
+        task_queue = self._task_queue
+        result_queue = self._result_queue
+        if self._is_alive():
+            self._process.terminate()
+            self._process.join(timeout=self._kill_grace_sec)
+            if self._process.is_alive():
+                self._process.kill()
+                self._process.join(timeout=self._kill_grace_sec)
+        self._close_queue(task_queue)
+        self._close_queue(result_queue)
+        self._process = None
+        self._start()
+
+    def _invoke(
+        self,
+        operation: str,
+        *,
+        timeout_sec: float,
+        audio: bytes | None = None,
+        vad: bool = False,
+    ) -> str:
+        deadline = time.monotonic() + timeout_sec
+        if not self._call_lock.acquire(timeout=timeout_sec):
+            raise WorkerTimeoutError("streaming final worker queue exceeded timeout")
+        try:
+            if not self._is_alive():
+                self._terminate_and_restart()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise WorkerTimeoutError("streaming final worker queue exceeded timeout")
+            job_id = str(uuid.uuid4())
+            try:
+                self._task_queue.put(
+                    {
+                        "type": operation,
+                        "job_id": job_id,
+                        "audio": audio,
+                        "vad": vad,
+                    },
+                    timeout=remaining,
+                )
+            except queue.Full as exc:
+                self._terminate_and_restart()
+                raise WorkerTimeoutError(
+                    "streaming final worker queue exceeded timeout"
+                ) from exc
+            while True:
+                if not self._is_alive():
+                    self._terminate_and_restart()
+                    raise WorkerCrashedError(
+                        "streaming final worker exited before response"
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._terminate_and_restart()
+                    raise WorkerTimeoutError("streaming final worker exceeded timeout")
+                try:
+                    response = self._result_queue.get(timeout=min(0.1, remaining))
+                except queue.Empty:
+                    continue
+                if response.get("job_id") != job_id:
+                    continue
+                if not response.get("ok"):
+                    raise RuntimeError(str(response.get("error_class", "RuntimeError")))
+                return str(response.get("text", ""))
+        finally:
+            self._call_lock.release()
+
+    def ensure_model(self) -> None:
+        if not self._model_loaded:
+            self._invoke("load", timeout_sec=self._load_timeout_sec)
+            self._model_loaded = True
+
+    @property
+    def model_loaded(self) -> bool:
+        return self._model_loaded and self._is_alive()
+
+    def transcribe_array(
+        self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
+    ) -> str:
+        contiguous = np.ascontiguousarray(audio, dtype=np.float32)
+        return self._invoke(
+            "transcribe",
+            timeout_sec=self._timeout_sec,
+            audio=contiguous.astype("<f4", copy=False).tobytes(),
+            vad=vad,
+        )
+
+
 _services: dict[str, DirectWhisperService] = {}
+_supervised_final_services: dict[str, SupervisedFinalWhisperService] = {}
 _services_lock = threading.Lock()
 
 
@@ -213,8 +397,28 @@ def get_live_service(settings: Settings) -> DirectWhisperService:
     )
 
 
-def get_final_service(settings: Settings) -> DirectWhisperService:
+def get_final_service(
+    settings: Settings,
+) -> DirectWhisperService | SupervisedFinalWhisperService:
     """Accurate final model (ADR-0031: large-v3-turbo)."""
+    if settings.stream_final_worker_backend == "process":
+        service_key = "\u0000".join(
+            [
+                settings.final_model_name,
+                settings.final_device,
+                settings.final_compute_type,
+                settings.language,
+                str(settings.final_beam_size),
+                str(settings.stream_final_timeout_sec),
+                str(settings.stream_model_load_timeout_sec),
+            ]
+        )
+        with _services_lock:
+            if service_key not in _supervised_final_services:
+                _supervised_final_services[service_key] = SupervisedFinalWhisperService(
+                    settings
+                )
+            return _supervised_final_services[service_key]
     return _named(
         "final",
         settings.final_model_name,

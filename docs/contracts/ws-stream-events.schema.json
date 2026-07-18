@@ -31,12 +31,16 @@
         "live_model": { "type": "string" },
         "final_model": { "type": "string" },
         "partial_mode": { "const": "stable-v1" },
+        "protocol": { "const": "source-ranges-v1" },
         "capabilities": {
           "type": "array",
-          "prefixItems": [{ "const": "eof" }],
+          "prefixItems": [
+            { "const": "eof" },
+            { "const": "source-ranges-v1" }
+          ],
           "items": false,
-          "minItems": 1,
-          "maxItems": 1
+          "minItems": 2,
+          "maxItems": 2
         },
         "supports_eof": { "const": true }
       },
@@ -46,6 +50,7 @@
         "live_model",
         "final_model",
         "partial_mode",
+        "protocol",
         "capabilities",
         "supports_eof"
       ],
