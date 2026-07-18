@@ -93,6 +93,8 @@ def test_partial_and_final_payload_shapes_match_contract() -> None:
         "reason": "silence",
         "elapsed_ms": 600,
         "rms": 0.01234,
+        "source_start_sample": 0,
+        "source_end_sample": 16000,
     }
     error = {"type": "error", "msg": "RuntimeError"}
     eof_ack = {"type": "eof_ack"}
@@ -472,7 +474,7 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
         final_window_sec=1.0,
         forced_commit_sec=0.1,
         silence_commit_sec=5.0,
-        tail_overlap_sec=0.0,
+        tail_overlap_sec=0.01,
         silence_rms=0.001,
         min_speech_rms=0.001,
         min_infer_sec=0.01,
@@ -519,6 +521,16 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
         assert event["type"] == "final"
     assert len(final_sample_counts) >= 2
     assert final_sample_counts[1] >= 8 * 1024
+    assert (
+        first_final["source_end_sample"] - first_final["source_start_sample"]
+        == final_sample_counts[0]
+    )
+    assert (
+        second_final["source_end_sample"] - second_final["source_start_sample"]
+        == final_sample_counts[1]
+    )
+    assert second_final["source_start_sample"] < first_final["source_end_sample"]
+    assert second_final["source_end_sample"] > first_final["source_end_sample"]
 
 
 def test_stream_appends_growing_no_overlap_live_windows(

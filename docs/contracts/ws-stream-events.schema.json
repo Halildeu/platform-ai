@@ -73,9 +73,20 @@
         "text": { "type": "string" },
         "reason": { "type": "string" },
         "elapsed_ms": { "type": "integer", "minimum": 0 },
-        "rms": { "type": "number", "minimum": 0 }
+        "rms": { "type": "number", "minimum": 0 },
+        "source_start_sample": { "type": "integer", "minimum": 0 },
+        "source_end_sample": { "type": "integer", "minimum": 1 }
       },
-      "required": ["type", "seq", "text", "reason", "elapsed_ms", "rms"],
+      "required": [
+        "type",
+        "seq",
+        "text",
+        "reason",
+        "elapsed_ms",
+        "rms",
+        "source_start_sample",
+        "source_end_sample"
+      ],
       "additionalProperties": false
     },
     "eofAck": {

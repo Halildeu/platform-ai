@@ -695,10 +695,21 @@ async def stream_endpoint(
         async with buffer_lock:
             audio = buffer.copy()
             active_seq = seg_index
+            source_start_sample = buffer_start_sample
             commit_end_sample = buffer_start_sample + buffer.shape[0]
+            source_end_sample = commit_end_sample
 
         if reason == "silence":
-            audio = trim_leading_silence(audio)
+            active_offsets = np.flatnonzero(np.abs(audio) >= settings.silence_rms)
+            if active_offsets.size == 0:
+                audio = np.zeros(0, dtype=np.float32)
+                source_start_sample = source_end_sample
+            else:
+                first_active = int(active_offsets[0])
+                last_active_exclusive = int(active_offsets[-1]) + 1
+                audio = audio[first_active:last_active_exclusive].copy()
+                source_start_sample += first_active
+                source_end_sample = buffer_start_sample + last_active_exclusive
 
         buffer_sec = round(audio.size / SAMPLE_RATE, 2)
         if audio.size < min_infer_samples:
@@ -723,10 +734,13 @@ async def stream_endpoint(
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
         started = time.perf_counter()
         try:
-            text = await run_in_threadpool(
-                final_service.transcribe_array,
-                audio,
-                settings.stream_final_vad_filter,
+            text = await asyncio.wait_for(
+                run_in_threadpool(
+                    final_service.transcribe_array,
+                    audio,
+                    settings.stream_final_vad_filter,
+                ),
+                timeout=settings.stream_final_timeout_sec,
             )
         except Exception as exc:  # Keep non-terminal streams alive by falling back to draft.
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
@@ -773,6 +787,11 @@ async def stream_endpoint(
             "reason": reason,
             "elapsed_ms": elapsed_ms,
             "rms": round(rms, 5),
+            # Absolute float-sample coordinates on this WebSocket connection.
+            # They identify the exact producer snapshot even when a slow final
+            # overlaps later audio or a forced commit reuses a prior tail.
+            "source_start_sample": source_start_sample,
+            "source_end_sample": source_end_sample,
         }
         if not defer_final:
             await emit_final(final_payload)

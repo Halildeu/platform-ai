@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     # whisper VAD can drop quiet desktop microphone speech, so the WS final pass
     # keeps it off by default; sync /transcribe still uses `vad_filter`.
     stream_final_vad_filter: bool = Field(default=False)
+    # A final decode must have a bounded terminal time. The gateway keeps a
+    # bounded source-audio history until the final's absolute sample range is
+    # acknowledged; an unbounded model call would otherwise make that contract
+    # impossible to size safely.
+    stream_final_timeout_sec: float = Field(default=30.0, ge=1.0, le=60.0)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.
     live_infer_interval_ms: int = Field(default=700, ge=1, le=5000)
