@@ -9,6 +9,9 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models.schemas import AnalysisDeliveryHealth, ReadyConsumerHealth
+from app.services.analysis_delivery import AnalysisDeliveryRuntime
+from app.services.ready_event_consumer import ReadyEventConsumerRuntime
 
 
 def test_analyze_mock_returns_summary() -> None:
@@ -109,6 +112,74 @@ def test_health_ok() -> None:
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert resp.json()["analysis_delivery"]["status"] == "disabled"
+    assert resp.json()["ready_consumer"]["status"] == "disabled"
+
+
+def test_readiness_is_separate_from_liveness() -> None:
+    with TestClient(app) as client:
+        resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+def test_async_dlq_degrades_health_without_evicting_sync_api(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    async def delivery_health(self):  # type: ignore[no-untyped-def]
+        return AnalysisDeliveryHealth(
+            enabled=True,
+            ready=True,
+            status="degraded",
+            worker_running=True,
+            pending=0,
+            in_flight=0,
+            dead_letter=1,
+            oldest_pending_age_sec=None,
+            error_code=None,
+        )
+
+    async def ready_health(self):  # type: ignore[no-untyped-def]
+        return ReadyConsumerHealth(
+            enabled=True,
+            ready=True,
+            status="degraded",
+            worker_running=True,
+            redis_group_ready=True,
+            received=0,
+            processing=0,
+            outboxed=1,
+            dead_letter=1,
+            oldest_unfinished_age_sec=None,
+            error_code=None,
+        )
+
+    monkeypatch.setattr(AnalysisDeliveryRuntime, "health", delivery_health)
+    monkeypatch.setattr(ReadyEventConsumerRuntime, "health", ready_health)
+    with TestClient(app) as client:
+        health_response = client.get("/health")
+        ready_response = client.get("/ready")
+    assert health_response.json()["status"] == "degraded"
+    assert ready_response.status_code == 200
+
+
+def test_readiness_fails_when_consumer_cannot_accept_work(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    async def ready_health(self):  # type: ignore[no-untyped-def]
+        return ReadyConsumerHealth(
+            enabled=True,
+            ready=False,
+            status="degraded",
+            worker_running=False,
+            redis_group_ready=False,
+            received=1,
+            processing=0,
+            outboxed=0,
+            dead_letter=0,
+            oldest_unfinished_age_sec=1.0,
+            error_code="redis_ConnectionError",
+        )
+
+    monkeypatch.setattr(ReadyEventConsumerRuntime, "health", ready_health)
+    with TestClient(app) as client:
+        response = client.get("/ready")
+    assert response.status_code == 503
 
 
 def test_metrics_endpoint() -> None:

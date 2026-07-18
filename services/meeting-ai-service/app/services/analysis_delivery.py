@@ -189,6 +189,11 @@ class AnalysisDeliveryRuntime:
     def worker_running(self) -> bool:
         return self._worker is not None and not self._worker.done()
 
+    @property
+    def store(self) -> SqliteOutboxStore | None:
+        """Shared store handle for the ready inbox's atomic commit boundary."""
+        return self._store
+
     async def start(self) -> None:
         if not self.enabled or self.worker_running:
             return
@@ -220,6 +225,8 @@ class AnalysisDeliveryRuntime:
         session_id: str | None,
         transcript: str,
         result: AnalyzeResponse,
+        analysis_run_id: str | None = None,
+        generated_at: datetime | None = None,
     ) -> str | None:
         if not self.enabled:
             return None
@@ -228,20 +235,20 @@ class AnalysisDeliveryRuntime:
             raise AnalysisDeliveryContractError(
                 "meeting_id and session_id are required when durable delivery is enabled"
             )
-        analysis_run_id = str(uuid.uuid4())
+        run_id = analysis_run_id or str(uuid.uuid4())
         payload = build_ingestion_payload(
             settings=self.settings,
             meeting_id=meeting_id,
             session_id=session_id,
             transcript=transcript,
             result=result,
-            generated_at=datetime.now(UTC),
+            generated_at=generated_at or datetime.now(UTC),
         )
         assert self._store is not None
         try:
             await asyncio.to_thread(
                 self._store.enqueue,
-                analysis_run_id=analysis_run_id,
+                analysis_run_id=run_id,
                 meeting_id=str(payload["meeting_id"]),
                 payload=payload,
             )
@@ -257,12 +264,17 @@ class AnalysisDeliveryRuntime:
         mai_ingestion_enqueue_total.labels(outcome="accepted").inc()
         self._wake.set()
         await self._refresh_metrics()
-        return analysis_run_id
+        return run_id
+
+    def notify_outbox_work(self) -> None:
+        """Wake result delivery after another component commits into the shared outbox."""
+        self._wake.set()
 
     async def health(self) -> AnalysisDeliveryHealth:
         if not self.enabled:
             return AnalysisDeliveryHealth(
                 enabled=False,
+                ready=True,
                 status="disabled",
                 worker_running=False,
                 pending=0,
@@ -274,9 +286,11 @@ class AnalysisDeliveryRuntime:
         assert self._store is not None
         try:
             summary = await asyncio.to_thread(self._store.summary)
+            has_capacity = await asyncio.to_thread(self._store.has_capacity)
         except (OutboxError, sqlite3.Error, OSError) as exc:
             return AnalysisDeliveryHealth(
                 enabled=True,
+                ready=False,
                 status="degraded",
                 worker_running=self.worker_running,
                 pending=0,
@@ -287,6 +301,7 @@ class AnalysisDeliveryRuntime:
             )
         degraded = (
             not self.worker_running
+            or not has_capacity
             or summary.dead > 0
             or (
                 summary.oldest_pending_age_sec is not None
@@ -295,13 +310,14 @@ class AnalysisDeliveryRuntime:
         )
         return AnalysisDeliveryHealth(
             enabled=True,
+            ready=(self.worker_running and has_capacity),
             status="degraded" if degraded else "ok",
             worker_running=self.worker_running,
             pending=summary.pending,
             in_flight=summary.in_flight,
             dead_letter=summary.dead,
             oldest_pending_age_sec=summary.oldest_pending_age_sec,
-            error_code=None,
+            error_code=None if has_capacity else "OutboxFullError",
         )
 
     async def _worker_loop(self) -> None:

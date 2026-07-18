@@ -19,8 +19,11 @@ from starlette.responses import Response
 from app import __version__
 from app.api import analyze, ask, health, metrics
 from app.core.config import get_settings
+from app.services.analysis_application import AnalysisApplicationService
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
+from app.services.analyze import get_service
 from app.services.live_stream_hub import LiveStreamHub
+from app.services.ready_event_consumer import ReadyEventConsumerRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,15 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     analysis_delivery = AnalysisDeliveryRuntime(settings)
+    analysis_application = AnalysisApplicationService(settings, get_service(settings))
+    ready_consumer = ReadyEventConsumerRuntime(
+        settings,
+        analysis_application,
+        analysis_delivery,
+    )
     app.state.analysis_delivery = analysis_delivery
+    app.state.analysis_application = analysis_application
+    app.state.ready_consumer = ready_consumer
     # Faz 24 live-stream SSE relay — a single in-memory hub per process.
     # /analyze/live publishes; /analyze/live/stream/{meeting_id} subscribes.
     app.state.live_stream_hub = LiveStreamHub(max_queue_size=settings.live_stream_max_queue)
@@ -72,9 +83,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         },
     )
     await analysis_delivery.start()
+    await ready_consumer.start()
     try:
         yield
     finally:
+        await ready_consumer.stop()
         await analysis_delivery.stop()
         logger.info("meeting-ai-service stopping", extra={"correlation_id": "shutdown"})
 

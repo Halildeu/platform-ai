@@ -71,7 +71,9 @@ def test_enqueue_is_idempotent_but_rejects_same_id_with_different_payload(tmp_pa
 
 def test_queue_bound_is_checked_in_the_write_transaction(tmp_path: Path) -> None:
     store = _store(tmp_path / "outbox.sqlite3", max_rows=1)
+    assert store.has_capacity()
     store.enqueue(analysis_run_id="run-1", meeting_id="meeting-1", payload={"x": 1})
+    assert not store.has_capacity()
     with pytest.raises(OutboxFullError):
         store.enqueue(analysis_run_id="run-2", meeting_id="meeting-1", payload={"x": 2})
 

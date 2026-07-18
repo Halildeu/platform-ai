@@ -125,7 +125,7 @@ MAI_BACKEND=ollama python scripts/intel_eval.py \
 ## API
 
 - `POST /analyze` — JSON `{transcript, meeting_id?, session_id?}` → `AnalyzeResponse`
-- `GET /health`, `GET /metrics` (`mai_*`, `kvkk_*`)
+- `GET /health`, `GET /ready`, `GET /metrics` (`mai_*`, `kvkk_*`)
 
 ## Durable analysis-result delivery (#247)
 
@@ -193,6 +193,82 @@ does not tear down an active delivery. Private service traffic also ignores ambi
 HTTP proxy environment variables. Certificate/key contents and paths are not included
 in delivery error codes or logs.
 
+## Canonical transcript-ready consumer (#263)
+
+`MAI_READY_CONSUMER_ENABLED=false` is the default. When explicitly enabled, the
+service consumes only `meeting.transcript.ready` from the configured Redis Stream
+consumer group. The thin event is not an authorization grant. The worker obtains a
+separate auth-service client-credentials token with the configured transcript read
+permission, then fetches a tenant/meeting/session/finalization-bound canonical snapshot
+from transcript-service.
+
+The producer stream may be shared. Records whose outer `eventType` is a different,
+well-formed event are ACKed for this consumer group as `ignored`; they are not written
+to the inbox or DLQ. Missing, malformed, or internally inconsistent ready-event fields
+remain fail-closed poison records.
+
+The consumer persists only event identity, exact payload SHA-256, state, lease, retry,
+and DLQ metadata. Event identity and the payload digest are held in an AES-256-GCM
+envelope; SQLite exposes only a keyed deterministic event-key lookup digest plus
+operational state. Before flipping the active key, every worker must receive the same
+old+new key union; rotation lookups cover every injected key until old inbox rows have
+drained, and startup fails while any row references an unavailable key. A v3-to-v4
+migration encrypts existing identity rows, enables SQLite secure
+deletion, vacuums the old pages, and truncates WAL frames. A durable `pending` marker
+makes that scrub resume after process/power loss; startup stays failed while a WAL
+checkpoint reports busy and marks the scrub complete only after the final truncation.
+The store never contains the event JSON or raw transcript. Redis remains pending until
+SQLite commits either
+`OUTBOXED` or `DEAD`; `OUTBOXED` and the encrypted analysis-result outbox insert are one
+`BEGIN IMMEDIATE` transaction. A stale lease reclaim increments a recovery counter,
+not the real failure budget. The stable analysis run UUIDv5 is derived from meeting ID,
+session ID, finalization version, and `MAI_ANALYSIS_SPEC_VERSION`.
+
+Retry deadlines are enforced by scanning the current consumer's own PEL separately
+from `XAUTOCLAIM` stale-owner recovery. Result-outbox capacity is backpressure, not an
+event failure: it consumes no failure attempt, keeps the Redis record pending, and
+makes readiness fail until capacity returns.
+
+`MAI_READY_REDIS_CLAIM_IDLE_MS` cannot be shorter than the processing lease, so a
+healthy long-running LLM call is not stolen by another consumer. Terminal inbox rows
+are retained for `MAI_READY_CONSUMER_RETENTION_SEC` (30 days by default), which must be
+at least the explicitly configured `MAI_READY_PRODUCER_REPLAY_HORIZON_SEC`; startup
+fails closed when that horizon is missing or exceeds retention. Cleanup never deletes
+an identity while its analysis result remains in the local delivery outbox. DLQ count
+and stale age degrade the metadata health body and metrics, but do not evict the
+synchronous API from `/ready`; worker, Redis-group, or store unavailability does.
+
+Required activation configuration, in addition to durable delivery:
+
+- `MAI_READY_REDIS_URL`, `MAI_READY_REDIS_STREAM`, `MAI_READY_REDIS_GROUP`
+- `MAI_READY_PRODUCER_REPLAY_HORIZON_SEC`
+- `MAI_TRANSCRIPT_SERVICE_BASE_URL`
+- `MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE`, containing `{tenant_id}`,
+  `{meeting_id}`, `{session_id}`, and `{finalization_version}`
+- `MAI_TRANSCRIPT_SERVICE_TOKEN_URL`, `MAI_TRANSCRIPT_SERVICE_CLIENT_ID`,
+  `MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET`
+- `MAI_TRANSCRIPT_SERVICE_AUDIENCE`, `MAI_TRANSCRIPT_SERVICE_SCOPE`
+
+The HTTP adapter expects a JSON snapshot with exact tenant, meeting, session,
+`finalizationVersion=1`, `state=FINALIZED`, `segmentCount`, raw in-memory `transcript`,
+and `transcriptSha256=sha256(UTF-8 transcript)`. Identity, state, count, and hash are
+verified before analysis. This adapter must remain disabled until transcript-service
+freezes that internal endpoint and auth-service/transcript-service enforce the
+tenant/job binding for the token; an event or caller-supplied tenant header is not
+accepted as authority.
+
+Only `RETRY_EXHAUSTED` ready-event DLQ rows can be operator-rearmed. Poison,
+contract-terminal, and payload-conflict rows remain permanently fail-closed. Rearming
+stores a bounded audit reference but no event body; the producer must then replay the
+exact original event:
+
+```bash
+python scripts/requeue_ready_event.py --list-dead --limit 100
+python scripts/requeue_ready_event.py \
+  --event-key <event-key> \
+  --audit-reference <issue-or-change-reference>
+```
+
 The Windows host channel is non-executable and fail-closed. Use elevated
 `deploy/gpu-host/configure-meeting-ai.ps1`; it prompts with `SecureString`, stores
 the client secret and AES keyring as DPAPI LocalMachine ciphertext under a
@@ -218,7 +294,8 @@ curl -X POST http://localhost:8400/analyze \
 ## Config (env, prefix `MAI_`)
 
 `MAI_BACKEND`, `MAI_MODEL_NAME`, `MAI_MAX_TRANSCRIPT_CHARS`, `MAI_REDACT_PII`,
-`MAI_REQUEST_TIMEOUT`, `MAI_SUMMARY_MAX_CHARS`. See `app/core/config.py`.
+`MAI_REQUEST_TIMEOUT`, `MAI_SUMMARY_MAX_CHARS`, `MAI_INGESTION_*`,
+`MAI_READY_*`, and `MAI_TRANSCRIPT_SERVICE_*`. See `app/core/config.py`.
 
 ## Follow-ups (out of #49 skeleton scope)
 

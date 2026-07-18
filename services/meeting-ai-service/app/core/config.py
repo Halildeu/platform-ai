@@ -137,6 +137,62 @@ class Settings(BaseSettings):
         ),
     )
 
+    # #263 — canonical transcript-ready consumer (default-off until the backend
+    # internal snapshot and tenant/job-token contract is frozen).
+    ready_consumer_enabled: bool = Field(default=False)
+    analysis_spec_version: str = Field(
+        default="meeting-intelligence-v1",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    ready_redis_url: SecretStr = Field(default=SecretStr(""))
+    ready_redis_stream: str = Field(default="meeting:events", min_length=1, max_length=256)
+    ready_redis_group: str = Field(
+        default="meeting-ai-transcript-ready-v1", min_length=1, max_length=256
+    )
+    ready_redis_consumer_name: str = Field(default="", max_length=256)
+    ready_redis_dead_letter_stream: str = Field(
+        default="meeting:events:meeting-ai:dead", min_length=1, max_length=256
+    )
+    ready_redis_dead_letter_maxlen: int = Field(default=10_000, ge=1, le=1_000_000)
+    ready_redis_block_ms: int = Field(default=1_000, ge=10, le=60_000)
+    ready_redis_batch_size: int = Field(default=1, ge=1, le=100)
+    ready_redis_claim_idle_ms: int = Field(default=120_000, ge=100, le=3_600_000)
+    ready_consumer_lease_sec: float = Field(default=120.0, ge=5.0, le=7_200.0)
+    ready_consumer_max_failures: int = Field(default=8, ge=1, le=100)
+    ready_consumer_base_backoff_sec: float = Field(default=2.0, ge=0.1, le=300.0)
+    ready_consumer_max_backoff_sec: float = Field(default=300.0, ge=1.0, le=86_400.0)
+    ready_consumer_jitter_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
+    ready_consumer_shutdown_grace_sec: float = Field(default=10.0, ge=0.1, le=300.0)
+    ready_consumer_inbox_max_rows: int = Field(default=100_000, ge=1, le=10_000_000)
+    ready_consumer_stale_after_sec: float = Field(default=300.0, ge=1.0, le=604_800.0)
+    ready_consumer_retention_sec: float = Field(
+        default=2_592_000.0,
+        ge=86_400.0,
+        le=31_536_000.0,
+    )
+    ready_producer_replay_horizon_sec: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=31_536_000.0,
+    )
+    ready_consumer_prune_interval_sec: float = Field(default=3_600.0, ge=60.0, le=86_400.0)
+    ready_consumer_prune_batch_size: int = Field(default=1_000, ge=1, le=10_000)
+
+    transcript_service_base_url: str = Field(default="")
+    transcript_service_snapshot_path_template: str = Field(default="")
+    transcript_service_token_url: str = Field(default="")
+    transcript_service_client_id: str = Field(default="")
+    transcript_service_client_secret: SecretStr = Field(default=SecretStr(""))
+    transcript_service_audience: str = Field(default="transcript-service")
+    transcript_service_scope: str = Field(default="transcript:canonical:read")
+    transcript_service_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
+
+    @property
+    def transcript_service_permissions(self) -> list[str]:
+        return [p.strip() for p in self.transcript_service_scope.split(",") if p.strip()]
+
     def ollama_options(self) -> dict[str, object]:
         """Decoding options for Ollama `/api/generate` (deterministic extraction).
 
@@ -253,6 +309,70 @@ class Settings(BaseSettings):
         # another worker cannot reclaim and duplicate it mid-flight.
         if self.ingestion_lease_sec <= 2 * self.ingestion_timeout_sec:
             raise ValueError("ingestion lease must be greater than two HTTP timeout windows")
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_ready_consumer_boundary(self) -> Settings:
+        if not self.ready_consumer_enabled:
+            return self
+        if not self.ingestion_enabled:
+            raise ValueError("MAI_READY_CONSUMER_ENABLED=True requires MAI_INGESTION_ENABLED=True")
+        if not self.ready_redis_url.get_secret_value():
+            raise ValueError("MAI_READY_REDIS_URL is required when the ready consumer is enabled")
+        parsed_redis = urlsplit(self.ready_redis_url.get_secret_value())
+        if parsed_redis.scheme not in {"redis", "rediss"} or not parsed_redis.hostname:
+            raise ValueError("MAI_READY_REDIS_URL must be an absolute redis:// or rediss:// URL")
+        if self.app_env in {"stage", "prod"} and parsed_redis.scheme != "rediss":
+            raise ValueError("stage/prod ready consumer requires a rediss:// Redis URL")
+
+        required = {
+            "MAI_TRANSCRIPT_SERVICE_BASE_URL": self.transcript_service_base_url,
+            "MAI_TRANSCRIPT_SERVICE_TOKEN_URL": self.transcript_service_token_url,
+        }
+        for name, value in required.items():
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+                raise ValueError(
+                    f"{name} must be an absolute HTTPS URL without embedded credentials"
+                )
+        if not (
+            self.transcript_service_client_id
+            and self.transcript_service_client_secret.get_secret_value()
+            and self.transcript_service_permissions
+        ):
+            raise ValueError(
+                "ready consumer requires transcript-service client credentials and permission"
+            )
+        required_placeholders = {
+            "{tenant_id}",
+            "{meeting_id}",
+            "{session_id}",
+            "{finalization_version}",
+        }
+        if not self.transcript_service_snapshot_path_template.startswith("/") or any(
+            placeholder not in self.transcript_service_snapshot_path_template
+            for placeholder in required_placeholders
+        ):
+            raise ValueError(
+                "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE must be an absolute path "
+                "containing tenant_id, meeting_id, session_id, and "
+                "finalization_version placeholders"
+            )
+        if self.ready_consumer_max_backoff_sec < self.ready_consumer_base_backoff_sec:
+            raise ValueError("ready consumer max backoff must be >= base backoff")
+        if self.ready_producer_replay_horizon_sec <= 0:
+            raise ValueError("MAI_READY_PRODUCER_REPLAY_HORIZON_SEC must be explicitly configured")
+        if self.ready_consumer_retention_sec < self.ready_producer_replay_horizon_sec:
+            raise ValueError("ready consumer retention must be >= the producer replay horizon")
+        minimum_lease = self.request_timeout + (2 * self.transcript_service_timeout_sec)
+        if self.ready_consumer_lease_sec <= minimum_lease:
+            raise ValueError(
+                "ready consumer lease must exceed analysis timeout plus two transcript HTTP windows"
+            )
+        if self.ready_redis_claim_idle_ms / 1000 < self.ready_consumer_lease_sec:
+            raise ValueError(
+                "ready Redis claim idle time must be >= the ready consumer processing lease"
+            )
         return self
 
     @model_validator(mode="after")

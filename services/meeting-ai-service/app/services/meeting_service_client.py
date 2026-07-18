@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 
 import httpx
+from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.services.durable_outbox import ClaimedMessage
@@ -36,6 +37,16 @@ class DeliveryAttempt:
 class _CachedToken:
     access_token: str
     expires_at_monotonic: float
+
+
+@dataclass(frozen=True)
+class ServiceTokenRequest:
+    token_url: str
+    client_id: str
+    client_secret: SecretStr
+    audience: str
+    permissions: tuple[str, ...]
+    timeout_sec: float
 
 
 class MeetingServiceTlsError(RuntimeError):
@@ -131,6 +142,16 @@ class ReloadingHttpClient:
         finally:
             await self._release_client(client)
 
+    async def get(self, *args: object, **kwargs: object) -> httpx.Response:
+        if self._external_client is not None:
+            return await self._external_client.get(*args, **kwargs)  # type: ignore[arg-type]
+
+        client = await self._acquire_client()
+        try:
+            return await client.get(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            await self._release_client(client)
+
     async def _acquire_client(self) -> httpx.AsyncClient:
         client, close_after_unlock = await self._get_or_refresh_client(acquire=True)
         if close_after_unlock is not None:
@@ -203,8 +224,20 @@ class ReloadingHttpClient:
 class ServiceTokenClient:
     """OAuth2 client-credentials token cache; credentials are never persisted."""
 
-    def __init__(self, settings: Settings, client: ReloadingHttpClient) -> None:
-        self._settings = settings
+    def __init__(
+        self,
+        settings: Settings,
+        client: ReloadingHttpClient,
+        request: ServiceTokenRequest | None = None,
+    ) -> None:
+        self._request = request or ServiceTokenRequest(
+            token_url=settings.meeting_service_token_url,
+            client_id=settings.meeting_service_client_id,
+            client_secret=settings.meeting_service_client_secret,
+            audience=settings.meeting_service_audience,
+            permissions=tuple(settings.meeting_service_permissions),
+            timeout_sec=settings.ingestion_timeout_sec,
+        )
         self._client = client
         self._cached: _CachedToken | None = None
         self._lock = asyncio.Lock()
@@ -220,7 +253,7 @@ class ServiceTokenClient:
                 return self._cached.access_token, None
             try:
                 response = await self._client.post(
-                    self._settings.meeting_service_token_url,
+                    self._request.token_url,
                     # `permissions` is a LIST value: httpx encodes a list into a
                     # REPEATED form field (permissions=a&permissions=b), which is how
                     # auth-service binds form.get("permissions"). A scalar would emit a
@@ -229,14 +262,12 @@ class ServiceTokenClient:
                     # 400 invalid_audience — the #248 live-auth bug this fixes).
                     data={
                         "grant_type": "client_credentials",
-                        "client_id": self._settings.meeting_service_client_id,
-                        "client_secret": (
-                            self._settings.meeting_service_client_secret.get_secret_value()
-                        ),
-                        "audience": self._settings.meeting_service_audience,
-                        "permissions": self._settings.meeting_service_permissions,
+                        "client_id": self._request.client_id,
+                        "client_secret": self._request.client_secret.get_secret_value(),
+                        "audience": self._request.audience,
+                        "permissions": list(self._request.permissions),
                     },
-                    timeout=self._settings.ingestion_timeout_sec,
+                    timeout=self._request.timeout_sec,
                 )
             except (httpx.HTTPError, MeetingServiceTlsError) as exc:
                 return None, DeliveryAttempt(

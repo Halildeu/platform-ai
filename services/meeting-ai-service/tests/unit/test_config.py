@@ -18,6 +18,7 @@ def test_defaults() -> None:
     assert s.redact_pii is True
     assert s.request_timeout == 60
     assert s.ingestion_enabled is False
+    assert s.ready_consumer_enabled is False
 
 
 def test_backend_pattern_rejects_unknown() -> None:
@@ -134,4 +135,71 @@ def test_mutual_tls_requires_readable_absolute_material(tmp_path: Path) -> None:
 
     values["meeting_service_tls_client_key_path"] = tmp_path / "missing.key"
     with pytest.raises(ValidationError, match="readable file"):
+        Settings(**values)
+
+
+def _ready_values(tmp_path: Path) -> dict[str, object]:
+    values = _ingestion_values(tmp_path)
+    values.update(
+        {
+            "ready_consumer_enabled": True,
+            "ready_producer_replay_horizon_sec": 604_800.0,
+            "ready_redis_url": SecretStr("redis://redis.test:6379/0"),
+            "transcript_service_base_url": "https://transcript.test",
+            "transcript_service_snapshot_path_template": (
+                "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+                "/sessions/{session_id}/finalizations/{finalization_version}"
+            ),
+            "transcript_service_token_url": "https://auth.test/token",
+            "transcript_service_client_id": "meeting-ai-ready",
+            "transcript_service_client_secret": SecretStr("transcript-secret-value"),
+        }
+    )
+    return values
+
+
+def test_ready_consumer_is_default_off_and_fails_closed_on_partial_config(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValidationError, match="requires MAI_INGESTION_ENABLED"):
+        Settings(ready_consumer_enabled=True)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_snapshot_path_template"] = "/api/v1/internal/snapshot"
+    with pytest.raises(ValidationError, match="placeholders"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_consumer_lease_sec"] = 80.0
+    with pytest.raises(ValidationError, match="analysis timeout"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_redis_claim_idle_ms"] = 10_000
+    with pytest.raises(ValidationError, match="claim idle time"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_producer_replay_horizon_sec"] = 0.0
+    with pytest.raises(ValidationError, match="explicitly configured"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_producer_replay_horizon_sec"] = 3_000_000.0
+    with pytest.raises(ValidationError, match="retention must be >="):
+        Settings(**values)
+
+
+def test_ready_consumer_secret_values_are_redacted_and_prod_requires_tls_redis(
+    tmp_path: Path,
+) -> None:
+    values = _ready_values(tmp_path)
+    settings = Settings(**values)
+    assert settings.transcript_service_permissions == ["transcript:canonical:read"]
+    assert "transcript-secret-value" not in repr(settings)
+    assert "redis.test" not in repr(settings)
+
+    values["app_env"] = "prod"
+    values["backend"] = "ollama"
+    with pytest.raises(ValidationError, match="rediss"):
         Settings(**values)

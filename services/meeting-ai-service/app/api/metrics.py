@@ -103,6 +103,24 @@ mai_analyze_live_stream_published_total = Counter(
     "Publish attempts to the live-stream hub (0-subscriber calls counted here too)",
 )
 
+# ── Faz 24 durable transcript-ready consumer (issue #263) ─────────────
+mai_ready_consumer_events_total = Counter(
+    "mai_ready_consumer_events_total",
+    "Transcript-ready consumer outcomes; labels contain no transcript content",
+    ["outcome"],
+)
+
+mai_ready_consumer_inbox_depth = Gauge(
+    "mai_ready_consumer_inbox_depth",
+    "Durable transcript-ready inbox rows by state",
+    ["state"],
+)
+
+mai_ready_consumer_oldest_unfinished_age_seconds = Gauge(
+    "mai_ready_consumer_oldest_unfinished_age_seconds",
+    "Age of the oldest received or processing transcript-ready inbox row",
+)
+
 
 @router.get("/metrics", summary="Prometheus metrics endpoint")
 def metrics() -> Response:
