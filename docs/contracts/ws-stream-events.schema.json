@@ -8,6 +8,8 @@
     { "$ref": "#/$defs/ready" },
     { "$ref": "#/$defs/partial" },
     { "$ref": "#/$defs/final" },
+    { "$ref": "#/$defs/eofAck" },
+    { "$ref": "#/$defs/drained" },
     { "$ref": "#/$defs/error" },
     { "$ref": "#/$defs/debug" }
   ],
@@ -28,9 +30,25 @@
         "sample_rate": { "type": "integer", "minimum": 8000 },
         "live_model": { "type": "string" },
         "final_model": { "type": "string" },
-        "partial_mode": { "const": "stable-v1" }
+        "partial_mode": { "const": "stable-v1" },
+        "capabilities": {
+          "type": "array",
+          "prefixItems": [{ "const": "eof" }],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "supports_eof": { "const": true }
       },
-      "required": ["type", "sample_rate", "live_model", "final_model", "partial_mode"],
+      "required": [
+        "type",
+        "sample_rate",
+        "live_model",
+        "final_model",
+        "partial_mode",
+        "capabilities",
+        "supports_eof"
+      ],
       "additionalProperties": false
     },
     "partial": {
@@ -58,6 +76,22 @@
         "rms": { "type": "number", "minimum": 0 }
       },
       "required": ["type", "seq", "text", "reason", "elapsed_ms", "rms"],
+      "additionalProperties": false
+    },
+    "eofAck": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "eof_ack" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "drained": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "drained" }
+      },
+      "required": ["type"],
       "additionalProperties": false
     },
     "error": {

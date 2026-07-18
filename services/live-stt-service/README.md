@@ -100,6 +100,13 @@ Bu ayarlar `app.core.config.Settings` içinde bounded Pydantic alanlarıdır:
 `STT_TAIL_OVERLAP_SEC < STT_FINAL_WINDOW_SEC` guard'ları boot sırasında
 geçersiz rollout'u durdurur.
 
+`ready` ayrıca `capabilities=["eof"]` ve `supports_eof=true` ilan eder. İstemci
+ses göndermeyi bitirdiğinde yalnızca `{"type":"eof"}` metin kontrolünü bir kez
+gönderir. Sunucu önce `eof_ack`, buffer'da kalan konuşma varsa son `final`
+event(ler)ini ve bütün final gönderimleri bittikten sonra `drained` üretir.
+Bilinmeyen metin, ikinci EOF ve EOF sonrası ses paketi bağlantıyı fail-closed
+sonlandırır; disconnect veya terminal final-model hatası `drained` üretemez.
+
 Transcript-free canlı stream smoke:
 
 ```bash

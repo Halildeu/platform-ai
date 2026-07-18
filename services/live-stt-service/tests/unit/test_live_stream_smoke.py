@@ -70,6 +70,7 @@ def test_redacted_summary_excludes_transcript_text() -> None:
                 1500,
             ),
         ],
+        terminal_events=["eof_ack", "drained"],
         errors=[],
         reference_text_path=FIXTURE.with_suffix(".txt"),
     )
@@ -125,6 +126,7 @@ def test_summary_fails_when_final_word_coverage_is_too_low() -> None:
                 1500,
             ),
         ],
+        terminal_events=["eof_ack", "drained"],
         errors=[],
         reference_text_path=FIXTURE.with_suffix(".txt"),
         min_final_word_coverage=0.5,
@@ -139,6 +141,30 @@ def test_summary_fails_when_final_word_coverage_is_too_low() -> None:
     }
     assert "final_word_coverage_below_min" in summary["quality_gate"]["failures"]
     assert raw_text not in payload
+
+
+def test_summary_rejects_missing_terminal_drain() -> None:
+    smoke = _load_smoke_module()
+    started_at = time.perf_counter()
+
+    summary = smoke.build_summary(
+        url="ws://127.0.0.1:18220/ws/stream",
+        wav_path=FIXTURE,
+        audio_samples=88_320,
+        started_at=started_at,
+        loading_events=["loading:live_model", "loading:final_model"],
+        ready_at=started_at + 0.1,
+        transcript_events=[
+            {"type": "partial", "received_at_ms": 100},
+            {"type": "final", "received_at_ms": 200, "text_words": 5},
+        ],
+        terminal_events=["eof_ack"],
+        errors=[],
+        reference_text_path=FIXTURE.with_suffix(".txt"),
+    )
+
+    assert summary["ok"] is False
+    assert "terminal_sequence_invalid" in summary["quality_gate"]["failures"]
 
 
 def test_final_event_count_honors_requested_long_smoke_gate() -> None:

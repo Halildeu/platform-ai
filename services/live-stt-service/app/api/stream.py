@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import time
@@ -50,6 +51,7 @@ ROLLING_CONTINUATION_MIN_NEXT_WORDS = 1
 SHORT_FINAL_PRESERVE_MIN_PREVIOUS_WORDS = 5
 SHORT_FINAL_PRESERVE_MAX_RATIO = 0.65
 SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO = 0.45
+EOF_CONTROL = {"type": "eof"}
 _OVERLAP_SUFFIXES = (
     "lerinizden",
     "larınızdan",
@@ -520,6 +522,19 @@ def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
     return None
 
 
+class StreamProtocolError(ValueError):
+    """Client violated the bounded live-stream control protocol."""
+
+
+def _decode_terminal_control(value: str) -> None:
+    try:
+        payload = json.loads(value)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise StreamProtocolError("invalid_client_control") from exc
+    if payload != EOF_CONTROL:
+        raise StreamProtocolError("invalid_client_control")
+
+
 @router.websocket("/ws/stream")
 async def stream_endpoint(
     websocket: WebSocket,
@@ -554,6 +569,8 @@ async def stream_endpoint(
             "live_model": settings.live_model_name,
             "final_model": settings.final_model_name,
             "partial_mode": "stable-v1",
+            "capabilities": ["eof"],
+            "supports_eof": True,
         }
     )
     logger.info(
@@ -592,7 +609,29 @@ async def stream_endpoint(
         async with send_lock:
             await websocket.send_json(payload)
 
-    async def commit_current(reason: str) -> None:
+    async def emit_final(payload: dict[str, object]) -> None:
+        await send_json(payload)
+        await send_debug(
+            "final_sent",
+            seq=payload["seq"],
+            elapsed_ms=payload["elapsed_ms"],
+            text_len=len(str(payload["text"])),
+        )
+        # KVKK: no transcript content in server logs.
+        logger.info(
+            "Final segment sent",
+            extra={
+                "seq": payload["seq"],
+                "reason": payload["reason"],
+                "elapsed_ms": payload["elapsed_ms"],
+            },
+        )
+
+    async def commit_current(
+        reason: str,
+        *,
+        defer_final: bool = False,
+    ) -> dict[str, object] | None:
         nonlocal buffer, buffer_start_t, seg_index, last_draft, confirmed_draft
         nonlocal tentative_draft, speech_seen
         nonlocal last_speech_t, last_final_text, recent_final_text, buffer_start_sample
@@ -669,7 +708,7 @@ async def stream_endpoint(
                 commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
-            return
+            return None
 
         rms = _audio_rms(audio)
         if rms < settings.min_speech_rms:
@@ -679,7 +718,7 @@ async def stream_endpoint(
                 commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
-            return
+            return None
 
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
         started = time.perf_counter()
@@ -689,10 +728,12 @@ async def stream_endpoint(
                 audio,
                 settings.stream_final_vad_filter,
             )
-        except Exception as exc:  # noqa: BLE001 - keep stream alive, fall back to draft
+        except Exception as exc:  # Keep non-terminal streams alive by falling back to draft.
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
             logger.warning("Final pass error err_class=%s", type(exc).__name__, exc_info=True)
             await send_debug("final_error", error=type(exc).__name__)
+            if reason == "eof":
+                raise
             text = last_draft
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -705,7 +746,7 @@ async def stream_endpoint(
                 commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
-            return
+            return None
 
         if selected_text != text:
             await send_debug("final_fallback_draft", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
@@ -723,24 +764,18 @@ async def stream_endpoint(
                 commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
-            return
+            return None
 
-        await send_json(
-            {
-                "type": "final",
-                "seq": active_seq,
-                "text": text,
-                "reason": reason,
-                "elapsed_ms": elapsed_ms,
-                "rms": round(rms, 5),
-            }
-        )
-        await send_debug("final_sent", seq=active_seq, elapsed_ms=elapsed_ms, text_len=len(text))
-        # KVKK: no transcript content in server logs.
-        logger.info(
-            "Final segment sent",
-            extra={"seq": active_seq, "reason": reason, "elapsed_ms": elapsed_ms},
-        )
+        final_payload: dict[str, object] = {
+            "type": "final",
+            "seq": active_seq,
+            "text": text,
+            "reason": reason,
+            "elapsed_ms": elapsed_ms,
+            "rms": round(rms, 5),
+        }
+        if not defer_final:
+            await emit_final(final_payload)
         last_final_text = text
         recent_final_text = _append_recent_final_text(recent_final_text, text)
 
@@ -753,6 +788,7 @@ async def stream_endpoint(
             commit_end_sample=commit_end_sample,
             committed_audio=audio,
         )
+        return final_payload
 
     async def infer_live_partial() -> None:
         nonlocal last_draft, confirmed_draft, tentative_draft
@@ -832,6 +868,8 @@ async def stream_endpoint(
 
         while not stop_inference.is_set():
             await asyncio.sleep(0.05)
+            if stop_inference.is_set():
+                break
             now = time.time()
             commit_reason: str | None = None
 
@@ -864,9 +902,69 @@ async def stream_endpoint(
                 last_live_infer_t = time.time()
 
     inference_task = asyncio.create_task(inference_loop())
+    terminal_task: asyncio.Task[dict[str, object] | None] | None = None
+
+    async def finalize_terminal() -> dict[str, object] | None:
+        final_payload = await commit_current("eof", defer_final=True)
+        # Give the receive task a chance to surface an already-queued post-EOF
+        # frame before the server emits the terminal success marker.
+        await asyncio.sleep(0)
+        return final_payload
+
+    async def reject_post_eof_frame() -> dict[str, object] | None:
+        nonlocal terminal_task
+
+        terminal_task = asyncio.create_task(finalize_terminal())
+        receive_task = asyncio.create_task(websocket.receive())
+        done, _ = await asyncio.wait(
+            {terminal_task, receive_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # A client frame or disconnect observed before finalization completes is
+        # not allowed to race the terminal boundary. Prefer the protocol failure
+        # even when both tasks became ready in the same event-loop turn.
+        if receive_task in done:
+            message = receive_task.result()
+            terminal_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await terminal_task
+            if message.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+            raise StreamProtocolError("post_eof_frame")
+
+        final_payload = await terminal_task
+        receive_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await receive_task
+        return final_payload
+
     try:
         while True:
-            data = await websocket.receive_bytes()
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+
+            text = message.get("text")
+            if text is not None:
+                _decode_terminal_control(text)
+                # No live partial may cross the acknowledged terminal boundary.
+                # A partial already in flight is allowed to finish before the
+                # acknowledgement; after eof_ack only late finals and drained
+                # are valid server events.
+                stop_inference.set()
+                await inference_task
+                await send_json({"type": "eof_ack"})
+                final_payload = await reject_post_eof_frame()
+                if final_payload is not None:
+                    await emit_final(final_payload)
+                await send_json({"type": "drained"})
+                await websocket.close(code=1000)
+                return
+
+            data = message.get("bytes")
+            if data is None:
+                raise StreamProtocolError("invalid_client_frame")
             if not data:
                 continue
 
@@ -911,12 +1009,22 @@ async def stream_endpoint(
 
     except WebSocketDisconnect:
         logger.info("WS disconnected")
+    except StreamProtocolError as exc:
+        logger.warning("WS stream protocol rejected reason=%s", str(exc))
+        with contextlib.suppress(Exception):
+            await send_json({"type": "error", "msg": str(exc)})
+            await websocket.close(code=1003)
     except Exception:
         logger.exception("WS stream error")
         with contextlib.suppress(Exception):
             await websocket.close()
     finally:
         stop_inference.set()
-        inference_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await inference_task
+        if terminal_task is not None and not terminal_task.done():
+            terminal_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await terminal_task
+        if not inference_task.done():
+            inference_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await inference_task

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import sys
@@ -170,6 +171,7 @@ def build_summary(
     loading_events: list[str],
     ready_at: float | None,
     transcript_events: list[dict[str, Any]],
+    terminal_events: list[str],
     errors: list[str],
     reference_text_path: Path | None = None,
     min_final_word_coverage: float = DEFAULT_MIN_FINAL_WORD_COVERAGE,
@@ -195,6 +197,8 @@ def build_summary(
         failures.append("ready_missing")
     if errors:
         failures.append("error_events_present")
+    if terminal_events != ["eof_ack", "drained"]:
+        failures.append("terminal_sequence_invalid")
     if len(final_events) < min_final_events:
         failures.append("final_event_count_below_min")
     if len(partial_events) < min_partial_events:
@@ -234,6 +238,7 @@ def build_summary(
             "final_hallucination_count": final_hallucination_count,
             "error_count": len(errors),
             "max_transcript_gap_ms": max_gap_ms,
+            "terminal_sequence": terminal_events,
         },
         "coverage": {
             "final_words": final_word_count,
@@ -275,6 +280,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     started_at = time.perf_counter()
     loading_events: list[str] = []
     transcript_events: list[dict[str, Any]] = []
+    terminal_events: list[str] = []
     errors: list[str] = []
     ready_at: float | None = None
 
@@ -300,24 +306,27 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     event_type = event.get("type")
                     if event_type in {"partial", "final"}:
                         transcript_events.append(redacted_transcript_event(event, received_at_ms))
+                    elif event_type in {"eof_ack", "drained"}:
+                        terminal_events.append(str(event_type))
+                        if event_type == "drained":
+                            return
                     elif event_type == "error":
                         errors.append(str(event.get("msg", "error")))
+                        return
 
             receiver_task = asyncio.create_task(receiver())
             for frame in frames:
                 await websocket.send(frame.astype(np.float32).tobytes())
                 await asyncio.sleep(args.frame_ms / 1000)
 
-            deadline = time.perf_counter() + args.final_wait_sec
-            while time.perf_counter() < deadline:
-                if final_event_count(transcript_events) >= args.min_final_events:
-                    break
-                await asyncio.sleep(0.05)
-            receiver_task.cancel()
             try:
-                await receiver_task
-            except asyncio.CancelledError:
-                pass
+                await websocket.send(json.dumps({"type": "eof"}, separators=(",", ":")))
+                await asyncio.wait_for(receiver_task, timeout=args.final_wait_sec)
+            except TimeoutError:
+                errors.append("terminal_drain_timeout")
+                receiver_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await receiver_task
 
     return build_summary(
         url=args.url,
@@ -327,6 +336,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         loading_events=loading_events,
         ready_at=ready_at,
         transcript_events=transcript_events,
+        terminal_events=terminal_events,
         errors=errors,
         reference_text_path=reference_text_path,
         min_final_word_coverage=args.min_final_word_coverage,
