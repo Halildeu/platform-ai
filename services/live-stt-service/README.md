@@ -79,6 +79,8 @@ Varsayılan canlı UX ayarları:
 | `STT_LIVE_BEAM_SIZE` | `1` | Live draft decode genişliği; düşük gecikme için ADR-0031 default |
 | `STT_FINAL_BEAM_SIZE` | `1` | Final revision decode genişliği; ölçümlü A/B için env ile artırılabilir |
 | `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct stream final pass'te Whisper VAD; default kapalı çünkü RMS gate zaten aktif sesi seçer |
+| `STT_STREAM_LIVE_WORKER_BACKEND` | `process` | Draft modeli native/GPU hang durumunda terminate/kill edilebilen supervised child process'te çalıştırır |
+| `STT_STREAM_LIVE_TIMEOUT_SEC` | `5` | Draft decode için hard deadline; aşımda child process recycle edilir |
 | `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
 | `STT_SILENCE_COMMIT_SEC` | `0.7` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
 | `STT_FORCED_COMMIT_SEC` | `5.0` | Uzun konuşmada bounded finalization safety |

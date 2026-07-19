@@ -41,6 +41,7 @@ from app.core.config import Settings, get_settings
 from app.services.hallucination import is_hallucination
 from app.services.streaming_models import (
     SupervisedFinalWhisperService,
+    SupervisedLiveWhisperService,
     get_final_service,
     get_live_service,
 )
@@ -622,6 +623,7 @@ async def stream_endpoint(
     recent_final_text = ""
     total_samples_received = 0
     buffer_start_sample = 0
+    finalized_through_sample = 0
     buffer_lock = asyncio.Lock()
     send_lock = asyncio.Lock()
     stop_inference = asyncio.Event()
@@ -702,6 +704,7 @@ async def stream_endpoint(
         nonlocal buffer, buffer_start_t, seg_index, last_draft, confirmed_draft
         nonlocal tentative_draft, speech_seen
         nonlocal last_speech_t, last_final_text, recent_final_text, buffer_start_sample
+        nonlocal finalized_through_sample
 
         def trim_leading_silence(
             samples: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
@@ -777,6 +780,21 @@ async def stream_endpoint(
                 audio = audio[first_active:last_active_exclusive].copy()
                 source_start_sample += first_active
                 source_end_sample = buffer_start_sample + last_active_exclusive
+
+        # A forced commit retains a short tail only as decode context. EOF or
+        # another timer tick must not turn that already-finalized tail into a
+        # second durable transcript window when no new source audio arrived.
+        if source_end_sample <= finalized_through_sample:
+            await send_debug(
+                "final_skip_without_source_progress",
+                source_end_sample=source_end_sample,
+            )
+            await advance_segment(
+                retain_tail=False,
+                commit_end_sample=commit_end_sample,
+                committed_audio=audio,
+            )
+            return None
 
         buffer_sec = round(audio.size / SAMPLE_RATE, 2)
         if audio.size < min_infer_samples:
@@ -874,12 +892,13 @@ async def stream_endpoint(
         }
 
         async def publish_and_advance() -> None:
-            nonlocal last_final_text, recent_final_text
+            nonlocal last_final_text, recent_final_text, finalized_through_sample
 
             if not defer_final:
                 await emit_final(final_payload)
             last_final_text = text
             recent_final_text = _append_recent_final_text(recent_final_text, text)
+            finalized_through_sample = source_end_sample
 
             # A forced commit happens while speech is still continuous, so a small
             # tail helps avoid boundary loss. A silence commit already has an
@@ -920,11 +939,21 @@ async def stream_endpoint(
         await send_debug("draft_start", rms=round(live_rms, 5))
         started = time.perf_counter()
         try:
-            draft = await run_in_threadpool(live_service.transcribe_array, live_audio, False)
-        except Exception as exc:  # noqa: BLE001 - skip this tick, keep stream alive
+            draft_call = run_in_threadpool(live_service.transcribe_array, live_audio, False)
+            draft = (
+                await draft_call
+                if isinstance(live_service, SupervisedLiveWhisperService)
+                else await asyncio.wait_for(
+                    draft_call,
+                    timeout=settings.stream_live_timeout_sec,
+                )
+            )
+        except Exception as exc:
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
             logger.warning("Draft pass error err_class=%s", type(exc).__name__, exc_info=True)
             await send_debug("draft_error", error=type(exc).__name__)
+            if isinstance(live_service, SupervisedLiveWhisperService):
+                raise
             return
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)

@@ -218,7 +218,15 @@ def test_transcript_contract_rejects_future_range_and_non_increasing_final_seq()
         {**final, "seq": 9},
         cumulative_samples_sent=16_000,
         previous_final_seq=7,
+        previous_final_source_end=15_999,
     )
+    with pytest.raises(smoke.SmokeError, match="final event violates"):
+        smoke.validate_transcript_event(
+            {**final, "seq": 10},
+            cumulative_samples_sent=16_000,
+            previous_final_seq=9,
+            previous_final_source_end=16_000,
+        )
     with pytest.raises(smoke.SmokeError, match="final event violates"):
         smoke.validate_transcript_event(
             {**final, "seq": 6},
@@ -463,6 +471,41 @@ def test_redacted_summary_excludes_transcript_text() -> None:
     assert "text_words" in payload
     assert summary["coverage"]["reference_words"] == 5
     assert summary["quality_gate"]["failures"] == []
+
+
+def test_summary_redacts_url_paths_and_upstream_error_values(tmp_path: Path) -> None:
+    smoke = _load_smoke_module()
+    secret = "do-not-persist-this-secret"
+    user_path = tmp_path / "private-call.wav"
+    user_path.write_bytes(b"privacy-fixture")
+    started_at = time.perf_counter()
+
+    with pytest.raises(smoke.SmokeError, match="userinfo"):
+        smoke.validate_stream_url(
+            f"wss://user:{secret}@example.test/ws/stream?protocol=source-ranges-v1"
+        )
+    with pytest.raises(smoke.SmokeError, match="negotiate"):
+        smoke.validate_stream_url(
+            f"wss://example.test/ws/stream?protocol=source-ranges-v1&access_token={secret}"
+        )
+
+    summary = smoke.build_summary(
+        url=f"wss://example.test/ws/stream?protocol=source-ranges-v1&access_token={secret}",
+        wav_path=user_path,
+        audio_samples=16_000,
+        started_at=started_at,
+        loading_events=["loading:live_model", "loading:final_model"],
+        ready_at=started_at + 0.1,
+        transcript_events=[],
+        terminal_events=[],
+        errors=["upstream_error"],
+    )
+    payload = json.dumps(summary, ensure_ascii=False)
+
+    assert summary["url"] == "wss://example.test/ws/stream"
+    assert secret not in payload
+    assert "private-call.wav" not in payload
+    assert summary["fixture"]["artifact_id_sha256_12"]
 
 
 def test_summary_fails_when_final_word_coverage_is_too_low() -> None:

@@ -35,6 +35,7 @@ STREAM_PATH = "/ws/stream?protocol=source-ranges-v1"
 
 @pytest.fixture(autouse=True)
 def clear_dependency_overrides(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("STT_STREAM_LIVE_WORKER_BACKEND", "inline")
     monkeypatch.setenv("STT_STREAM_FINAL_WORKER_BACKEND", "inline")
     config_module._settings = None
     app.dependency_overrides.clear()
@@ -254,6 +255,54 @@ def test_eof_waits_for_published_final_state_transition_without_duplicate(
     assert len(finals) == 1
     assert finals[0]["seq"] == 0
     assert [event["type"] for event in terminal_events] == ["eof_ack", "drained"]
+
+
+def test_eof_does_not_refinalize_retained_forced_commit_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.025,
+    )
+    final_calls: list[int] = []
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if _is_final_service(self):
+            final_calls.append(audio.size)
+            return "İlk kesin metin." if len(final_calls) == 1 else "Farklı kuyruk metni."
+        return "Canlı taslak"
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        pre_terminal: list[dict[str, Any]] = []
+        while True:
+            event = ws.receive_json()
+            assert_valid(event)
+            pre_terminal.append(event)
+            if event["type"] == "final":
+                break
+
+        ws.send_text('{"type":"eof"}')
+        terminal = [ws.receive_json(), ws.receive_json()]
+
+    assert [event["type"] for event in terminal] == ["eof_ack", "drained"]
+    assert len([event for event in pre_terminal if event["type"] == "final"]) == 1
+    assert final_calls == [1024]
 
 
 def test_blocked_final_transport_closes_bounded_without_drained(

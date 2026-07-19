@@ -20,7 +20,7 @@ import wave
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qsl, urlparse, urlunsplit
 
 import numpy as np
 import websockets
@@ -73,8 +73,19 @@ def validate_stream_url(value: str) -> None:
     parsed = urlparse(value)
     if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
         raise SmokeError("stream URL must be an absolute ws/wss URL")
-    if parse_qs(parsed.query).get("protocol") != [STREAM_PROTOCOL]:
+    if parsed.username is not None or parsed.password is not None:
+        raise SmokeError("stream URL must not contain userinfo")
+    if parse_qsl(parsed.query, keep_blank_values=True) != [("protocol", STREAM_PROTOCOL)]:
         raise SmokeError(f"stream URL must negotiate protocol={STREAM_PROTOCOL}")
+
+
+def redacted_stream_url(value: str) -> str:
+    parsed = urlparse(value)
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 def validate_ready_event(event: dict[str, Any]) -> None:
@@ -115,6 +126,7 @@ def validate_transcript_event(
     *,
     cumulative_samples_sent: int,
     previous_final_seq: int | None,
+    previous_final_source_end: int | None = None,
 ) -> None:
     event_type = event.get("type")
     if event_type == "partial":
@@ -146,6 +158,10 @@ def validate_transcript_event(
             and _is_non_negative_int(source_start)
             and _is_non_negative_int(source_end)
             and int(cast(int, source_end)) > int(cast(int, source_start))
+            and (
+                previous_final_source_end is None
+                or int(cast(int, source_end)) > previous_final_source_end
+            )
             and int(cast(int, source_end)) <= cumulative_samples_sent
         )
     else:
@@ -234,11 +250,11 @@ def resolve_reference_text(wav_path: Path, value: str | None) -> Path | None:
 
 def reference_metadata(path: Path | None) -> dict[str, Any]:
     if path is None:
-        return {"path": None, "text_sha256_12": None, "words": None}
+        return {"artifact_id_sha256_12": None, "text_sha256_12": None, "words": None}
 
     text = path.read_text(encoding="utf-8").strip()
     return {
-        "path": str(path),
+        "artifact_id_sha256_12": text_digest(path.name),
         "text_sha256_12": text_digest(text),
         "words": _word_count(text),
     }
@@ -336,9 +352,9 @@ def build_summary(
     return {
         "schema": "platform-ai.live-stt.stream-smoke.v1",
         "ok": not failures,
-        "url": url,
+        "url": redacted_stream_url(url),
         "fixture": {
-            "path": str(wav_path),
+            "artifact_id_sha256_12": text_digest(wav_path.name),
             "audio_sha256_12": bytes_digest(wav_path.read_bytes()),
             "duration_ms": int(audio_samples / TARGET_SAMPLE_RATE * 1000),
             "sample_rate": TARGET_SAMPLE_RATE,
@@ -407,6 +423,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     ready_at: float | None = None
     samples_sent = 0
     last_final_seq: int | None = None
+    last_final_source_end: int | None = None
     eof_sent = asyncio.Event()
 
     async with websockets.connect(args.url, open_timeout=args.timeout_sec) as websocket:
@@ -415,18 +432,20 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             event_type = event.get("type")
             if event_type == "loading":
                 stage = event.get("stage", "-")
+                if stage not in {"live_model", "final_model"}:
+                    raise SmokeError("loading event has an invalid stage")
                 loading_events.append(f"loading:{stage}")
             elif event_type == "ready":
                 validate_ready_event(event)
                 ready_at = time.perf_counter()
             elif event_type == "error":
-                errors.append(str(event.get("msg", "error")))
+                errors.append("upstream_error")
                 break
 
         if ready_at is not None:
 
             async def receiver() -> None:
-                nonlocal last_final_seq
+                nonlocal last_final_seq, last_final_source_end
                 terminal_state = "streaming"
 
                 while True:
@@ -445,10 +464,12 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                             event,
                             cumulative_samples_sent=samples_sent,
                             previous_final_seq=last_final_seq,
+                            previous_final_source_end=last_final_source_end,
                         )
                         transcript_events.append(redacted_transcript_event(event, received_at_ms))
                         if event_type == "final":
                             last_final_seq = int(cast(int, event["seq"]))
+                            last_final_source_end = int(cast(int, event["source_end_sample"]))
                     elif event_type == "eof_ack":
                         if not eof_sent.is_set() or terminal_state != "streaming":
                             raise SmokeError("eof_ack is not caused by local eof")
@@ -473,7 +494,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                             f"trailing event received after drained: {type(trailing).__name__}"
                         )
                     elif event_type == "error":
-                        errors.append(str(event.get("msg", "error")))
+                        errors.append("upstream_error")
                         return
                     else:
                         raise SmokeError("unexpected event type in stream state machine")

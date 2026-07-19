@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     live_compute_type: str = Field(default="int8")
     live_device: str = Field(default="cuda")
     live_beam_size: int = Field(default=1, ge=1, le=10)
+    # Draft inference is process-supervised in shared environments. A native
+    # Whisper/CUDA hang must be killable; cancelling its asyncio waiter alone
+    # would leave the model lock and a worker thread occupied indefinitely.
+    stream_live_timeout_sec: float = Field(default=5.0, ge=0.1, le=30.0)
+    stream_live_worker_backend: str = Field(default="process", pattern="^(process|inline)$")
     final_model_name: str = Field(
         default="deepdml/faster-whisper-large-v3-turbo-ct2",
         description="accurate final model (ADR-0031)",
@@ -199,6 +204,11 @@ class Settings(BaseSettings):
             and self.stream_final_worker_backend != "process"
         ):
             raise ValueError("stream_final_worker_backend must be process in staging/production")
+        if (
+            self.environment in {"staging", "production"}
+            and self.stream_live_worker_backend != "process"
+        ):
+            raise ValueError("stream_live_worker_backend must be process in staging/production")
         return self
 
 

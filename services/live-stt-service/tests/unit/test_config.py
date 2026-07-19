@@ -26,6 +26,8 @@ def test_defaults() -> None:
     assert s.vad_filter is True
     assert s.stream_final_vad_filter is False
     assert s.stream_final_worker_backend == "process"
+    assert s.stream_live_worker_backend == "process"
+    assert s.stream_live_timeout_sec == 5.0
     assert s.stream_model_load_timeout_sec == 180.0
     assert s.stream_transport_timeout_sec == 2.0
     assert s.worker_backend == "process"
@@ -126,6 +128,8 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
     with pytest.raises(ValueError):
         cfg.Settings(stream_final_worker_backend="thread")
     with pytest.raises(ValueError):
+        cfg.Settings(stream_live_worker_backend="thread")
+    with pytest.raises(ValueError):
         cfg.Settings(stream_transport_timeout_sec=0.01)
     with pytest.raises(ValueError, match="terminal timeout budget must be <= 120 seconds"):
         cfg.Settings(
@@ -140,6 +144,14 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
             model_sha256="b" * 64,
             model_path="/models/immutable",
             stream_final_worker_backend="inline",
+        )
+    with pytest.raises(ValueError, match="stream_live_worker_backend must be process"):
+        cfg.Settings(
+            environment="staging",
+            model_revision="a" * 40,
+            model_sha256="b" * 64,
+            model_path="/models/immutable",
+            stream_live_worker_backend="inline",
         )
 
 

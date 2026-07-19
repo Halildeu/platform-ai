@@ -1,8 +1,8 @@
 """Two-stage streaming model services (#128).
 
-The draft model stays in-process for sub-second rolling inference. The final
-model is supervised in a child process by default so a native/GPU hang can be
-terminated and respawned without retaining unbounded audio snapshots.
+Both draft and final models are supervised in child processes by default so a
+native/GPU hang can be terminated and respawned without retaining an abandoned
+model lock or unbounded audio snapshots.
 
 Defaults follow ADR-0031: draft = `medium` int8, final = `large-v3-turbo`
 (fp16). Both are intended for the GPU host; the module loads nothing at import
@@ -150,16 +150,14 @@ class DirectWhisperService:
             ).strip()
 
 
-def _supervised_final_worker_main(
-    config: dict[str, object], task_queue: Any, result_queue: Any
-) -> None:
+def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_queue: Any) -> None:
     service = DirectWhisperService(
         cast(str, config["model_name"]),
         cast(str, config["device"]),
         cast(str, config["compute_type"]),
         cast(str, config["language"]),
         cast(int, config["beam_size"]),
-        role="final",
+        role=cast(str, config["role"]),
         no_speech_threshold=cast(float, config["no_speech_threshold"]),
         log_prob_threshold=cast(float, config["log_prob_threshold"]),
         compression_ratio_threshold=cast(float, config["compression_ratio_threshold"]),
@@ -177,7 +175,7 @@ def _supervised_final_worker_main(
             else:
                 raw = task.get("audio")
                 if not isinstance(raw, bytes):
-                    raise ValueError("streaming final audio payload is invalid")
+                    raise ValueError("streaming audio payload is invalid")
                 audio = np.frombuffer(raw, dtype="<f4").copy()
                 text = service.transcribe_array(audio, bool(task.get("vad", False)))
             result_queue.put({"job_id": job_id, "ok": True, "text": text})
@@ -185,25 +183,31 @@ def _supervised_final_worker_main(
             result_queue.put({"job_id": job_id, "ok": False, "error_class": type(exc).__name__})
 
 
-class SupervisedFinalWhisperService:
-    """Single-flight final model with terminate/kill/respawn timeout semantics."""
+class _SupervisedWhisperService:
+    """Single-flight model with terminate/kill/respawn timeout semantics."""
 
-    role = "final"
     hard_timeout = True
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, role: str) -> None:
+        self.role = role
+        is_final = role == "final"
         self._config: dict[str, object] = {
-            "model_name": settings.final_model_name,
-            "device": settings.final_device,
-            "compute_type": settings.final_compute_type,
+            "role": role,
+            "model_name": settings.final_model_name if is_final else settings.live_model_name,
+            "device": settings.final_device if is_final else settings.live_device,
+            "compute_type": (
+                settings.final_compute_type if is_final else settings.live_compute_type
+            ),
             "language": settings.language,
-            "beam_size": settings.final_beam_size,
+            "beam_size": settings.final_beam_size if is_final else settings.live_beam_size,
             "no_speech_threshold": settings.no_speech_threshold,
             "log_prob_threshold": settings.log_prob_threshold,
             "compression_ratio_threshold": settings.compression_ratio_threshold,
             "condition_on_previous_text": settings.condition_on_previous_text,
         }
-        self._timeout_sec = settings.stream_final_timeout_sec
+        self._timeout_sec = (
+            settings.stream_final_timeout_sec if is_final else settings.stream_live_timeout_sec
+        )
         self._load_timeout_sec = settings.stream_model_load_timeout_sec
         self._kill_grace_sec = settings.worker_kill_grace_sec
         self._ctx = mp.get_context("spawn")
@@ -221,9 +225,9 @@ class SupervisedFinalWhisperService:
         self._task_queue = self._ctx.Queue(maxsize=1)
         self._result_queue = self._ctx.Queue(maxsize=1)
         self._process = self._ctx.Process(
-            target=_supervised_final_worker_main,
+            target=_supervised_worker_main,
             args=(self._config, self._task_queue, self._result_queue),
-            name="stt-stream-final-worker",
+            name=f"stt-stream-{self.role}-worker",
             daemon=True,
         )
         self._process.start()
@@ -259,7 +263,9 @@ class SupervisedFinalWhisperService:
                 # restarted by its orchestrator.
                 self._model_loaded = False
                 self._restart_blocked = True
-                raise WorkerCrashedError("streaming final worker could not be stopped safely")
+                raise WorkerCrashedError(
+                    f"streaming {getattr(self, 'role', 'final')} worker could not be stopped safely"
+                )
         self._close_queue(task_queue)
         self._close_queue(result_queue)
         self._process = None
@@ -280,23 +286,33 @@ class SupervisedFinalWhisperService:
     ) -> str:
         deadline = time.monotonic() + timeout_sec
         if getattr(self, "_restart_blocked", False):
-            raise WorkerCrashedError("streaming final worker restart is blocked")
+            raise WorkerCrashedError(
+                f"streaming {getattr(self, 'role', 'final')} worker restart is blocked"
+            )
         if not self._call_lock.acquire(timeout=timeout_sec):
-            raise WorkerTimeoutError("streaming final worker queue exceeded timeout")
+            raise WorkerTimeoutError(
+                f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
+            )
         try:
             if required_generation is not None and (
                 self._generation != required_generation
                 or (require_loaded and not self._model_loaded)
                 or not self._is_alive()
             ):
-                raise WorkerCrashedError("streaming final worker readiness changed")
+                raise WorkerCrashedError(
+                    f"streaming {getattr(self, 'role', 'final')} worker readiness changed"
+                )
             if not self._is_alive():
                 if not restart_on_failure:
-                    raise WorkerCrashedError("streaming final worker is not alive")
+                    raise WorkerCrashedError(
+                        f"streaming {getattr(self, 'role', 'final')} worker is not alive"
+                    )
                 self._terminate_and_restart()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise WorkerTimeoutError("streaming final worker queue exceeded timeout")
+                raise WorkerTimeoutError(
+                    f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
+                )
             job_id = str(uuid.uuid4())
             try:
                 self._task_queue.put(
@@ -310,15 +326,21 @@ class SupervisedFinalWhisperService:
                 )
             except queue.Full as exc:
                 self._terminate_and_restart(restart=restart_on_failure)
-                raise WorkerTimeoutError("streaming final worker queue exceeded timeout") from exc
+                raise WorkerTimeoutError(
+                    f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
+                ) from exc
             while True:
                 if not self._is_alive():
                     self._terminate_and_restart(restart=restart_on_failure)
-                    raise WorkerCrashedError("streaming final worker exited before response")
+                    raise WorkerCrashedError(
+                        f"streaming {getattr(self, 'role', 'final')} worker exited before response"
+                    )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._terminate_and_restart(restart=restart_on_failure)
-                    raise WorkerTimeoutError("streaming final worker exceeded timeout")
+                    raise WorkerTimeoutError(
+                        f"streaming {getattr(self, 'role', 'final')} worker exceeded timeout"
+                    )
                 try:
                     response = self._result_queue.get(timeout=min(0.1, remaining))
                 except queue.Empty:
@@ -347,7 +369,9 @@ class SupervisedFinalWhisperService:
         """Return the loaded worker generation under the single-flight lock."""
         with self._call_lock:
             if not self._model_loaded or not self._is_alive():
-                raise WorkerCrashedError("streaming final worker is not ready")
+                raise WorkerCrashedError(
+                    f"streaming {getattr(self, 'role', 'final')} worker is not ready"
+                )
             return self._generation
 
     def transcribe_array(
@@ -390,8 +414,31 @@ class SupervisedFinalWhisperService:
             require_loaded=True,
         )
 
+    @property
+    def healthy(self) -> bool:
+        return not self._restart_blocked and self._is_alive()
+
+    def close(self) -> None:
+        with self._call_lock:
+            self._terminate_and_restart(restart=False)
+
+
+class SupervisedFinalWhisperService(_SupervisedWhisperService):
+    role = "final"
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings, role="final")
+
+
+class SupervisedLiveWhisperService(_SupervisedWhisperService):
+    role = "live"
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings, role="live")
+
 
 _services: dict[str, DirectWhisperService] = {}
+_supervised_live_services: dict[str, SupervisedLiveWhisperService] = {}
 _supervised_final_services: dict[str, SupervisedFinalWhisperService] = {}
 _services_lock = threading.Lock()
 
@@ -442,8 +489,26 @@ def _named(
         return _services[service_key]
 
 
-def get_live_service(settings: Settings) -> DirectWhisperService:
+def get_live_service(
+    settings: Settings,
+) -> DirectWhisperService | SupervisedLiveWhisperService:
     """Fast draft model (ADR-0031: medium int8)."""
+    if settings.stream_live_worker_backend == "process":
+        service_key = "\u0000".join(
+            [
+                settings.live_model_name,
+                settings.live_device,
+                settings.live_compute_type,
+                settings.language,
+                str(settings.live_beam_size),
+                str(settings.stream_live_timeout_sec),
+                str(settings.stream_model_load_timeout_sec),
+            ]
+        )
+        with _services_lock:
+            if service_key not in _supervised_live_services:
+                _supervised_live_services[service_key] = SupervisedLiveWhisperService(settings)
+            return _supervised_live_services[service_key]
     return _named(
         "live",
         settings.live_model_name,
@@ -490,3 +555,18 @@ def get_final_service(
         compression_ratio_threshold=settings.compression_ratio_threshold,
         condition_on_previous_text=settings.condition_on_previous_text,
     )
+
+
+def streaming_services_healthy() -> bool:
+    with _services_lock:
+        supervised = [*_supervised_live_services.values(), *_supervised_final_services.values()]
+        return all(service.healthy for service in supervised)
+
+
+def shutdown_streaming_services() -> None:
+    with _services_lock:
+        supervised = [*_supervised_live_services.values(), *_supervised_final_services.values()]
+        _supervised_live_services.clear()
+        _supervised_final_services.clear()
+    for service in supervised:
+        service.close()

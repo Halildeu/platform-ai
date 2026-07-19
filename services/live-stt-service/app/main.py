@@ -6,6 +6,7 @@ Run:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -106,6 +107,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if consumer is not None and consumer_thread is not None:
         consumer.stop()
         consumer_thread.join(timeout=5)
+    from app.services.streaming_models import shutdown_streaming_services
+
+    with contextlib.suppress(Exception):
+        shutdown_streaming_services()
     logger.info("live-stt-service stopping", extra={"correlation_id": "shutdown"})
 
 

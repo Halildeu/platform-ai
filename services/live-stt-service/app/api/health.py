@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from app import __version__
 from app.core.config import Settings, get_settings
 from app.models.schemas import HealthResponse
+from app.services.streaming_models import streaming_services_healthy
 from app.services.transcribe import get_service
 
 router = APIRouter()
@@ -22,8 +23,11 @@ async def health(
     - `degraded` → reserved for future failure-mode signaling
     """
     service = get_service(settings)
+    status = "ok" if service.model_loaded else "loading"
+    if not streaming_services_healthy():
+        status = "degraded"
     return HealthResponse(
-        status="ok" if service.model_loaded else "loading",
+        status=status,
         version=__version__,
         model=settings.model_name,
         model_revision=settings.model_revision,
