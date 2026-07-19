@@ -38,6 +38,15 @@ try {
         throw "Meeting-ai runtime config was rejected; inspect the transcript-free service log."
     }
 
+    try {
+        Assert-TranscriptReadyPreEnablePermit `
+            -RepoRoot $RepoRoot `
+            -StartupScriptPath $PSCommandPath
+    } catch {
+        Add-Content $log "[startup] Transcript-ready pre-enable permit rejected"
+        throw "Transcript-ready consumer startup permit was rejected."
+    }
+
 if ($Backend -eq "mock") {
     throw "The mock meeting-ai backend is forbidden for the GPU-host stage/prod launcher."
 }
@@ -53,7 +62,7 @@ if ($Backend -eq "ollama") {
 
 # KVKK boundary: MAI_REDACT_PII stays at its default (true) and cannot be
 # disabled for non-mock backends (config validator).
-$env:MAI_APP_ENV = $AppEnv
+if (-not $env:MAI_APP_ENV) { $env:MAI_APP_ENV = $AppEnv }
 if (-not $env:MAI_BACKEND) { $env:MAI_BACKEND = $Backend }
 if (-not $env:MAI_OLLAMA_HOST) { $env:MAI_OLLAMA_HOST = $OllamaHost }
 if (-not $env:MAI_OLLAMA_MODEL) { $env:MAI_OLLAMA_MODEL = $OllamaModel }

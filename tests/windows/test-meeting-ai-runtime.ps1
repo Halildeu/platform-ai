@@ -22,6 +22,15 @@ $tlsCertSource = Join-Path $tlsSourceRoot "client.pem"
 $tlsKeySource = Join-Path $tlsSourceRoot "client.key"
 $startupProbeRoot = Join-Path $env:RUNNER_TEMP "meeting-ai-startup-cleanup"
 $plainTestKey = "-----BEGIN PRIVATE KEY-----`nci-ephemeral-key`n-----END PRIVATE KEY-----"
+$plainReadyRedisUrl = "redis://ci-user:ci-password@127.0.0.1:6379/0"
+$secureReadyRedisUrl = ConvertTo-SecureString $plainReadyRedisUrl -AsPlainText -Force
+$plainTranscriptCredential = "ci-transcript-credential"
+$secureTranscriptCredential = ConvertTo-SecureString `
+    $plainTranscriptCredential -AsPlainText -Force
+$permitSource = Join-Path $env:RUNNER_TEMP "transcript-ready-pre-enable.json"
+$expectedGitopsCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+$expectedPolicySha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+$expectedProducerDigest = "sha256:" + (("c" * 64) -join "")
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -81,6 +90,8 @@ try {
         "DPAPI client credential blob is missing."
     Assert-True (-not $configText.Contains("MAI_MEETING_SERVICE_CLIENT_SECRET=")) `
         "Plain client credential key must not be stored."
+    Assert-True ($configText.Contains("MAI_READY_CONSUMER_ENABLED=false")) `
+        "Ready consumer must be explicitly default-off."
 
     $loaded = Import-MeetingAiRuntimeEnvironment -Path $configPath
     Assert-True $loaded "Runtime config import must succeed."
@@ -140,6 +151,94 @@ try {
 
     Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
         "Mutual TLS runtime config import must be idempotent before launcher startup."
+
+    $repoCommit = (& git -C $repoRoot rev-parse HEAD).Trim().ToLowerInvariant()
+    Assert-True ($LASTEXITCODE -eq 0) "Test repository commit could not be read."
+    $startupSha256 = Get-MeetingAiFileSha256 `
+        -Path $startScript -Purpose "Meeting-ai startup script"
+    $permit = [ordered]@{
+        schemaVersion = "faz24.transcriptReadyPreEnableVerdict.v1"
+        generatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+        issue = "platform-k8s-gitops#2610"
+        status = "accepted-candidate"
+        enableAuthorized = $true
+        checks = @([ordered]@{ name = "ci-contract"; passed = $true; message = "ok" })
+        requiredRemediationEvidence = @()
+        binding = [ordered]@{
+            expectedGitopsCommit = $expectedGitopsCommit
+            policySha256 = $expectedPolicySha256
+            producerCapability = [ordered]@{
+                transcriptImageDigest = $expectedProducerDigest
+            }
+            hostStartupGuard = [ordered]@{
+                platformAiCommit = $repoCommit
+                startupScriptSha256 = $startupSha256
+                permitRequired = $true
+            }
+        }
+    }
+    [IO.File]::WriteAllText(
+        $permitSource,
+        (($permit | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object Text.UTF8Encoding($false))
+    )
+
+    & $configureScript `
+        -ReadyConsumerEnabled "true" `
+        -RuntimeAppEnv "test" `
+        -ReadyRedisUrl $secureReadyRedisUrl `
+        -ReadyProducerReplayHorizonSec 2592000 `
+        -TranscriptServiceBaseUrl "https://transcript.internal.example" `
+        -TranscriptServiceSnapshotPathTemplate "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}" `
+        -TranscriptServiceCapabilityPathTemplate "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability" `
+        -TranscriptServiceTokenUrl "https://auth.internal.example/oauth2/token" `
+        -TranscriptServiceClientSecret $secureTranscriptCredential `
+        -ReadyPermitSourcePath $permitSource `
+        -ExpectedGitopsCommit $expectedGitopsCommit `
+        -ExpectedPolicySha256 $expectedPolicySha256 `
+        -ExpectedProducerImageDigest $expectedProducerDigest `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
+
+    $readyConfigText = [IO.File]::ReadAllText($configPath)
+    Assert-True ($readyConfigText.Contains("MAI_READY_CONSUMER_ENABLED=true")) `
+        "Ready consumer enable flag is missing."
+    Assert-True ($readyConfigText.Contains("MAI_READY_REDIS_URL_DPAPI=")) `
+        "Ready Redis DPAPI blob is missing."
+    Assert-True (-not $readyConfigText.Contains($plainReadyRedisUrl)) `
+        "Plain Redis URL must not be stored."
+    Assert-True ($readyConfigText.Contains("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI=")) `
+        "Transcript-service DPAPI credential blob is missing."
+    Assert-True (-not $readyConfigText.Contains($plainTranscriptCredential)) `
+        "Plain transcript-service credential must not be stored."
+
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
+        "Ready consumer runtime config import must succeed."
+    Assert-True ($env:MAI_READY_REDIS_URL -eq $plainReadyRedisUrl) `
+        "Ready Redis DPAPI round trip failed."
+    Assert-True ($env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET -eq $plainTranscriptCredential) `
+        "Transcript-service DPAPI round trip failed."
+    Assert-True ([string]::IsNullOrWhiteSpace($env:MAI_READY_REDIS_URL_DPAPI)) `
+        "Ready Redis DPAPI blob must not be exported."
+    Assert-TranscriptReadyPreEnablePermit `
+        -RepoRoot $repoRoot `
+        -StartupScriptPath $startScript
+
+    $installedPermit = $env:MAI_READY_PRE_ENABLE_PERMIT_PATH
+    $stalePermit = (($permit | ConvertTo-Json -Depth 8) | ConvertFrom-Json)
+    $stalePermit.generatedAt = [DateTimeOffset]::UtcNow.AddMinutes(-20).ToString("o")
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedPermit `
+        -Content (($stalePermit | ConvertTo-Json -Depth 8) + "`n")
+    Assert-ThrowsLike {
+        Assert-TranscriptReadyPreEnablePermit `
+            -RepoRoot $repoRoot `
+            -StartupScriptPath $startScript
+    } "outside the 900 second startup window"
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedPermit `
+        -Content (($permit | ConvertTo-Json -Depth 8) + "`n")
 
     Assert-ThrowsLike {
         & $startScript `
@@ -223,7 +322,11 @@ try {
     Clear-MeetingAiRuntimeTlsKey
     $env:MAI_MEETING_SERVICE_CLIENT_SECRET = $null
     $env:MAI_INGESTION_ENCRYPTION_KEYS_JSON = $null
+    $env:MAI_READY_REDIS_URL = $null
+    $env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET = $null
     $secureCredential.Dispose()
+    $secureReadyRedisUrl.Dispose()
+    $secureTranscriptCredential.Dispose()
     if (Test-Path -LiteralPath $runtimeRoot) {
         Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
     }
@@ -232,5 +335,8 @@ try {
     }
     if (Test-Path -LiteralPath $startupProbeRoot) {
         Remove-Item -LiteralPath $startupProbeRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $permitSource) {
+        Remove-Item -LiteralPath $permitSource -Force
     }
 }

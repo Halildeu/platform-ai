@@ -317,6 +317,40 @@ SYSTEM/Administrators-only ACL, writes by same-volume atomic replace, and keeps 
 encryption keys during additive rotation. Plaintext `.ps1` secret overrides are not
 supported for meeting-ai ingestion.
 
+The test-host enable path additionally requires the fresh
+`faz24.transcriptReadyPreEnableVerdict.v1` artifact produced by the GitOps #2610
+collector/verifier. The provisioner copies that metadata-only artifact into the
+hardened runtime root and stores the Redis URL and transcript-service credential only
+as DPAPI blobs. Obtain both secrets interactively so they do not enter shell history:
+
+```powershell
+$redisUrl = Read-Host "ready Redis URL" -AsSecureString
+$transcriptSecret = Read-Host "transcript-service OAuth secret" -AsSecureString
+& C:\platform-ai\deploy\gpu-host\configure-meeting-ai.ps1 `
+  -ReadyConsumerEnabled true `
+  -RuntimeAppEnv test `
+  -ReadyRedisUrl $redisUrl `
+  -ReadyProducerReplayHorizonSec 2592000 `
+  -TranscriptServiceBaseUrl https://transcript-service.internal.test `
+  -TranscriptServiceSnapshotPathTemplate '/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}' `
+  -TranscriptServiceCapabilityPathTemplate '/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability' `
+  -TranscriptServiceTokenUrl https://auth-service.internal.test/oauth2/token `
+  -TranscriptServiceClientSecret $transcriptSecret `
+  -ReadyPermitSourcePath C:\operator-staging\transcript-ready-pre-enable.json `
+  -ExpectedGitopsCommit <full-40-hex-gitops-commit> `
+  -ExpectedPolicySha256 <64-hex-policy-digest> `
+  -ExpectedProducerImageDigest sha256:<64-hex-transcript-image-digest> `
+  -Confirm:$false
+```
+
+At every process start, `Assert-TranscriptReadyPreEnablePermit` rejects an artifact
+that is older than 900 seconds, has any failed/pending check, or does not match the
+exact GitOps commit, policy digest, transcript image digest, platform-ai commit, and
+startup-script SHA-256. The scheduled task therefore cannot be enabled by writing
+`MAI_READY_CONSUMER_ENABLED=true` alone. Rollback is an explicit provisioner call with
+`-ReadyConsumerEnabled false`, followed by a task restart; disabling removes the ready
+consumer credentials and permit binding from the next runtime config.
+
 ## Run (skeleton)
 
 ```bash

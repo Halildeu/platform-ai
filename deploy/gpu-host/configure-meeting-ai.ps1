@@ -14,6 +14,23 @@ param(
     [string]$TlsCaPath = "",
     [string]$TlsClientCertPath = "",
     [string]$TlsClientKeyPath = "",
+    [ValidateSet("", "test", "stage", "prod")][string]$RuntimeAppEnv = "",
+    [ValidateSet("", "true", "false")][string]$ReadyConsumerEnabled = "",
+    [Security.SecureString]$ReadyRedisUrl,
+    [string]$ReadyRedisStream = "meeting:events",
+    [string]$ReadyRedisGroup = "meeting-ai-transcript-ready-v1",
+    [double]$ReadyProducerReplayHorizonSec = 0,
+    [string]$AnalysisSpecVersion = "meeting-intelligence-v1",
+    [string]$TranscriptServiceBaseUrl = "",
+    [string]$TranscriptServiceSnapshotPathTemplate = "",
+    [string]$TranscriptServiceCapabilityPathTemplate = "",
+    [string]$TranscriptServiceTokenUrl = "",
+    [string]$TranscriptServiceClientId = "meeting-ai",
+    [Security.SecureString]$TranscriptServiceClientSecret,
+    [string]$ReadyPermitSourcePath = "",
+    [string]$ExpectedGitopsCommit = "",
+    [string]$ExpectedPolicySha256 = "",
+    [string]$ExpectedProducerImageDigest = "",
     [string]$StorePath = "",
     [string]$ConfigPath = "",
     [switch]$RotateEncryptionKey,
@@ -61,6 +78,32 @@ function Get-ExistingValue {
     if (-not [string]::IsNullOrWhiteSpace($Supplied)) { return $Supplied }
     if ($null -ne $Existing -and $Existing.ContainsKey($Name)) { return $Existing[$Name] }
     throw "First-time provisioning requires $Name."
+}
+
+function Get-SuppliedOrExistingValue {
+    param(
+        $Existing,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$Supplied = ""
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Supplied)) { return $Supplied }
+    if ($null -ne $Existing -and $Existing.ContainsKey($Name)) {
+        return $Existing[$Name]
+    }
+    return ""
+}
+
+function Protect-SuppliedSecureValue {
+    param([Parameter(Mandatory = $true)][Security.SecureString]$Value)
+
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+    try {
+        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        return Protect-MeetingAiSecret -PlainText $plain
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        $plain = $null
+    }
 }
 
 function Install-MeetingAiTlsPublicFile {
@@ -223,6 +266,126 @@ try {
         }
     }
 
+    $effectiveReadyEnabled = if (-not [string]::IsNullOrWhiteSpace(
+            $ReadyConsumerEnabled
+        )) {
+        $ReadyConsumerEnabled.ToLowerInvariant()
+    } elseif ($null -ne $existing -and
+        $existing.ContainsKey("MAI_READY_CONSUMER_ENABLED")) {
+        $existing["MAI_READY_CONSUMER_ENABLED"].ToLowerInvariant()
+    } else {
+        "false"
+    }
+    $readyConfig = [ordered]@{
+        "MAI_READY_CONSUMER_ENABLED" = $effectiveReadyEnabled
+    }
+    if ($effectiveReadyEnabled -eq "true") {
+        $readyRedisBlob = if ($null -ne $ReadyRedisUrl) {
+            Protect-SuppliedSecureValue -Value $ReadyRedisUrl
+        } elseif ($null -ne $existing -and
+            $existing.ContainsKey("MAI_READY_REDIS_URL_DPAPI")) {
+            $existing["MAI_READY_REDIS_URL_DPAPI"]
+        } else {
+            throw "Ready consumer provisioning requires ReadyRedisUrl."
+        }
+        $transcriptSecretBlob = if ($null -ne $TranscriptServiceClientSecret) {
+            Protect-SuppliedSecureValue -Value $TranscriptServiceClientSecret
+        } elseif ($null -ne $existing -and
+            $existing.ContainsKey("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI")) {
+            $existing["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"]
+        } else {
+            throw "Ready consumer provisioning requires TranscriptServiceClientSecret."
+        }
+
+        $permitPath = ""
+        if (-not [string]::IsNullOrWhiteSpace($ReadyPermitSourcePath)) {
+            $permitSource = Resolve-FixedLocalPath `
+                -Path $ReadyPermitSourcePath `
+                -Purpose "Transcript-ready pre-enable permit source"
+            if (-not (Test-Path -LiteralPath $permitSource -PathType Leaf) -or
+                (Get-Item -LiteralPath $permitSource -Force).Length -gt 1048576) {
+                throw "Transcript-ready pre-enable permit source is missing or too large."
+            }
+            $permitBytes = [IO.File]::ReadAllBytes($permitSource)
+            try {
+                $permitUtf8 = New-Object Text.UTF8Encoding($false, $true)
+                $permitContent = $permitUtf8.GetString($permitBytes)
+            } finally {
+                [Array]::Clear($permitBytes, 0, $permitBytes.Length)
+            }
+            $permitPath = Join-Path (Get-MeetingAiRuntimeRoot) `
+                "permits\transcript-ready-pre-enable.json"
+            Write-MeetingAiSecretFileAtomic -Path $permitPath -Content $permitContent
+            $permitContent = $null
+        } elseif ($null -ne $existing -and
+            $existing.ContainsKey("MAI_READY_PRE_ENABLE_PERMIT_PATH")) {
+            $permitPath = $existing["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+        } else {
+            throw "Ready consumer provisioning requires ReadyPermitSourcePath."
+        }
+
+        $replayHorizon = if ($ReadyProducerReplayHorizonSec -gt 0) {
+            $ReadyProducerReplayHorizonSec.ToString(
+                "0.################",
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+        } else {
+            Get-SuppliedOrExistingValue -Existing $existing `
+                -Name "MAI_READY_PRODUCER_REPLAY_HORIZON_SEC"
+        }
+        $readyConfig = [ordered]@{
+            "MAI_READY_CONSUMER_ENABLED" = "true"
+            "MAI_ANALYSIS_SPEC_VERSION" = $AnalysisSpecVersion
+            "MAI_READY_REDIS_URL_DPAPI" = $readyRedisBlob
+            "MAI_READY_REDIS_STREAM" = $ReadyRedisStream
+            "MAI_READY_REDIS_GROUP" = $ReadyRedisGroup
+            "MAI_READY_PRODUCER_REPLAY_HORIZON_SEC" = $replayHorizon
+            "MAI_TRANSCRIPT_SERVICE_BASE_URL" = (
+                Get-SuppliedOrExistingValue -Existing $existing `
+                    -Name "MAI_TRANSCRIPT_SERVICE_BASE_URL" `
+                    -Supplied $TranscriptServiceBaseUrl
+            )
+            "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE" = (
+                Get-SuppliedOrExistingValue -Existing $existing `
+                    -Name "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE" `
+                    -Supplied $TranscriptServiceSnapshotPathTemplate
+            )
+            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" = (
+                Get-SuppliedOrExistingValue -Existing $existing `
+                    -Name "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" `
+                    -Supplied $TranscriptServiceCapabilityPathTemplate
+            )
+            "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" = (
+                Get-SuppliedOrExistingValue -Existing $existing `
+                    -Name "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" `
+                    -Supplied $TranscriptServiceTokenUrl
+            )
+            "MAI_TRANSCRIPT_SERVICE_CLIENT_ID" = $TranscriptServiceClientId
+            "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI" = $transcriptSecretBlob
+            "MAI_TRANSCRIPT_SERVICE_AUDIENCE" = "transcript-service"
+            "MAI_TRANSCRIPT_SERVICE_SCOPE" = "transcript:canonical:read"
+            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE" = (
+                "transcript:analysis-job-capability:issue"
+            )
+            "MAI_READY_PRE_ENABLE_PERMIT_PATH" = $permitPath
+            "MAI_READY_EXPECTED_GITOPS_COMMIT" = (
+                Get-SuppliedOrExistingValue -Existing $existing `
+                    -Name "MAI_READY_EXPECTED_GITOPS_COMMIT" `
+                    -Supplied $ExpectedGitopsCommit
+            )
+            "MAI_READY_EXPECTED_POLICY_SHA256" = (
+                Get-SuppliedOrExistingValue -Existing $existing `
+                    -Name "MAI_READY_EXPECTED_POLICY_SHA256" `
+                    -Supplied $ExpectedPolicySha256
+            )
+            "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST" = (
+                Get-SuppliedOrExistingValue -Existing $existing `
+                    -Name "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST" `
+                    -Supplied $ExpectedProducerImageDigest
+            )
+        }
+    }
+
     $keyring = [ordered]@{}
     $activeKeyId = ""
     if ($null -ne $existing -and
@@ -273,6 +436,11 @@ try {
         "MAI_INGESTION_ACTIVE_KEY_ID" = $activeKeyId
         "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI" = $keyringBlob
     }
+    $effectiveAppEnv = Get-SuppliedOrExistingValue -Existing $existing `
+        -Name "MAI_APP_ENV" -Supplied $RuntimeAppEnv
+    if (-not [string]::IsNullOrWhiteSpace($effectiveAppEnv)) {
+        $config["MAI_APP_ENV"] = $effectiveAppEnv.ToLowerInvariant()
+    }
     if (-not [string]::IsNullOrWhiteSpace($installedCaPath)) {
         $config["MAI_MEETING_SERVICE_TLS_CA_PATH"] = $installedCaPath
     }
@@ -280,6 +448,9 @@ try {
         $config["MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH"] = $installedCertPath
         $config["MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"] = $clientKeyBlob
         $config["MAI_MEETING_SERVICE_TLS_RELOAD_INTERVAL_SEC"] = "60"
+    }
+    foreach ($name in $readyConfig.Keys) {
+        $config[$name] = $readyConfig[$name]
     }
     $lines = @(
         "# platform-ai meeting-ai runtime config v1"

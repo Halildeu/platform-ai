@@ -34,6 +34,7 @@ $script:MeetingAiDpapiEntropy = [Text.Encoding]::UTF8.GetBytes(
 
 function Get-MeetingAiConfigSchema {
     return @{
+        "MAI_APP_ENV" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_ENABLED" = @{ Required = $true; SecretTarget = "" }
         "MAI_MEETING_SERVICE_BASE_URL" = @{ Required = $true; SecretTarget = "" }
         "MAI_MEETING_SERVICE_TOKEN_URL" = @{ Required = $true; SecretTarget = "" }
@@ -72,6 +73,46 @@ function Get-MeetingAiConfigSchema {
         "MAI_INGESTION_LEASE_SEC" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_MAX_ROWS" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_STALE_AFTER_SEC" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_CONSUMER_ENABLED" = @{ Required = $false; SecretTarget = "" }
+        "MAI_ANALYSIS_SPEC_VERSION" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_REDIS_URL_DPAPI" = @{
+            Required = $false
+            SecretTarget = "MAI_READY_REDIS_URL"
+        }
+        "MAI_READY_REDIS_STREAM" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_REDIS_GROUP" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_PRODUCER_REPLAY_HORIZON_SEC" = @{
+            Required = $false
+            SecretTarget = ""
+        }
+        "MAI_TRANSCRIPT_SERVICE_BASE_URL" = @{ Required = $false; SecretTarget = "" }
+        "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE" = @{
+            Required = $false
+            SecretTarget = ""
+        }
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" = @{
+            Required = $false
+            SecretTarget = ""
+        }
+        "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" = @{ Required = $false; SecretTarget = "" }
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_ID" = @{ Required = $false; SecretTarget = "" }
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI" = @{
+            Required = $false
+            SecretTarget = "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET"
+        }
+        "MAI_TRANSCRIPT_SERVICE_AUDIENCE" = @{ Required = $false; SecretTarget = "" }
+        "MAI_TRANSCRIPT_SERVICE_SCOPE" = @{ Required = $false; SecretTarget = "" }
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE" = @{
+            Required = $false
+            SecretTarget = ""
+        }
+        "MAI_READY_PRE_ENABLE_PERMIT_PATH" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_EXPECTED_GITOPS_COMMIT" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_EXPECTED_POLICY_SHA256" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST" = @{
+            Required = $false
+            SecretTarget = ""
+        }
     }
 }
 
@@ -409,6 +450,10 @@ function Assert-MeetingAiConfigValues {
         throw "MAI_INGESTION_ENABLED must be exactly true or false."
     }
     if ($enabled -eq "false") { return }
+    if ($Values.ContainsKey("MAI_APP_ENV") -and
+        $Values["MAI_APP_ENV"].ToLowerInvariant() -notin @("test", "stage", "prod")) {
+        throw "MAI_APP_ENV must be exactly test, stage, or prod."
+    }
 
     $schema = Get-MeetingAiConfigSchema
     foreach ($name in $schema.Keys) {
@@ -454,6 +499,75 @@ function Assert-MeetingAiConfigValues {
     }
     [void](Assert-MeetingAiRuntimePath -Path $Values["MAI_INGESTION_STORE_PATH"] `
         -Purpose "Analysis delivery store")
+
+    $readyEnabled = "false"
+    if ($Values.ContainsKey("MAI_READY_CONSUMER_ENABLED")) {
+        $readyEnabled = $Values["MAI_READY_CONSUMER_ENABLED"].ToLowerInvariant()
+        if ($readyEnabled -notin @("true", "false")) {
+            throw "MAI_READY_CONSUMER_ENABLED must be exactly true or false."
+        }
+    }
+    if ($readyEnabled -eq "false") { return }
+
+    $readyRequired = @(
+        "MAI_READY_REDIS_URL_DPAPI",
+        "MAI_READY_REDIS_STREAM",
+        "MAI_READY_REDIS_GROUP",
+        "MAI_READY_PRODUCER_REPLAY_HORIZON_SEC",
+        "MAI_TRANSCRIPT_SERVICE_BASE_URL",
+        "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE",
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+        "MAI_TRANSCRIPT_SERVICE_TOKEN_URL",
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_ID",
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI",
+        "MAI_TRANSCRIPT_SERVICE_AUDIENCE",
+        "MAI_TRANSCRIPT_SERVICE_SCOPE",
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE",
+        "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+        "MAI_READY_EXPECTED_GITOPS_COMMIT",
+        "MAI_READY_EXPECTED_POLICY_SHA256",
+        "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"
+    )
+    foreach ($name in $readyRequired) {
+        if (-not $Values.ContainsKey($name) -or
+            [string]::IsNullOrWhiteSpace($Values[$name])) {
+            throw "Ready consumer runtime config is missing required key: $name."
+        }
+    }
+    foreach ($urlName in @(
+            "MAI_TRANSCRIPT_SERVICE_BASE_URL",
+            "MAI_TRANSCRIPT_SERVICE_TOKEN_URL"
+        )) {
+        $uri = $null
+        if (-not [Uri]::TryCreate($Values[$urlName], [UriKind]::Absolute, [ref]$uri) -or
+            $uri.Scheme -ne "https" -or -not [string]::IsNullOrWhiteSpace($uri.UserInfo)) {
+            throw "$urlName must be an absolute HTTPS URL without embedded credentials."
+        }
+    }
+    if ($Values["MAI_TRANSCRIPT_SERVICE_SCOPE"] -ne "transcript:canonical:read") {
+        throw "MAI_TRANSCRIPT_SERVICE_SCOPE must be exactly transcript:canonical:read."
+    }
+    if ($Values["MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE"] -ne
+        "transcript:analysis-job-capability:issue") {
+        throw "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE has an unexpected permission."
+    }
+    if ($Values["MAI_READY_EXPECTED_GITOPS_COMMIT"] -notmatch '^[0-9a-f]{40}$') {
+        throw "MAI_READY_EXPECTED_GITOPS_COMMIT must be a lowercase full Git SHA."
+    }
+    if ($Values["MAI_READY_EXPECTED_POLICY_SHA256"] -notmatch '^[0-9a-f]{64}$') {
+        throw "MAI_READY_EXPECTED_POLICY_SHA256 must be a lowercase SHA-256 digest."
+    }
+    if ($Values["MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"] -notmatch
+        '^sha256:[0-9a-f]{64}$') {
+        throw "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST must be an immutable image digest."
+    }
+    $permitPath = Assert-MeetingAiRuntimePath `
+        -Path $Values["MAI_READY_PRE_ENABLE_PERMIT_PATH"] `
+        -Purpose "Transcript-ready pre-enable permit"
+    if (-not (Test-Path -LiteralPath $permitPath -PathType Leaf)) {
+        throw "MAI_READY_PRE_ENABLE_PERMIT_PATH must reference an existing permit file."
+    }
+    Assert-MeetingAiAcl -Path $permitPath
 }
 
 function Assert-MeetingAiKeyring {
@@ -542,6 +656,18 @@ function Import-MeetingAiRuntimeEnvironment {
         } else {
             Clear-MeetingAiRuntimeTlsKey
         }
+
+        if ($values.ContainsKey("MAI_READY_CONSUMER_ENABLED") -and
+            $values["MAI_READY_CONSUMER_ENABLED"].ToLowerInvariant() -eq "true") {
+            $resolvedSecrets["MAI_READY_REDIS_URL"] =
+                Unprotect-MeetingAiSecret `
+                    -ProtectedBase64 $values["MAI_READY_REDIS_URL_DPAPI"] `
+                    -KeyName "MAI_READY_REDIS_URL_DPAPI"
+            $resolvedSecrets["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET"] =
+                Unprotect-MeetingAiSecret `
+                    -ProtectedBase64 $values["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] `
+                    -KeyName "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"
+        }
     }
 
     $schema = Get-MeetingAiConfigSchema
@@ -553,6 +679,133 @@ function Import-MeetingAiRuntimeEnvironment {
         [Environment]::SetEnvironmentVariable($name, $resolvedSecrets[$name], "Process")
     }
     return $true
+}
+
+function Get-MeetingAiFileSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Purpose
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Purpose file does not exist."
+    }
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($sha.ComputeHash($stream) | ForEach-Object { $_.ToString("x2") })
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-TranscriptReadyPreEnablePermit {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$StartupScriptPath
+    )
+
+    if ($env:MAI_READY_CONSUMER_ENABLED -ne "true") { return }
+
+    foreach ($name in @(
+            "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+            "MAI_READY_EXPECTED_GITOPS_COMMIT",
+            "MAI_READY_EXPECTED_POLICY_SHA256",
+            "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"
+        )) {
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+            throw "Transcript-ready startup permit binding is incomplete."
+        }
+    }
+
+    $permitPath = Assert-MeetingAiRuntimePath `
+        -Path $env:MAI_READY_PRE_ENABLE_PERMIT_PATH `
+        -Purpose "Transcript-ready pre-enable permit"
+    Assert-MeetingAiAcl -Path $permitPath
+    $bytes = [IO.File]::ReadAllBytes($permitPath)
+    if ($bytes.Length -lt 2 -or $bytes.Length -gt 1048576) {
+        throw "Transcript-ready pre-enable permit has an invalid size."
+    }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and
+        $bytes[2] -eq 0xBF) {
+        throw "Transcript-ready pre-enable permit must be UTF-8 without BOM."
+    }
+    try {
+        $utf8 = New-Object Text.UTF8Encoding($false, $true)
+        $json = $utf8.GetString($bytes)
+    } finally {
+        [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+    if ($json.IndexOf([char]0) -ge 0) {
+        throw "Transcript-ready pre-enable permit contains a NUL character."
+    }
+    try {
+        $permit = $json | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Transcript-ready pre-enable permit is not valid JSON."
+    } finally {
+        $json = $null
+    }
+
+    if ($permit.schemaVersion -ne "faz24.transcriptReadyPreEnableVerdict.v1" -or
+        $permit.issue -ne "platform-k8s-gitops#2610" -or
+        $permit.status -ne "accepted-candidate" -or
+        $permit.enableAuthorized -ne $true) {
+        throw "Transcript-ready pre-enable permit verdict is not accepted."
+    }
+    if (@($permit.requiredRemediationEvidence).Count -ne 0 -or
+        @($permit.checks).Count -lt 1 -or
+        @($permit.checks | Where-Object { $_.passed -ne $true }).Count -ne 0) {
+        throw "Transcript-ready pre-enable permit contains a failed or pending check."
+    }
+
+    $generatedAt = [DateTimeOffset]::MinValue
+    $dateStyles = [Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [Globalization.DateTimeStyles]::AdjustToUniversal
+    if (-not [DateTimeOffset]::TryParse(
+            [string]$permit.generatedAt,
+            [Globalization.CultureInfo]::InvariantCulture,
+            $dateStyles,
+            [ref]$generatedAt
+        )) {
+        throw "Transcript-ready pre-enable permit has an invalid generation time."
+    }
+    $now = [DateTimeOffset]::UtcNow
+    $ageSeconds = ($now - $generatedAt).TotalSeconds
+    if ($ageSeconds -lt -30 -or $ageSeconds -gt 900) {
+        throw "Transcript-ready pre-enable permit is outside the 900 second startup window."
+    }
+
+    $binding = $permit.binding
+    if ($null -eq $binding -or
+        $binding.expectedGitopsCommit -ne $env:MAI_READY_EXPECTED_GITOPS_COMMIT -or
+        $binding.policySha256 -ne $env:MAI_READY_EXPECTED_POLICY_SHA256) {
+        throw "Transcript-ready pre-enable permit GitOps binding does not match."
+    }
+    $producer = $binding.producerCapability
+    if ($null -eq $producer -or
+        $producer.transcriptImageDigest -ne
+            $env:MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST) {
+        throw "Transcript-ready pre-enable permit producer binding does not match."
+    }
+
+    $repoFull = Resolve-FixedLocalPath -Path $RepoRoot -Purpose "Platform-ai repository"
+    $repoCommit = (& git -C $repoFull rev-parse HEAD 2>$null).Trim().ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0 -or $repoCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "Platform-ai repository identity could not be read."
+    }
+    $startupFull = Resolve-FixedLocalPath `
+        -Path $StartupScriptPath -Purpose "Meeting-ai startup script"
+    $startupSha256 = Get-MeetingAiFileSha256 `
+        -Path $startupFull -Purpose "Meeting-ai startup script"
+    $hostGuard = $binding.hostStartupGuard
+    if ($null -eq $hostGuard -or
+        $hostGuard.permitRequired -ne $true -or
+        $hostGuard.platformAiCommit -ne $repoCommit -or
+        $hostGuard.startupScriptSha256 -ne $startupSha256) {
+        throw "Transcript-ready pre-enable permit host binding does not match."
+    }
 }
 
 function Get-MeetingAiRuntimeTlsKeyPath {

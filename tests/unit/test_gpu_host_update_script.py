@@ -122,7 +122,14 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("MoveFileEx", script)
         self.assertIn("replaceExistingAndWriteThrough", script)
         self.assertIn("Clear-MeetingAiRuntimeTlsKey", script)
+        self.assertIn("MAI_READY_REDIS_URL_DPAPI", script)
+        self.assertIn("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI", script)
+        self.assertIn("Assert-TranscriptReadyPreEnablePermit", script)
+        self.assertIn("outside the 900 second startup window", script)
+        self.assertIn("host binding does not match", script)
         self.assertNotIn('"MAI_MEETING_SERVICE_CLIENT_SECRET" =', script)
+        self.assertNotIn('"MAI_READY_REDIS_URL" =', script)
+        self.assertNotIn('"MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET" =', script)
         self.assertNotIn("Get-Random", script)
 
     def test_meeting_ai_provisioner_preserves_keyring_and_uses_csprng(self) -> None:
@@ -138,6 +145,9 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("ShouldProcess", script)
         self.assertIn('ValidateSet("", "server", "mutual")', script)
         self.assertIn("Protect-MeetingAiSecret -PlainText $plainClientKey", script)
+        self.assertIn("Protect-SuppliedSecureValue", script)
+        self.assertIn("ReadyPermitSourcePath", script)
+        self.assertIn('"MAI_READY_CONSUMER_ENABLED" = $effectiveReadyEnabled', script)
         self.assertNotIn("Get-Random", script)
 
     def test_private_gateway_host_shim_is_explicit_atomic_and_test_only(self) -> None:
