@@ -475,6 +475,8 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     elif event_type == "error":
                         errors.append(str(event.get("msg", "error")))
                         return
+                    else:
+                        raise SmokeError("unexpected event type in stream state machine")
 
             receiver_task = asyncio.create_task(receiver())
             for frame in frames:

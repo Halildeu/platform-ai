@@ -317,6 +317,124 @@ def test_blocked_final_transport_closes_bounded_without_drained(
     assert "drained" not in observed_types
 
 
+def test_background_final_transport_timeout_closes_before_accepting_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.0,
+        transport_timeout_sec=0.05,
+    )
+    final_reached_transport = threading.Event()
+    original_send_json = WebSocket.send_json
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        return "Tek final." if _is_final_service(self) else "Tek taslak"
+
+    async def delivered_then_blocked_final(
+        websocket: WebSocket,
+        data: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        await original_send_json(websocket, data, *args, **kwargs)
+        if isinstance(data, dict) and data.get("type") == "final":
+            final_reached_transport.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+    monkeypatch.setattr(WebSocket, "send_json", delivered_then_blocked_final)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert final_reached_transport.wait(timeout=1.0)
+        observed: list[dict[str, Any]] = []
+        with pytest.raises(WebSocketDisconnect):
+            while True:
+                observed.append(ws.receive_json())
+
+    finals = [event for event in observed if event.get("type") == "final"]
+    assert len(finals) == 1
+    assert (
+        len(
+            {
+                (
+                    event["seq"],
+                    event["source_start_sample"],
+                    event["source_end_sample"],
+                )
+                for event in finals
+            }
+        )
+        == 1
+    )
+    assert all(event.get("type") != "drained" for event in observed)
+
+
+def test_terminal_deadline_does_not_wait_for_cancellation_resistant_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+        final_timeout_sec=1.0,
+        kill_grace_sec=0.0,
+        transport_timeout_sec=0.05,
+    )
+    final_started = threading.Event()
+    release_final = threading.Event()
+
+    def blocking_final(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if not _is_final_service(self):
+            return "Bekleyen taslak"
+        final_started.set()
+        release_final.wait(timeout=3.0)
+        return "Bütçe sonrası yayınlanmamalı."
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        blocking_final,
+    )
+
+    try:
+        with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+            for _ in range(3):
+                assert_valid(ws.receive_json())
+
+            ws.send_bytes(_speech_frame())
+            started = time.monotonic()
+            ws.send_text('{"type":"eof"}')
+            assert receive_terminal_ack(ws) == {"type": "eof_ack"}
+            assert final_started.wait(timeout=1.0)
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+            elapsed = time.monotonic() - started
+    finally:
+        release_final.set()
+
+    # 1.0s model + 6*0.05s transport is the advertised absolute budget.
+    assert elapsed < 1.7
+
+
 def test_eof_flushes_late_final_before_drained(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_fast_stream_timing(
         monkeypatch,
@@ -472,6 +590,8 @@ def _patch_fast_stream_timing(
     forced_commit_sec: float = 60.0,
     silence_commit_sec: float = 0.1,
     tail_overlap_sec: float = 0.0,
+    final_timeout_sec: float = 30.0,
+    kill_grace_sec: float = 2.0,
     transport_timeout_sec: float = 2.0,
 ) -> None:
     settings = Settings(
@@ -481,6 +601,8 @@ def _patch_fast_stream_timing(
         forced_commit_sec=forced_commit_sec,
         silence_commit_sec=silence_commit_sec,
         tail_overlap_sec=tail_overlap_sec,
+        stream_final_timeout_sec=final_timeout_sec,
+        worker_kill_grace_sec=kill_grace_sec,
         stream_transport_timeout_sec=transport_timeout_sec,
         silence_rms=0.001,
         min_speech_rms=0.001,

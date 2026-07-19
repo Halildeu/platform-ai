@@ -31,6 +31,7 @@ import logging
 import math
 import re
 import time
+from typing import Any
 
 import numpy as np
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -624,6 +625,36 @@ async def stream_endpoint(
     buffer_lock = asyncio.Lock()
     send_lock = asyncio.Lock()
     stop_inference = asyncio.Event()
+    transport_disabled = asyncio.Event()
+    inference_phase = "idle"
+    terminal_deadline: float | None = None
+
+    def consume_task_result(task: asyncio.Task[object]) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+
+    def cancel_without_join(task: asyncio.Task[object] | None) -> None:
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        task.add_done_callback(consume_task_result)
+
+    def remaining_terminal_time() -> float:
+        if terminal_deadline is None:
+            return terminal_timeout_sec
+        return max(0.0, terminal_deadline - asyncio.get_running_loop().time())
+
+    async def wait_first(
+        *tasks: asyncio.Task[Any],
+        timeout: float | None = None,
+    ) -> set[asyncio.Task[Any]]:
+        done, _ = await asyncio.wait(
+            set(tasks),
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        return done
 
     async def send_debug(event: str, **payload: object) -> None:
         # Transcript-free diagnostics; opt-in only (KVKK log discipline, #30).
@@ -633,8 +664,12 @@ async def stream_endpoint(
             await send_json({"type": "debug", "event": event, **payload})
 
     async def send_json(payload: dict[str, object]) -> None:
+        if transport_disabled.is_set():
+            raise RuntimeError("stream transport is disabled")
         async with asyncio.timeout(settings.stream_transport_timeout_sec):
             async with send_lock:
+                if transport_disabled.is_set():
+                    raise RuntimeError("stream transport is disabled")
                 await websocket.send_json(payload)
 
     async def close_websocket(code: int = 1000) -> None:
@@ -856,15 +891,10 @@ async def stream_endpoint(
                 committed_audio=audio,
             )
 
-        # Once a final reaches the transport it cannot be recalled. Complete the
-        # matching segment-state transition before propagating cancellation so EOF
-        # cannot finalize the same seq/source range a second time.
-        transition_task = asyncio.create_task(publish_and_advance())
-        try:
-            await asyncio.shield(transition_task)
-        except asyncio.CancelledError:
-            await transition_task
-            raise
+        # EOF never races an active background commit: the terminal pipeline waits
+        # for that task or fails the connection. A disconnected/failed connection
+        # does not need to complete local segment state after cancellation.
+        await publish_and_advance()
         return final_payload
 
     async def infer_live_partial() -> None:
@@ -941,7 +971,7 @@ async def stream_endpoint(
         )
 
     async def inference_loop() -> None:
-        nonlocal last_live_infer_t
+        nonlocal inference_phase, last_live_infer_t
 
         while not stop_inference.is_set():
             await asyncio.sleep(0.05)
@@ -970,16 +1000,24 @@ async def stream_endpoint(
                     last_live_infer_t = now
 
             if commit_reason is not None:
-                await commit_current(commit_reason)
+                inference_phase = "commit"
+                try:
+                    await commit_current(commit_reason)
+                finally:
+                    inference_phase = "idle"
                 last_live_infer_t = time.time()
                 continue
 
             if should_infer:
-                await infer_live_partial()
+                inference_phase = "draft"
+                try:
+                    await infer_live_partial()
+                finally:
+                    inference_phase = "idle"
                 last_live_infer_t = time.time()
 
     inference_task = asyncio.create_task(inference_loop())
-    terminal_task: asyncio.Task[dict[str, object] | None] | None = None
+    terminal_task: asyncio.Task[None] | None = None
 
     async def finalize_terminal() -> dict[str, object] | None:
         final_payload = await commit_current("eof", defer_final=True)
@@ -988,58 +1026,156 @@ async def stream_endpoint(
         await asyncio.sleep(0)
         return final_payload
 
-    async def reject_post_eof_frame() -> dict[str, object] | None:
-        nonlocal terminal_task
-
-        terminal_task = asyncio.create_task(finalize_terminal())
+    async def receive_while_inference_healthy() -> dict[str, Any]:
         receive_task = asyncio.create_task(websocket.receive())
         try:
-            done, _ = await asyncio.wait(
-                {terminal_task, receive_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            done = await wait_first(inference_task, receive_task)
+            if inference_task in done:
+                await inference_task
+                raise RuntimeError("stream inference loop stopped unexpectedly")
+            return dict(receive_task.result())
+        finally:
+            if not receive_task.done():
+                cancel_without_join(receive_task)
 
-            # A client frame or disconnect observed before finalization completes is
-            # not allowed to race the terminal boundary. Prefer the protocol failure
-            # even when both tasks became ready in the same event-loop turn.
-            if receive_task in done:
+    async def stop_background_inference() -> None:
+        stop_inference.set()
+        if inference_task.done():
+            await inference_task
+            return
+        if inference_phase == "commit":
+            await inference_task
+            return
+        cancel_without_join(inference_task)
+
+    async def terminal_pipeline(
+        receiver_started: asyncio.Event,
+        ack_sent: asyncio.Event,
+        final_ready: asyncio.Event,
+        publish_allowed: asyncio.Event,
+    ) -> None:
+        await stop_background_inference()
+        await send_json({"type": "eof_ack"})
+        ack_sent.set()
+        await receiver_started.wait()
+        final_payload = await finalize_terminal()
+        final_ready.set()
+        await publish_allowed.wait()
+        if final_payload is not None:
+            await emit_final(final_payload)
+        await send_json({"type": "drained"})
+        await close_websocket(code=1000)
+
+    async def run_terminal_protocol() -> None:
+        nonlocal terminal_task
+
+        ack_sent = asyncio.Event()
+        receiver_started = asyncio.Event()
+        final_ready = asyncio.Event()
+        publish_allowed = asyncio.Event()
+        terminal_task = asyncio.create_task(
+            terminal_pipeline(
+                receiver_started,
+                ack_sent,
+                final_ready,
+                publish_allowed,
+            )
+        )
+        ack_wait_task = asyncio.create_task(ack_sent.wait())
+
+        done = await wait_first(
+            terminal_task,
+            ack_wait_task,
+            timeout=remaining_terminal_time(),
+        )
+        cancel_without_join(ack_wait_task)
+        if terminal_task in done:
+            await terminal_task
+        if not ack_sent.is_set():
+            transport_disabled.set()
+            cancel_without_join(terminal_task)
+            raise TimeoutError("terminal deadline expired before eof_ack")
+
+        receive_task = asyncio.create_task(websocket.receive())
+        final_ready_task = asyncio.create_task(final_ready.wait())
+        receiver_started.set()
+        try:
+            done = await wait_first(
+                terminal_task,
+                receive_task,
+                final_ready_task,
+                timeout=remaining_terminal_time(),
+            )
+            if not done:
+                transport_disabled.set()
+                cancel_without_join(terminal_task)
+                cancel_without_join(receive_task)
+                raise TimeoutError("terminal deadline expired")
+
+            if receive_task in done and terminal_task not in done:
                 message = receive_task.result()
+                cancel_without_join(terminal_task)
                 if message.get("type") == "websocket.disconnect":
                     raise WebSocketDisconnect(code=int(message.get("code", 1000)))
                 raise StreamProtocolError("post_eof_frame")
 
-            return await terminal_task
+            if terminal_task in done:
+                await terminal_task
+
+            if not final_ready.is_set():
+                transport_disabled.set()
+                cancel_without_join(terminal_task)
+                raise TimeoutError("terminal deadline expired before final readiness")
+
+            # The terminal final is not publishable until an already-queued late
+            # frame has had a chance to win the race. The receiver remains active
+            # during final/drained/close after this gate as well.
+            if receive_task.done():
+                message = receive_task.result()
+                cancel_without_join(terminal_task)
+                if message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+                raise StreamProtocolError("post_eof_frame")
+            publish_allowed.set()
+
+            done = await wait_first(
+                terminal_task,
+                receive_task,
+                timeout=remaining_terminal_time(),
+            )
+            if not done:
+                transport_disabled.set()
+                cancel_without_join(terminal_task)
+                cancel_without_join(receive_task)
+                raise TimeoutError("terminal deadline expired")
+            if receive_task in done and terminal_task not in done:
+                message = receive_task.result()
+                cancel_without_join(terminal_task)
+                if message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+                raise StreamProtocolError("post_eof_frame")
+
+            await terminal_task
+            if receive_task in done:
+                message = receive_task.result()
+                if message.get("type") != "websocket.disconnect":
+                    raise StreamProtocolError("post_eof_frame")
         finally:
-            for task in (terminal_task, receive_task):
-                if not task.done():
-                    task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            cancel_without_join(final_ready_task)
+            if not receive_task.done():
+                cancel_without_join(receive_task)
 
     try:
         while True:
-            message = await websocket.receive()
+            message = await receive_while_inference_healthy()
             if message.get("type") == "websocket.disconnect":
                 raise WebSocketDisconnect(code=int(message.get("code", 1000)))
 
             text = message.get("text")
             if text is not None:
                 _decode_terminal_control(text)
-                # This single absolute deadline includes an in-flight publication,
-                # model/kill time, every terminal write and the clean close. Any
-                # timeout closes fail-closed without claiming drained.
-                async with asyncio.timeout(terminal_timeout_sec):
-                    stop_inference.set()
-                    if not inference_task.done():
-                        inference_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await inference_task
-                    await send_json({"type": "eof_ack"})
-                    final_payload = await reject_post_eof_frame()
-                    if final_payload is not None:
-                        await emit_final(final_payload)
-                    await send_json({"type": "drained"})
-                    await close_websocket(code=1000)
+                terminal_deadline = asyncio.get_running_loop().time() + terminal_timeout_sec
+                await run_terminal_protocol()
                 return
 
             data = message.get("bytes")
@@ -1096,15 +1232,18 @@ async def stream_endpoint(
             await close_websocket(code=1003)
     except Exception:
         logger.exception("WS stream error")
-        with contextlib.suppress(Exception):
-            await close_websocket()
+        if terminal_deadline is None:
+            with contextlib.suppress(Exception):
+                await close_websocket()
+        else:
+            remaining = remaining_terminal_time()
+            if remaining > 0.0:
+                with contextlib.suppress(Exception):
+                    close_timeout = min(remaining, settings.stream_transport_timeout_sec)
+                    async with asyncio.timeout(close_timeout):
+                        await websocket.close(code=1011)
     finally:
         stop_inference.set()
-        if terminal_task is not None and not terminal_task.done():
-            terminal_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await terminal_task
-        if not inference_task.done():
-            inference_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await inference_task
+        transport_disabled.set()
+        cancel_without_join(terminal_task)
+        cancel_without_join(inference_task)

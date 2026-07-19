@@ -127,6 +127,12 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
         cfg.Settings(stream_final_worker_backend="thread")
     with pytest.raises(ValueError):
         cfg.Settings(stream_transport_timeout_sec=0.01)
+    with pytest.raises(ValueError, match="terminal timeout budget must be <= 120 seconds"):
+        cfg.Settings(
+            stream_final_timeout_sec=60.0,
+            worker_kill_grace_sec=30.0,
+            stream_transport_timeout_sec=10.0,
+        )
     with pytest.raises(ValueError, match="must be process"):
         cfg.Settings(
             environment="staging",

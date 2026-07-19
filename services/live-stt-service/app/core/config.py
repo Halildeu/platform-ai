@@ -183,6 +183,17 @@ class Settings(BaseSettings):
             raise ValueError("min_infer_sec must be <= live_window_sec")
         if self.tail_overlap_sec >= self.final_window_sec:
             raise ValueError("tail_overlap_sec must be < final_window_sec")
+        terminal_timeout_sec = (
+            self.stream_final_timeout_sec
+            + (2 * self.worker_kill_grace_sec)
+            + (6 * self.stream_transport_timeout_sec)
+        )
+        if terminal_timeout_sec > 120.0:
+            raise ValueError(
+                "stream terminal timeout budget must be <= 120 seconds "
+                "(stream_final_timeout_sec + 2*worker_kill_grace_sec "
+                "+ 6*stream_transport_timeout_sec)"
+            )
         if (
             self.environment in {"staging", "production"}
             and self.stream_final_worker_backend != "process"

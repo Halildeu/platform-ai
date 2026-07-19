@@ -302,6 +302,22 @@ def test_run_smoke_rejects_terminal_ack_before_local_eof(
             ],
             "trailing event received after drained",
         ),
+        (
+            [
+                {"type": "eof_ack"},
+                {"type": "ready"},
+                {"type": "drained"},
+            ],
+            "unexpected event type in stream state machine",
+        ),
+        (
+            [
+                {"type": "eof_ack"},
+                {"type": "telemetry"},
+                {"type": "drained"},
+            ],
+            "unexpected event type in stream state machine",
+        ),
     ],
 )
 def test_run_smoke_rejects_invalid_post_ack_sequence(
