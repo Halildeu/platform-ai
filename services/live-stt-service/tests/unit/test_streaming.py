@@ -4,9 +4,13 @@
 
 from __future__ import annotations
 
+import queue
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from app.api import stream as stream_api
 from app.api.stream import (
@@ -19,13 +23,26 @@ from app.api.stream import (
     _select_partial_text,
     _stabilize_rolling_partial,
 )
+from app.core import config as config_module
 from app.core.config import Settings
+from app.services import streaming_models as streaming_models_module
 from app.services.hallucination import is_hallucination
 from app.services.streaming_models import (
     DirectWhisperService,
+    SupervisedFinalWhisperService,
+    SupervisedLiveWhisperService,
     get_final_service,
     get_live_service,
+    shutdown_streaming_services,
 )
+from app.services.worker import WorkerCrashedError, WorkerTimeoutError
+
+
+@pytest.fixture(autouse=True)
+def use_inline_final_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STT_STREAM_LIVE_WORKER_BACKEND", "inline")
+    monkeypatch.setenv("STT_STREAM_FINAL_WORKER_BACKEND", "inline")
+    config_module._settings = None
 
 
 def test_hallucination_filter_blocks_known_artifacts() -> None:
@@ -401,7 +418,10 @@ def test_commit_text_blocks_repeated_final_and_bad_rolling_draft() -> None:
 
 
 def test_streaming_defaults_follow_adr_0031() -> None:
-    s = Settings()
+    s = Settings(
+        stream_live_worker_backend="process",
+        stream_final_worker_backend="process",
+    )
     assert s.live_model_name == "medium"
     assert s.live_compute_type == "int8"
     assert s.live_beam_size == 1
@@ -410,6 +430,9 @@ def test_streaming_defaults_follow_adr_0031() -> None:
     assert s.final_beam_size == 1
     assert s.stream_debug is False  # KVKK: verbose debug opt-in only
     assert s.stream_final_vad_filter is False
+    assert s.stream_final_worker_backend == "process"
+    assert s.stream_live_worker_backend == "process"
+    assert s.stream_live_timeout_sec == 5.0
     assert s.cors_origins == ""  # CORS disabled unless configured
     assert s.live_infer_interval_ms <= 700
     assert s.live_window_sec <= 2.5
@@ -434,6 +457,392 @@ def test_live_and_final_services_are_distinct_singletons() -> None:
     assert live is not final
     assert live.model_loaded is False  # nothing loaded at construction
     assert final.model_loaded is False
+
+
+def test_supervised_final_worker_timeout_terminates_and_respawns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.alive = True
+            self.terminated = False
+            self.killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedFinalWhisperService)
+    service._timeout_sec = 0.01
+    service._load_timeout_sec = 0.01
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    service._generation = 1
+    old_process = service._process
+    restarts: list[FakeProcess] = []
+
+    def fake_start() -> None:
+        process = FakeProcess()
+        restarts.append(process)
+        service._process = process
+        service._result_queue = queue.Queue(maxsize=1)
+
+        class ResponsiveTaskQueue(queue.Queue[dict[str, object]]):
+            def put(  # type: ignore[override]
+                self,
+                item: dict[str, object],
+                block: bool = True,
+                timeout: float | None = None,
+            ) -> None:
+                del block, timeout
+                service._result_queue.put(
+                    {
+                        "job_id": item["job_id"],
+                        "ok": True,
+                        "text": "Yeniden başlayan worker yanıtı",
+                    }
+                )
+
+        service._task_queue = ResponsiveTaskQueue(maxsize=1)
+        service._model_loaded = False
+
+    monkeypatch.setattr(service, "_start", fake_start)
+
+    with pytest.raises(WorkerTimeoutError, match="exceeded timeout"):
+        service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+
+    assert old_process.terminated is True
+    assert old_process.killed is True
+    assert len(restarts) == 1
+    assert service._process is restarts[0]
+    assert service.model_loaded is False
+
+    recovered = service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+
+    assert recovered == "Yeniden başlayan worker yanıtı"
+    assert service.model_loaded is True
+
+
+def test_supervised_final_worker_does_not_respawn_when_kill_cannot_stop_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnkillableProcess:
+        terminated = False
+        killed = False
+
+        def is_alive(self) -> bool:
+            return True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedFinalWhisperService)
+    service._timeout_sec = 0.01
+    service._load_timeout_sec = 0.01
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = UnkillableProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    service._generation = 1
+    service._restart_blocked = False
+    starts: list[None] = []
+    monkeypatch.setattr(service, "_start", lambda: starts.append(None))
+
+    with pytest.raises(WorkerCrashedError, match="could not be stopped safely"):
+        service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+
+    assert service._process.terminated is True
+    assert service._process.killed is True
+    assert service._restart_blocked is True
+    assert service.model_loaded is False
+    assert starts == []
+
+    with pytest.raises(WorkerCrashedError, match="restart is blocked"):
+        service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+    assert starts == []
+
+
+def test_supervised_live_worker_timeout_kills_native_child_without_spawning_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        alive = True
+        terminated = False
+        killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._timeout_sec = 0.01
+    service._load_timeout_sec = 0.01
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    service._restart_blocked = False
+    service._generation = 1
+    old_process = service._process
+    starts: list[None] = []
+    monkeypatch.setattr(service, "_start", lambda: starts.append(None))
+
+    with pytest.raises(WorkerTimeoutError, match="streaming live worker exceeded timeout"):
+        service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+
+    assert old_process.terminated is True
+    assert old_process.killed is True
+    assert starts == [None]
+
+
+def test_waiting_live_call_reloads_recycled_worker_before_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def is_alive(self) -> bool:
+            return True
+
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._timeout_sec = 0.5
+    service._load_timeout_sec = 0.5
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._model_loaded = True
+    service._restart_blocked = False
+    service._generation = 1
+    service._closing = threading.Event()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    operations: list[str] = []
+    results: list[BaseException | str] = []
+    transcribe_calls = 0
+
+    def fake_invoke_locked(operation: str, **_kwargs: object) -> str:
+        nonlocal transcribe_calls
+        operations.append(operation)
+        if operation == "load":
+            service._model_loaded = True
+            return ""
+        transcribe_calls += 1
+        if transcribe_calls == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=1.0)
+            service._model_loaded = False
+            service._generation += 1
+            raise WorkerTimeoutError("first inference recycled worker")
+        assert service._model_loaded is True
+        return "recovered"
+
+    monkeypatch.setattr(service, "_invoke_locked", fake_invoke_locked)
+
+    def transcribe() -> None:
+        try:
+            results.append(service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False))
+        except BaseException as exc:  # noqa: BLE001 - assertion captures thread result
+            results.append(exc)
+
+    first = threading.Thread(target=transcribe)
+    second = threading.Thread(target=transcribe)
+    first.start()
+    assert first_entered.wait(timeout=1.0)
+    second.start()
+    release_first.set()
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert any(isinstance(result, WorkerTimeoutError) for result in results)
+    assert "recovered" in results
+    assert operations == ["transcribe", "load", "transcribe"]
+
+
+def test_supervised_worker_close_is_bounded_while_call_lock_is_held() -> None:
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._call_lock = threading.Lock()
+    service._closing = threading.Event()
+    service._call_lock.acquire()
+    started = time.monotonic()
+    try:
+        with pytest.raises(WorkerTimeoutError, match="queue exceeded timeout"):
+            service.close(deadline=time.monotonic() + 0.02)
+    finally:
+        service._call_lock.release()
+
+    assert time.monotonic() - started < 0.2
+    assert service._closing.is_set()
+
+
+def test_shutdown_attempts_every_worker_and_keeps_failed_worker_cached() -> None:
+    calls: list[str] = []
+
+    class FakeService:
+        def __init__(self, role: str, *, fails: bool) -> None:
+            self.role = role
+            self.fails = fails
+
+        def close(self, *, deadline: float) -> None:
+            assert deadline >= time.monotonic()
+            calls.append(self.role)
+            if self.fails:
+                raise WorkerCrashedError("fixture worker remained alive")
+
+    failed = FakeService("live", fails=True)
+    closed = FakeService("final", fails=False)
+    saved_live = dict(streaming_models_module._supervised_live_services)
+    saved_final = dict(streaming_models_module._supervised_final_services)
+    streaming_models_module._supervised_live_services.clear()
+    streaming_models_module._supervised_final_services.clear()
+    streaming_models_module._supervised_live_services["failed"] = failed  # type: ignore[assignment]
+    streaming_models_module._supervised_final_services["closed"] = closed  # type: ignore[assignment]
+    try:
+        with pytest.raises(WorkerCrashedError, match="1 streaming worker"):
+            shutdown_streaming_services(timeout_sec=0.2)
+        assert calls == ["live", "final"]
+        assert streaming_models_module._supervised_live_services == {"failed": failed}
+        assert streaming_models_module._supervised_final_services == {}
+    finally:
+        streaming_models_module._supervised_live_services.clear()
+        streaming_models_module._supervised_live_services.update(saved_live)
+        streaming_models_module._supervised_final_services.clear()
+        streaming_models_module._supervised_final_services.update(saved_final)
+
+
+def test_terminal_decode_timeout_never_reloads_model_inside_declared_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        alive = True
+        terminated = False
+        killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedFinalWhisperService)
+    service._timeout_sec = 0.01
+    service._load_timeout_sec = 10.0
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    service._restart_blocked = False
+    service._generation = 1
+    old_process = service._process
+    starts: list[None] = []
+    monkeypatch.setattr(service, "_start", lambda: starts.append(None))
+
+    with pytest.raises(WorkerTimeoutError, match="exceeded timeout"):
+        service.transcribe_loaded_array(
+            np.ones(1600, dtype=np.float32),
+            vad=False,
+            expected_generation=1,
+        )
+
+    assert old_process.terminated is True
+    assert old_process.killed is True
+    assert starts == []
+    assert service.model_loaded is False
+
+    with pytest.raises(WorkerCrashedError, match="readiness changed"):
+        service.transcribe_loaded_array(
+            np.ones(1600, dtype=np.float32),
+            vad=False,
+            expected_generation=1,
+        )
+    assert starts == []
+
+
+def test_terminal_decode_rechecks_ready_generation_after_waiting_for_lock() -> None:
+    class FakeProcess:
+        def is_alive(self) -> bool:
+            return True
+
+    service = object.__new__(SupervisedFinalWhisperService)
+    service._timeout_sec = 0.5
+    service._load_timeout_sec = 0.5
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    service._restart_blocked = False
+    service._generation = 1
+    result: list[BaseException | str] = []
+
+    def terminal_decode() -> None:
+        try:
+            result.append(
+                service.transcribe_loaded_array(
+                    np.ones(1600, dtype=np.float32),
+                    vad=False,
+                    expected_generation=1,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - assertion captures thread result
+            result.append(exc)
+
+    service._call_lock.acquire()
+    thread = threading.Thread(target=terminal_decode)
+    thread.start()
+    service._generation = 2
+    service._model_loaded = False
+    service._call_lock.release()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert len(result) == 1
+    assert isinstance(result[0], WorkerCrashedError)
+    assert "readiness changed" in str(result[0])
+    assert service._task_queue.empty()
 
 
 def test_direct_stream_service_passes_role_specific_beam_size() -> None:

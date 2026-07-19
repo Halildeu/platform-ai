@@ -41,9 +41,7 @@ class _FakeWhisperModel:
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         self.calls = 0
 
-    def transcribe(
-        self, _audio: object, **_kwargs: object
-    ) -> tuple[list[_FakeSeg], _FakeInfo]:
+    def transcribe(self, _audio: object, **_kwargs: object) -> tuple[list[_FakeSeg], _FakeInfo]:
         self.calls += 1
         self.__class__.last_kwargs = dict(_kwargs)
         segments = [
@@ -81,6 +79,8 @@ def settings_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STT_LANGUAGE", "tr")
     monkeypatch.setenv("STT_MAX_AUDIO_MB", "10")
     monkeypatch.setenv("STT_WORKER_BACKEND", "inline")
+    monkeypatch.setenv("STT_STREAM_LIVE_WORKER_BACKEND", "inline")
+    monkeypatch.setenv("STT_STREAM_FINAL_WORKER_BACKEND", "inline")
     # bust settings cache
     from app.core import config as cfg
 

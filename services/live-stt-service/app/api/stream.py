@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import math
 import re
 import time
+from typing import Any
 
 import numpy as np
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -36,7 +39,13 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
 from app.services.hallucination import is_hallucination
-from app.services.streaming_models import get_final_service, get_live_service
+from app.services.streaming_models import (
+    SupervisedFinalWhisperService,
+    SupervisedLiveWhisperService,
+    get_final_service,
+    get_live_service,
+)
+from app.services.worker import WorkerCrashedError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -50,6 +59,8 @@ ROLLING_CONTINUATION_MIN_NEXT_WORDS = 1
 SHORT_FINAL_PRESERVE_MIN_PREVIOUS_WORDS = 5
 SHORT_FINAL_PRESERVE_MAX_RATIO = 0.65
 SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO = 0.45
+EOF_CONTROL = {"type": "eof"}
+STREAM_PROTOCOL = "source-ranges-v1"
 _OVERLAP_SUFFIXES = (
     "lerinizden",
     "larınızdan",
@@ -520,6 +531,19 @@ def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
     return None
 
 
+class StreamProtocolError(ValueError):
+    """Client violated the bounded live-stream control protocol."""
+
+
+def _decode_terminal_control(value: str) -> None:
+    try:
+        payload = json.loads(value)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise StreamProtocolError("invalid_client_control") from exc
+    if payload != EOF_CONTROL:
+        raise StreamProtocolError("invalid_client_control")
+
+
 @router.websocket("/ws/stream")
 async def stream_endpoint(
     websocket: WebSocket,
@@ -527,16 +551,31 @@ async def stream_endpoint(
 ) -> None:
     await websocket.accept()
 
+    if websocket.query_params.get("protocol") != STREAM_PROTOCOL:
+        await websocket.send_json({"type": "error", "msg": "protocol_required"})
+        await websocket.close(code=1008)
+        return
+
     live_service = get_live_service(settings)
     final_service = get_final_service(settings)
     debug_enabled = settings.stream_debug
     min_infer_samples = int(settings.min_infer_sec * SAMPLE_RATE)
+    # One absolute EOF budget covers cancellation of an in-flight publication,
+    # the supervised decode/kill path, ack/final/drained, diagnostics and close.
+    terminal_timeout_sec = (
+        settings.stream_final_timeout_sec
+        + (2 * settings.worker_kill_grace_sec)
+        + (6 * settings.stream_transport_timeout_sec)
+    )
+    final_worker_generation: int | None = None
 
     try:
         await websocket.send_json({"type": "loading", "stage": "live_model"})
         await run_in_threadpool(live_service.ensure_model)
         await websocket.send_json({"type": "loading", "stage": "final_model"})
         await run_in_threadpool(final_service.ensure_model)
+        if isinstance(final_service, SupervisedFinalWhisperService):
+            final_worker_generation = final_service.ready_generation
     except WebSocketDisconnect:
         logger.info("WS disconnected during model load")
         return
@@ -554,6 +593,14 @@ async def stream_endpoint(
             "live_model": settings.live_model_name,
             "final_model": settings.final_model_name,
             "partial_mode": "stable-v1",
+            "protocol": STREAM_PROTOCOL,
+            "capabilities": ["eof", STREAM_PROTOCOL],
+            "supports_eof": True,
+            # EOF cancels (without awaiting) an in-flight draft/final coroutine.
+            # The terminal decode uses only the model proven ready above and its
+            # hard worker deadline. Two kill joins are included because failure
+            # cleanup must also complete before the socket can close fail-closed.
+            "terminal_timeout_ms": math.ceil(terminal_timeout_sec * 1_000),
         }
     )
     logger.info(
@@ -576,26 +623,88 @@ async def stream_endpoint(
     recent_final_text = ""
     total_samples_received = 0
     buffer_start_sample = 0
+    finalized_through_sample = 0
     buffer_lock = asyncio.Lock()
     send_lock = asyncio.Lock()
     stop_inference = asyncio.Event()
+    transport_disabled = asyncio.Event()
+    inference_phase = "idle"
+    terminal_deadline: float | None = None
+
+    def consume_task_result(task: asyncio.Task[object]) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+
+    def cancel_without_join(task: asyncio.Task[object] | None) -> None:
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        task.add_done_callback(consume_task_result)
+
+    def remaining_terminal_time() -> float:
+        if terminal_deadline is None:
+            return terminal_timeout_sec
+        return max(0.0, terminal_deadline - asyncio.get_running_loop().time())
+
+    async def wait_first(
+        *tasks: asyncio.Task[Any],
+        timeout: float | None = None,
+    ) -> set[asyncio.Task[Any]]:
+        done, _ = await asyncio.wait(
+            set(tasks),
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        return done
 
     async def send_debug(event: str, **payload: object) -> None:
         # Transcript-free diagnostics; opt-in only (KVKK log discipline, #30).
         if not debug_enabled:
             return
         with contextlib.suppress(Exception):
-            async with send_lock:
-                await websocket.send_json({"type": "debug", "event": event, **payload})
+            await send_json({"type": "debug", "event": event, **payload})
 
     async def send_json(payload: dict[str, object]) -> None:
-        async with send_lock:
-            await websocket.send_json(payload)
+        if transport_disabled.is_set():
+            raise RuntimeError("stream transport is disabled")
+        async with asyncio.timeout(settings.stream_transport_timeout_sec):
+            async with send_lock:
+                if transport_disabled.is_set():
+                    raise RuntimeError("stream transport is disabled")
+                await websocket.send_json(payload)
 
-    async def commit_current(reason: str) -> None:
+    async def close_websocket(code: int = 1000) -> None:
+        async with asyncio.timeout(settings.stream_transport_timeout_sec):
+            await websocket.close(code=code)
+
+    async def emit_final(payload: dict[str, object]) -> None:
+        await send_json(payload)
+        await send_debug(
+            "final_sent",
+            seq=payload["seq"],
+            elapsed_ms=payload["elapsed_ms"],
+            text_len=len(str(payload["text"])),
+        )
+        # KVKK: no transcript content in server logs.
+        logger.info(
+            "Final segment sent",
+            extra={
+                "seq": payload["seq"],
+                "reason": payload["reason"],
+                "elapsed_ms": payload["elapsed_ms"],
+            },
+        )
+
+    async def commit_current(
+        reason: str,
+        *,
+        defer_final: bool = False,
+    ) -> dict[str, object] | None:
         nonlocal buffer, buffer_start_t, seg_index, last_draft, confirmed_draft
         nonlocal tentative_draft, speech_seen
         nonlocal last_speech_t, last_final_text, recent_final_text, buffer_start_sample
+        nonlocal finalized_through_sample
 
         def trim_leading_silence(
             samples: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
@@ -656,10 +765,36 @@ async def stream_endpoint(
         async with buffer_lock:
             audio = buffer.copy()
             active_seq = seg_index
+            source_start_sample = buffer_start_sample
             commit_end_sample = buffer_start_sample + buffer.shape[0]
+            source_end_sample = commit_end_sample
 
         if reason == "silence":
-            audio = trim_leading_silence(audio)
+            active_offsets = np.flatnonzero(np.abs(audio) >= settings.silence_rms)
+            if active_offsets.size == 0:
+                audio = np.zeros(0, dtype=np.float32)
+                source_start_sample = source_end_sample
+            else:
+                first_active = int(active_offsets[0])
+                last_active_exclusive = int(active_offsets[-1]) + 1
+                audio = audio[first_active:last_active_exclusive].copy()
+                source_start_sample += first_active
+                source_end_sample = buffer_start_sample + last_active_exclusive
+
+        # A forced commit retains a short tail only as decode context. EOF or
+        # another timer tick must not turn that already-finalized tail into a
+        # second durable transcript window when no new source audio arrived.
+        if source_end_sample <= finalized_through_sample:
+            await send_debug(
+                "final_skip_without_source_progress",
+                source_end_sample=source_end_sample,
+            )
+            await advance_segment(
+                retain_tail=False,
+                commit_end_sample=commit_end_sample,
+                committed_audio=audio,
+            )
+            return None
 
         buffer_sec = round(audio.size / SAMPLE_RATE, 2)
         if audio.size < min_infer_samples:
@@ -669,7 +804,7 @@ async def stream_endpoint(
                 commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
-            return
+            return None
 
         rms = _audio_rms(audio)
         if rms < settings.min_speech_rms:
@@ -679,20 +814,37 @@ async def stream_endpoint(
                 commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
-            return
+            return None
 
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
         started = time.perf_counter()
         try:
-            text = await run_in_threadpool(
-                final_service.transcribe_array,
-                audio,
-                settings.stream_final_vad_filter,
+            if reason == "eof" and isinstance(final_service, SupervisedFinalWhisperService):
+                if final_worker_generation is None:
+                    raise WorkerCrashedError("streaming final worker readiness is unavailable")
+                final_call = run_in_threadpool(
+                    final_service.transcribe_loaded_array,
+                    audio,
+                    settings.stream_final_vad_filter,
+                    final_worker_generation,
+                )
+            else:
+                final_call = run_in_threadpool(
+                    final_service.transcribe_array,
+                    audio,
+                    settings.stream_final_vad_filter,
+                )
+            text = (
+                await final_call
+                if getattr(final_service, "hard_timeout", False)
+                else await asyncio.wait_for(final_call, timeout=settings.stream_final_timeout_sec)
             )
-        except Exception as exc:  # noqa: BLE001 - keep stream alive, fall back to draft
+        except Exception as exc:  # Keep non-terminal streams alive by falling back to draft.
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
             logger.warning("Final pass error err_class=%s", type(exc).__name__, exc_info=True)
             await send_debug("final_error", error=type(exc).__name__)
+            if reason == "eof":
+                raise
             text = last_draft
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -705,7 +857,7 @@ async def stream_endpoint(
                 commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
-            return
+            return None
 
         if selected_text != text:
             await send_debug("final_fallback_draft", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
@@ -723,36 +875,46 @@ async def stream_endpoint(
                 commit_end_sample=commit_end_sample,
                 committed_audio=audio,
             )
-            return
+            return None
 
-        await send_json(
-            {
-                "type": "final",
-                "seq": active_seq,
-                "text": text,
-                "reason": reason,
-                "elapsed_ms": elapsed_ms,
-                "rms": round(rms, 5),
-            }
-        )
-        await send_debug("final_sent", seq=active_seq, elapsed_ms=elapsed_ms, text_len=len(text))
-        # KVKK: no transcript content in server logs.
-        logger.info(
-            "Final segment sent",
-            extra={"seq": active_seq, "reason": reason, "elapsed_ms": elapsed_ms},
-        )
-        last_final_text = text
-        recent_final_text = _append_recent_final_text(recent_final_text, text)
+        final_payload: dict[str, object] = {
+            "type": "final",
+            "seq": active_seq,
+            "text": text,
+            "reason": reason,
+            "elapsed_ms": elapsed_ms,
+            "rms": round(rms, 5),
+            # Absolute float-sample coordinates on this WebSocket connection.
+            # They identify the exact producer snapshot even when a slow final
+            # overlaps later audio or a forced commit reuses a prior tail.
+            "source_start_sample": source_start_sample,
+            "source_end_sample": source_end_sample,
+        }
 
-        # A forced commit happens while speech is still continuous, so a small
-        # tail helps avoid boundary loss. A silence commit already has an
-        # utterance boundary; carrying tail there pollutes the next segment with
-        # the previous words and creates repeated alternatives in practice.
-        await advance_segment(
-            retain_tail=reason == "forced",
-            commit_end_sample=commit_end_sample,
-            committed_audio=audio,
-        )
+        async def publish_and_advance() -> None:
+            nonlocal last_final_text, recent_final_text, finalized_through_sample
+
+            if not defer_final:
+                await emit_final(final_payload)
+            last_final_text = text
+            recent_final_text = _append_recent_final_text(recent_final_text, text)
+            finalized_through_sample = source_end_sample
+
+            # A forced commit happens while speech is still continuous, so a small
+            # tail helps avoid boundary loss. A silence commit already has an
+            # utterance boundary; carrying tail there pollutes the next segment with
+            # the previous words and creates repeated alternatives in practice.
+            await advance_segment(
+                retain_tail=reason == "forced",
+                commit_end_sample=commit_end_sample,
+                committed_audio=audio,
+            )
+
+        # EOF never races an active background commit: the terminal pipeline waits
+        # for that task or fails the connection. A disconnected/failed connection
+        # does not need to complete local segment state after cancellation.
+        await publish_and_advance()
+        return final_payload
 
     async def infer_live_partial() -> None:
         nonlocal last_draft, confirmed_draft, tentative_draft
@@ -777,11 +939,21 @@ async def stream_endpoint(
         await send_debug("draft_start", rms=round(live_rms, 5))
         started = time.perf_counter()
         try:
-            draft = await run_in_threadpool(live_service.transcribe_array, live_audio, False)
-        except Exception as exc:  # noqa: BLE001 - skip this tick, keep stream alive
+            draft_call = run_in_threadpool(live_service.transcribe_array, live_audio, False)
+            draft = (
+                await draft_call
+                if isinstance(live_service, SupervisedLiveWhisperService)
+                else await asyncio.wait_for(
+                    draft_call,
+                    timeout=settings.stream_live_timeout_sec,
+                )
+            )
+        except Exception as exc:
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
             logger.warning("Draft pass error err_class=%s", type(exc).__name__, exc_info=True)
             await send_debug("draft_error", error=type(exc).__name__)
+            if isinstance(live_service, SupervisedLiveWhisperService):
+                raise
             return
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -828,10 +1000,12 @@ async def stream_endpoint(
         )
 
     async def inference_loop() -> None:
-        nonlocal last_live_infer_t
+        nonlocal inference_phase, last_live_infer_t
 
         while not stop_inference.is_set():
             await asyncio.sleep(0.05)
+            if stop_inference.is_set():
+                break
             now = time.time()
             commit_reason: str | None = None
 
@@ -855,18 +1029,187 @@ async def stream_endpoint(
                     last_live_infer_t = now
 
             if commit_reason is not None:
-                await commit_current(commit_reason)
+                inference_phase = "commit"
+                try:
+                    await commit_current(commit_reason)
+                finally:
+                    inference_phase = "idle"
                 last_live_infer_t = time.time()
                 continue
 
             if should_infer:
-                await infer_live_partial()
+                inference_phase = "draft"
+                try:
+                    await infer_live_partial()
+                finally:
+                    inference_phase = "idle"
                 last_live_infer_t = time.time()
 
     inference_task = asyncio.create_task(inference_loop())
+    terminal_task: asyncio.Task[None] | None = None
+
+    async def finalize_terminal() -> dict[str, object] | None:
+        final_payload = await commit_current("eof", defer_final=True)
+        # Give the receive task a chance to surface an already-queued post-EOF
+        # frame before the server emits the terminal success marker.
+        await asyncio.sleep(0)
+        return final_payload
+
+    async def receive_while_inference_healthy() -> dict[str, Any]:
+        receive_task = asyncio.create_task(websocket.receive())
+        try:
+            done = await wait_first(inference_task, receive_task)
+            if inference_task in done:
+                await inference_task
+                raise RuntimeError("stream inference loop stopped unexpectedly")
+            return dict(receive_task.result())
+        finally:
+            if not receive_task.done():
+                cancel_without_join(receive_task)
+
+    async def stop_background_inference() -> None:
+        stop_inference.set()
+        if inference_task.done():
+            await inference_task
+            return
+        if inference_phase == "commit":
+            await inference_task
+            return
+        cancel_without_join(inference_task)
+
+    async def terminal_pipeline(
+        receiver_started: asyncio.Event,
+        ack_sent: asyncio.Event,
+        final_ready: asyncio.Event,
+        publish_allowed: asyncio.Event,
+    ) -> None:
+        await stop_background_inference()
+        await send_json({"type": "eof_ack"})
+        ack_sent.set()
+        await receiver_started.wait()
+        final_payload = await finalize_terminal()
+        final_ready.set()
+        await publish_allowed.wait()
+        if final_payload is not None:
+            await emit_final(final_payload)
+        await send_json({"type": "drained"})
+        await close_websocket(code=1000)
+
+    async def run_terminal_protocol() -> None:
+        nonlocal terminal_task
+
+        ack_sent = asyncio.Event()
+        receiver_started = asyncio.Event()
+        final_ready = asyncio.Event()
+        publish_allowed = asyncio.Event()
+        terminal_task = asyncio.create_task(
+            terminal_pipeline(
+                receiver_started,
+                ack_sent,
+                final_ready,
+                publish_allowed,
+            )
+        )
+        ack_wait_task = asyncio.create_task(ack_sent.wait())
+
+        done = await wait_first(
+            terminal_task,
+            ack_wait_task,
+            timeout=remaining_terminal_time(),
+        )
+        cancel_without_join(ack_wait_task)
+        if terminal_task in done:
+            await terminal_task
+        if not ack_sent.is_set():
+            transport_disabled.set()
+            cancel_without_join(terminal_task)
+            raise TimeoutError("terminal deadline expired before eof_ack")
+
+        receive_task = asyncio.create_task(websocket.receive())
+        final_ready_task = asyncio.create_task(final_ready.wait())
+        receiver_started.set()
+        try:
+            done = await wait_first(
+                terminal_task,
+                receive_task,
+                final_ready_task,
+                timeout=remaining_terminal_time(),
+            )
+            if not done:
+                transport_disabled.set()
+                cancel_without_join(terminal_task)
+                cancel_without_join(receive_task)
+                raise TimeoutError("terminal deadline expired")
+
+            if receive_task in done and terminal_task not in done:
+                message = receive_task.result()
+                cancel_without_join(terminal_task)
+                if message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+                raise StreamProtocolError("post_eof_frame")
+
+            if terminal_task in done:
+                await terminal_task
+
+            if not final_ready.is_set():
+                transport_disabled.set()
+                cancel_without_join(terminal_task)
+                raise TimeoutError("terminal deadline expired before final readiness")
+
+            # The terminal final is not publishable until an already-queued late
+            # frame has had a chance to win the race. The receiver remains active
+            # during final/drained/close after this gate as well.
+            if receive_task.done():
+                message = receive_task.result()
+                cancel_without_join(terminal_task)
+                if message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+                raise StreamProtocolError("post_eof_frame")
+            publish_allowed.set()
+
+            done = await wait_first(
+                terminal_task,
+                receive_task,
+                timeout=remaining_terminal_time(),
+            )
+            if not done:
+                transport_disabled.set()
+                cancel_without_join(terminal_task)
+                cancel_without_join(receive_task)
+                raise TimeoutError("terminal deadline expired")
+            if receive_task in done and terminal_task not in done:
+                message = receive_task.result()
+                cancel_without_join(terminal_task)
+                if message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+                raise StreamProtocolError("post_eof_frame")
+
+            await terminal_task
+            if receive_task in done:
+                message = receive_task.result()
+                if message.get("type") != "websocket.disconnect":
+                    raise StreamProtocolError("post_eof_frame")
+        finally:
+            cancel_without_join(final_ready_task)
+            if not receive_task.done():
+                cancel_without_join(receive_task)
+
     try:
         while True:
-            data = await websocket.receive_bytes()
+            message = await receive_while_inference_healthy()
+            if message.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+
+            text = message.get("text")
+            if text is not None:
+                _decode_terminal_control(text)
+                terminal_deadline = asyncio.get_running_loop().time() + terminal_timeout_sec
+                await run_terminal_protocol()
+                return
+
+            data = message.get("bytes")
+            if data is None:
+                raise StreamProtocolError("invalid_client_frame")
             if not data:
                 continue
 
@@ -911,12 +1254,25 @@ async def stream_endpoint(
 
     except WebSocketDisconnect:
         logger.info("WS disconnected")
+    except StreamProtocolError as exc:
+        logger.warning("WS stream protocol rejected reason=%s", str(exc))
+        with contextlib.suppress(Exception):
+            await send_json({"type": "error", "msg": str(exc)})
+            await close_websocket(code=1003)
     except Exception:
         logger.exception("WS stream error")
-        with contextlib.suppress(Exception):
-            await websocket.close()
+        if terminal_deadline is None:
+            with contextlib.suppress(Exception):
+                await close_websocket()
+        else:
+            remaining = remaining_terminal_time()
+            if remaining > 0.0:
+                with contextlib.suppress(Exception):
+                    close_timeout = min(remaining, settings.stream_transport_timeout_sec)
+                    async with asyncio.timeout(close_timeout):
+                        await websocket.close(code=1011)
     finally:
         stop_inference.set()
-        inference_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await inference_task
+        transport_disabled.set()
+        cancel_without_join(terminal_task)
+        cancel_without_join(inference_task)

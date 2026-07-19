@@ -7,7 +7,9 @@ instead of surfacing in production.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,7 +19,9 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from app.core import config as config_module
 from app.core.config import Settings, get_settings
 from app.main import app
 from app.services import streaming_models
@@ -26,13 +30,18 @@ SCHEMA_PATH = (
     Path(__file__).resolve().parents[4] / "docs" / "contracts" / "ws-stream-events.schema.json"
 )
 VALIDATOR = Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
+STREAM_PATH = "/ws/stream?protocol=source-ranges-v1"
 
 
 @pytest.fixture(autouse=True)
-def clear_dependency_overrides() -> Iterator[None]:
+def clear_dependency_overrides(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("STT_STREAM_LIVE_WORKER_BACKEND", "inline")
+    monkeypatch.setenv("STT_STREAM_FINAL_WORKER_BACKEND", "inline")
+    config_module._settings = None
     app.dependency_overrides.clear()
     yield
     app.dependency_overrides.clear()
+    config_module._settings = None
 
 
 def assert_valid(event: dict[str, Any]) -> None:
@@ -40,14 +49,34 @@ def assert_valid(event: dict[str, Any]) -> None:
     assert not errors, f"contract violation for {event!r}: {[e.message for e in errors]}"
 
 
+def receive_terminal_ack(ws: Any) -> dict[str, Any]:
+    """Consume any in-flight partials that were emitted before EOF was acknowledged."""
+    for _ in range(4):
+        event = ws.receive_json()
+        assert_valid(event)
+        if event["type"] == "eof_ack":
+            return event
+        assert event["type"] == "partial"
+    raise AssertionError("eof_ack was not emitted within the bounded terminal sequence")
+
+
 def test_schema_file_is_valid_jsonschema() -> None:
     Draft202012Validator.check_schema(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
+
+
+def test_handshake_without_source_range_protocol_fails_closed() -> None:
+    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+        error = ws.receive_json()
+        assert_valid(error)
+        assert error == {"type": "error", "msg": "protocol_required"}
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
 
 
 def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real WS handshake: loading + loading + ready, each schema-valid."""
     monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         first = ws.receive_json()
         second = ws.receive_json()
         ready = ws.receive_json()
@@ -58,6 +87,10 @@ def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> Non
     assert first["stage"] == "live_model"
     assert second["stage"] == "final_model"
     assert ready["partial_mode"] == "stable-v1"
+    assert ready["protocol"] == "source-ranges-v1"
+    assert ready["capabilities"] == ["eof", "source-ranges-v1"]
+    assert ready["supports_eof"] is True
+    assert ready["terminal_timeout_ms"] == 46_000
 
 
 def test_partial_and_final_payload_shapes_match_contract() -> None:
@@ -78,10 +111,509 @@ def test_partial_and_final_payload_shapes_match_contract() -> None:
         "reason": "silence",
         "elapsed_ms": 600,
         "rms": 0.01234,
+        "source_start_sample": 0,
+        "source_end_sample": 16000,
     }
     error = {"type": "error", "msg": "RuntimeError"}
-    for event in (partial, final, error):
+    eof_ack = {"type": "eof_ack"}
+    drained = {"type": "drained"}
+    for event in (partial, final, eof_ack, drained, error):
         assert_valid(event)
+
+
+def test_eof_without_audio_emits_ack_then_drained(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_fast_stream_timing(monkeypatch)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        drained = ws.receive_json()
+
+    assert_valid(eof_ack)
+    assert_valid(drained)
+    assert [eof_ack["type"], drained["type"]] == ["eof_ack", "drained"]
+
+
+def test_eof_does_not_wait_for_stalled_draft_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+    )
+    draft_started = threading.Event()
+    release_draft = threading.Event()
+
+    def blocking_draft(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if _is_final_service(self):
+            return "Kapanış finali kalıcı."
+        draft_started.set()
+        release_draft.wait(timeout=2.0)
+        return "Bu geç taslak yayınlanmamalı"
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        blocking_draft,
+    )
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert draft_started.wait(timeout=1.0)
+        started = time.monotonic()
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        ack_elapsed = time.monotonic() - started
+        release_draft.set()
+        final = ws.receive_json()
+        drained = ws.receive_json()
+
+    for event in (eof_ack, final, drained):
+        assert_valid(event)
+    assert ack_elapsed < 0.5
+    assert [eof_ack["type"], final["type"], drained["type"]] == [
+        "eof_ack",
+        "final",
+        "drained",
+    ]
+
+
+def test_eof_waits_for_published_final_state_transition_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.0,
+    )
+    final_reached_transport = threading.Event()
+    release_final_transition = threading.Event()
+    original_send_json = WebSocket.send_json
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        return "Yarışsız kalıcı final." if _is_final_service(self) else "Yarışsız taslak"
+
+    async def blocking_final_send(
+        websocket: WebSocket,
+        data: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        await original_send_json(websocket, data, *args, **kwargs)
+        if (
+            isinstance(data, dict)
+            and data.get("type") == "final"
+            and data.get("reason") == "forced"
+            and not final_reached_transport.is_set()
+        ):
+            final_reached_transport.set()
+            await asyncio.to_thread(release_final_transition.wait, 2.0)
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+    monkeypatch.setattr(WebSocket, "send_json", blocking_final_send)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert final_reached_transport.wait(timeout=1.0)
+        pre_eof_events: list[dict[str, Any]] = []
+        while True:
+            event = ws.receive_json()
+            pre_eof_events.append(event)
+            if event["type"] == "final":
+                break
+        ws.send_text('{"type":"eof"}')
+        time.sleep(0.05)
+        release_final_transition.set()
+        terminal_events = [ws.receive_json(), ws.receive_json()]
+
+    for event in (*pre_eof_events, *terminal_events):
+        assert_valid(event)
+    finals = [event for event in pre_eof_events if event["type"] == "final"]
+    assert len(finals) == 1
+    assert finals[0]["seq"] == 0
+    assert [event["type"] for event in terminal_events] == ["eof_ack", "drained"]
+
+
+def test_eof_does_not_refinalize_retained_forced_commit_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.025,
+    )
+    final_calls: list[int] = []
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if _is_final_service(self):
+            final_calls.append(audio.size)
+            return "İlk kesin metin." if len(final_calls) == 1 else "Farklı kuyruk metni."
+        return "Canlı taslak"
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        pre_terminal: list[dict[str, Any]] = []
+        while True:
+            event = ws.receive_json()
+            assert_valid(event)
+            pre_terminal.append(event)
+            if event["type"] == "final":
+                break
+
+        ws.send_text('{"type":"eof"}')
+        terminal = [ws.receive_json(), ws.receive_json()]
+
+    assert [event["type"] for event in terminal] == ["eof_ack", "drained"]
+    assert len([event for event in pre_terminal if event["type"] == "final"]) == 1
+    assert final_calls == [1024]
+
+
+def test_blocked_final_transport_closes_bounded_without_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.0,
+        transport_timeout_sec=0.05,
+    )
+    final_reached_transport = threading.Event()
+    original_send_json = WebSocket.send_json
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        return "Sınırlı final." if _is_final_service(self) else "Sınırlı taslak"
+
+    async def never_returning_final_send(
+        websocket: WebSocket,
+        data: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        await original_send_json(websocket, data, *args, **kwargs)
+        if (
+            isinstance(data, dict)
+            and data.get("type") == "final"
+            and data.get("reason") == "forced"
+        ):
+            final_reached_transport.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+    monkeypatch.setattr(WebSocket, "send_json", never_returning_final_send)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert final_reached_transport.wait(timeout=1.0)
+        started = time.monotonic()
+        ws.send_text('{"type":"eof"}')
+        observed_types: list[str] = []
+        with pytest.raises(WebSocketDisconnect):
+            while True:
+                observed_types.append(str(ws.receive_json()["type"]))
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert "final" in observed_types
+    assert "drained" not in observed_types
+
+
+def test_background_final_transport_timeout_closes_before_accepting_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.0,
+        transport_timeout_sec=0.05,
+    )
+    final_reached_transport = threading.Event()
+    original_send_json = WebSocket.send_json
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        return "Tek final." if _is_final_service(self) else "Tek taslak"
+
+    async def delivered_then_blocked_final(
+        websocket: WebSocket,
+        data: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        await original_send_json(websocket, data, *args, **kwargs)
+        if isinstance(data, dict) and data.get("type") == "final":
+            final_reached_transport.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+    monkeypatch.setattr(WebSocket, "send_json", delivered_then_blocked_final)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert final_reached_transport.wait(timeout=1.0)
+        observed: list[dict[str, Any]] = []
+        with pytest.raises(WebSocketDisconnect):
+            while True:
+                observed.append(ws.receive_json())
+
+    finals = [event for event in observed if event.get("type") == "final"]
+    assert len(finals) == 1
+    assert (
+        len(
+            {
+                (
+                    event["seq"],
+                    event["source_start_sample"],
+                    event["source_end_sample"],
+                )
+                for event in finals
+            }
+        )
+        == 1
+    )
+    assert all(event.get("type") != "drained" for event in observed)
+
+
+def test_terminal_deadline_does_not_wait_for_cancellation_resistant_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+        final_timeout_sec=1.0,
+        kill_grace_sec=0.0,
+        transport_timeout_sec=0.05,
+    )
+    final_started = threading.Event()
+    release_final = threading.Event()
+
+    def blocking_final(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if not _is_final_service(self):
+            return "Bekleyen taslak"
+        final_started.set()
+        release_final.wait(timeout=3.0)
+        return "Bütçe sonrası yayınlanmamalı."
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        blocking_final,
+    )
+
+    try:
+        with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+            for _ in range(3):
+                assert_valid(ws.receive_json())
+
+            ws.send_bytes(_speech_frame())
+            started = time.monotonic()
+            ws.send_text('{"type":"eof"}')
+            assert receive_terminal_ack(ws) == {"type": "eof_ack"}
+            assert final_started.wait(timeout=1.0)
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+            elapsed = time.monotonic() - started
+    finally:
+        release_final.set()
+
+    # 1.0s model + 6*0.05s transport is the advertised absolute budget.
+    assert elapsed < 1.7
+
+
+def test_eof_flushes_late_final_before_drained(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+    )
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        return "Son kelimeler kalıcı final." if _is_final_service(self) else "Son kelimeler"
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        events = [eof_ack, ws.receive_json(), ws.receive_json()]
+
+    for event in events:
+        assert_valid(event)
+    assert [event["type"] for event in events] == ["eof_ack", "final", "drained"]
+    assert events[1]["reason"] == "eof"
+    assert events[1]["text"] == "Son kelimeler kalıcı final."
+
+
+def test_unknown_text_control_is_rejected_without_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(monkeypatch)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_text('{"type":"ping"}')
+        error = ws.receive_json()
+        assert_valid(error)
+        assert error == {"type": "error", "msg": "invalid_client_control"}
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+
+
+@pytest.mark.parametrize("late_frame", ["eof", "binary"])
+def test_second_or_post_eof_frame_is_rejected_without_drained(
+    monkeypatch: pytest.MonkeyPatch,
+    late_frame: str,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+    )
+    final_started = threading.Event()
+    release_final = threading.Event()
+
+    def blocking_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if not _is_final_service(self):
+            return "Bekleyen taslak"
+        final_started.set()
+        release_final.wait(timeout=2.0)
+        return "Bu final yayınlanmamalı."
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        blocking_transcribe,
+    )
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        assert eof_ack == {"type": "eof_ack"}
+        assert final_started.wait(timeout=1.0)
+        if late_frame == "eof":
+            ws.send_text('{"type":"eof"}')
+        else:
+            ws.send_bytes(_speech_frame())
+        release_final.set()
+
+        error = ws.receive_json()
+        assert_valid(error)
+        assert error == {"type": "error", "msg": "post_eof_frame"}
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+
+
+def test_terminal_final_model_error_never_emits_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+    )
+
+    def failing_final(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if _is_final_service(self):
+            raise RuntimeError("terminal final failed")
+        return "Taslak"
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", failing_final)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        ws.send_text('{"type":"eof"}')
+        assert receive_terminal_ack(ws) == {"type": "eof_ack"}
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
 
 
 def test_contract_rejects_unknown_event_type() -> None:
@@ -107,6 +639,9 @@ def _patch_fast_stream_timing(
     forced_commit_sec: float = 60.0,
     silence_commit_sec: float = 0.1,
     tail_overlap_sec: float = 0.0,
+    final_timeout_sec: float = 30.0,
+    kill_grace_sec: float = 2.0,
+    transport_timeout_sec: float = 2.0,
 ) -> None:
     settings = Settings(
         live_infer_interval_ms=1,
@@ -115,6 +650,9 @@ def _patch_fast_stream_timing(
         forced_commit_sec=forced_commit_sec,
         silence_commit_sec=silence_commit_sec,
         tail_overlap_sec=tail_overlap_sec,
+        stream_final_timeout_sec=final_timeout_sec,
+        worker_kill_grace_sec=kill_grace_sec,
+        stream_transport_timeout_sec=transport_timeout_sec,
         silence_rms=0.001,
         min_speech_rms=0.001,
         min_infer_sec=0.01,
@@ -143,7 +681,7 @@ def test_stream_emits_same_seq_word_progressive_partials(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -190,7 +728,7 @@ def test_stream_default_gate_accepts_quiet_desktop_microphone(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -235,7 +773,7 @@ def test_stream_final_pass_bypasses_whisper_vad_after_rms_gate(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -276,7 +814,7 @@ def test_stream_keeps_receiving_audio_while_live_model_is_busy(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -307,7 +845,7 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
         final_window_sec=1.0,
         forced_commit_sec=0.1,
         silence_commit_sec=5.0,
-        tail_overlap_sec=0.0,
+        tail_overlap_sec=0.01,
         silence_rms=0.001,
         min_speech_rms=0.001,
         min_infer_sec=0.01,
@@ -331,7 +869,7 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -354,6 +892,16 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
         assert event["type"] == "final"
     assert len(final_sample_counts) >= 2
     assert final_sample_counts[1] >= 8 * 1024
+    assert (
+        first_final["source_end_sample"] - first_final["source_start_sample"]
+        == final_sample_counts[0]
+    )
+    assert (
+        second_final["source_end_sample"] - second_final["source_start_sample"]
+        == final_sample_counts[1]
+    )
+    assert second_final["source_start_sample"] < first_final["source_end_sample"]
+    assert second_final["source_end_sample"] > first_final["source_end_sample"]
 
 
 def test_stream_appends_growing_no_overlap_live_windows(
@@ -376,7 +924,7 @@ def test_stream_appends_growing_no_overlap_live_windows(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -417,7 +965,7 @@ def test_stream_appends_short_no_overlap_live_continuations(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -458,7 +1006,7 @@ def test_stream_revises_competing_same_opener_tail_without_fabricating_text(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -493,7 +1041,7 @@ def test_stream_keeps_short_stable_draft_over_unrelated_short_final(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -528,7 +1076,7 @@ def test_stream_keeps_medium_draft_over_short_unrelated_final(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -562,7 +1110,7 @@ def test_stream_commits_final_on_speech_ending_silence(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -603,7 +1151,7 @@ def test_stream_forced_commit_still_emits_final(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
@@ -643,7 +1191,7 @@ def test_stream_silence_commit_does_not_carry_tail_into_next_utterance(
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
 
-    with TestClient(app) as client, client.websocket_connect("/ws/stream") as ws:
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 

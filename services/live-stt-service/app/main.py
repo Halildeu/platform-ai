@@ -106,6 +106,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if consumer is not None and consumer_thread is not None:
         consumer.stop()
         consumer_thread.join(timeout=5)
+    from app.services.streaming_models import shutdown_streaming_services
+
+    try:
+        shutdown_streaming_services()
+    except Exception as exc:  # noqa: BLE001 - shutdown tried every supervised worker
+        logger.error(
+            "streaming worker shutdown incomplete",
+            extra={"correlation_id": "shutdown", "error_class": type(exc).__name__},
+        )
     logger.info("live-stt-service stopping", extra={"correlation_id": "shutdown"})
 
 

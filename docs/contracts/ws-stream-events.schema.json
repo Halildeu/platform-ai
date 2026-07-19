@@ -8,6 +8,8 @@
     { "$ref": "#/$defs/ready" },
     { "$ref": "#/$defs/partial" },
     { "$ref": "#/$defs/final" },
+    { "$ref": "#/$defs/eofAck" },
+    { "$ref": "#/$defs/drained" },
     { "$ref": "#/$defs/error" },
     { "$ref": "#/$defs/debug" }
   ],
@@ -28,9 +30,36 @@
         "sample_rate": { "type": "integer", "minimum": 8000 },
         "live_model": { "type": "string" },
         "final_model": { "type": "string" },
-        "partial_mode": { "const": "stable-v1" }
+        "partial_mode": { "const": "stable-v1" },
+        "protocol": { "const": "source-ranges-v1" },
+        "capabilities": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "eof" },
+            { "const": "source-ranges-v1" }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "supports_eof": { "const": true },
+        "terminal_timeout_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 120000
+        }
       },
-      "required": ["type", "sample_rate", "live_model", "final_model", "partial_mode"],
+      "required": [
+        "type",
+        "sample_rate",
+        "live_model",
+        "final_model",
+        "partial_mode",
+        "protocol",
+        "capabilities",
+        "supports_eof",
+        "terminal_timeout_ms"
+      ],
       "additionalProperties": false
     },
     "partial": {
@@ -55,9 +84,36 @@
         "text": { "type": "string" },
         "reason": { "type": "string" },
         "elapsed_ms": { "type": "integer", "minimum": 0 },
-        "rms": { "type": "number", "minimum": 0 }
+        "rms": { "type": "number", "minimum": 0 },
+        "source_start_sample": { "type": "integer", "minimum": 0 },
+        "source_end_sample": { "type": "integer", "minimum": 1 }
       },
-      "required": ["type", "seq", "text", "reason", "elapsed_ms", "rms"],
+      "required": [
+        "type",
+        "seq",
+        "text",
+        "reason",
+        "elapsed_ms",
+        "rms",
+        "source_start_sample",
+        "source_end_sample"
+      ],
+      "additionalProperties": false
+    },
+    "eofAck": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "eof_ack" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "drained": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "drained" }
+      },
+      "required": ["type"],
       "additionalProperties": false
     },
     "error": {

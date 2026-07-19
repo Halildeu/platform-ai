@@ -79,6 +79,8 @@ Varsayılan canlı UX ayarları:
 | `STT_LIVE_BEAM_SIZE` | `1` | Live draft decode genişliği; düşük gecikme için ADR-0031 default |
 | `STT_FINAL_BEAM_SIZE` | `1` | Final revision decode genişliği; ölçümlü A/B için env ile artırılabilir |
 | `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct stream final pass'te Whisper VAD; default kapalı çünkü RMS gate zaten aktif sesi seçer |
+| `STT_STREAM_LIVE_WORKER_BACKEND` | `process` | Draft modeli native/GPU hang durumunda terminate/kill edilebilen supervised child process'te çalıştırır |
+| `STT_STREAM_LIVE_TIMEOUT_SEC` | `5` | Draft decode için hard deadline; aşımda child process recycle edilir |
 | `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
 | `STT_SILENCE_COMMIT_SEC` | `0.7` | Konuşma bitince final pass'i forced timeout beklemeden tetikleme |
 | `STT_FORCED_COMMIT_SEC` | `5.0` | Uzun konuşmada bounded finalization safety |
@@ -100,11 +102,19 @@ Bu ayarlar `app.core.config.Settings` içinde bounded Pydantic alanlarıdır:
 `STT_TAIL_OVERLAP_SEC < STT_FINAL_WINDOW_SEC` guard'ları boot sırasında
 geçersiz rollout'u durdurur.
 
+`ready` ayrıca `capabilities=["eof"]` ve `supports_eof=true` ilan eder. İstemci
+ses göndermeyi bitirdiğinde yalnızca `{"type":"eof"}` metin kontrolünü bir kez
+gönderir. Sunucu önce `eof_ack`, buffer'da kalan konuşma varsa son `final`
+event(ler)ini ve bütün final gönderimleri bittikten sonra `drained` üretir.
+Bilinmeyen metin, ikinci EOF ve EOF sonrası ses paketi bağlantıyı fail-closed
+sonlandırır; disconnect veya terminal final-model hatası `drained` üretemez.
+
 Transcript-free canlı stream smoke:
 
 ```bash
 python scripts/live_stream_smoke.py \
-  --url ws://127.0.0.1:18220/ws/stream \
+  --url 'ws://127.0.0.1:18220/ws/stream?protocol=source-ranges-v1' \
+  --final-wait-sec 90 \
   --wav tests/fixtures/sample-tr-cv17-001.wav
 ```
 

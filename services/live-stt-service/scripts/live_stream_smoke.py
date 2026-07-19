@@ -11,16 +11,20 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
+import re
 import sys
 import time
 import wave
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import parse_qsl, urlparse, urlunsplit
 
 import numpy as np
 import websockets
 from numpy.typing import NDArray
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVICE_ROOT) not in sys.path:
@@ -30,15 +34,140 @@ TARGET_SAMPLE_RATE = 16_000
 DEFAULT_FRAME_MS = 200
 DEFAULT_TAIL_SILENCE_SEC = 1.2
 DEFAULT_TIMEOUT_SEC = 90.0
+DEFAULT_FINAL_WAIT_SEC = 90.0
 DEFAULT_MIN_FINAL_WORD_COVERAGE = 0.5
 DEFAULT_MIN_PARTIAL_EVENTS = 1
 DEFAULT_MIN_FINAL_EVENTS = 1
 DEFAULT_MAX_TRANSCRIPT_GAP_MS = 6000
+STREAM_PROTOCOL = "source-ranges-v1"
+READY_CAPABILITIES = ["eof", STREAM_PROTOCOL]
+PARTIAL_EVENT_KEYS = {
+    "type",
+    "seq",
+    "confirmed",
+    "tentative",
+    "elapsed_ms",
+    "rms",
+    "source",
+}
+FINAL_EVENT_KEYS = {
+    "type",
+    "seq",
+    "text",
+    "reason",
+    "elapsed_ms",
+    "rms",
+    "source_start_sample",
+    "source_end_sample",
+}
+FINAL_REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 AudioArray = NDArray[np.float32]
 
 
 class SmokeError(RuntimeError):
     """Expected smoke failure with a redacted message."""
+
+
+def validate_stream_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+        raise SmokeError("stream URL must be an absolute ws/wss URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise SmokeError("stream URL must not contain userinfo")
+    if parse_qsl(parsed.query, keep_blank_values=True) != [("protocol", STREAM_PROTOCOL)]:
+        raise SmokeError(f"stream URL must negotiate protocol={STREAM_PROTOCOL}")
+
+
+def redacted_stream_url(value: str) -> str:
+    parsed = urlparse(value)
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def validate_ready_event(event: dict[str, Any]) -> None:
+    expected_terminal_timeout_ms = event.get("terminal_timeout_ms")
+    if (
+        event.get("type") != "ready"
+        or event.get("sample_rate") != TARGET_SAMPLE_RATE
+        or event.get("partial_mode") != "stable-v1"
+        or event.get("protocol") != STREAM_PROTOCOL
+        or event.get("capabilities") != READY_CAPABILITIES
+        or event.get("supports_eof") is not True
+        or not isinstance(event.get("live_model"), str)
+        or not event.get("live_model")
+        or not isinstance(event.get("final_model"), str)
+        or not event.get("final_model")
+        or isinstance(expected_terminal_timeout_ms, bool)
+        or not isinstance(expected_terminal_timeout_ms, int)
+        or not 1_000 <= expected_terminal_timeout_ms <= 120_000
+    ):
+        raise SmokeError("ready event does not satisfy source-ranges-v1 contract")
+
+
+def _is_non_negative_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _is_non_negative_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int | float)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
+
+
+def validate_transcript_event(
+    event: dict[str, Any],
+    *,
+    cumulative_samples_sent: int,
+    previous_final_seq: int | None,
+    previous_final_source_end: int | None = None,
+) -> None:
+    event_type = event.get("type")
+    if event_type == "partial":
+        valid = (
+            set(event) == PARTIAL_EVENT_KEYS
+            and _is_non_negative_int(event.get("seq"))
+            and isinstance(event.get("confirmed"), str)
+            and isinstance(event.get("tentative"), str)
+            and _is_non_negative_int(event.get("elapsed_ms"))
+            and _is_non_negative_number(event.get("rms"))
+            and isinstance(event.get("source"), str)
+            and bool(event.get("source"))
+        )
+    elif event_type == "final":
+        sequence = event.get("seq")
+        source_start = event.get("source_start_sample")
+        source_end = event.get("source_end_sample")
+        reason = event.get("reason")
+        valid = (
+            set(event) == FINAL_EVENT_KEYS
+            and _is_non_negative_int(sequence)
+            and (previous_final_seq is None or int(cast(int, sequence)) > previous_final_seq)
+            and isinstance(event.get("text"), str)
+            and bool(str(event.get("text", "")).strip())
+            and isinstance(reason, str)
+            and FINAL_REASON_RE.fullmatch(reason) is not None
+            and _is_non_negative_int(event.get("elapsed_ms"))
+            and _is_non_negative_number(event.get("rms"))
+            and _is_non_negative_int(source_start)
+            and _is_non_negative_int(source_end)
+            and int(cast(int, source_end)) > int(cast(int, source_start))
+            and (
+                previous_final_source_end is None
+                or int(cast(int, source_end)) > previous_final_source_end
+            )
+            and int(cast(int, source_end)) <= cumulative_samples_sent
+        )
+    else:
+        valid = False
+
+    if not valid:
+        raise SmokeError(f"{event_type or 'unknown'} event violates source-ranges-v1 contract")
 
 
 def _word_count(text: str) -> int:
@@ -81,9 +210,9 @@ def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> Audio
         frames = wav.readframes(wav.getnframes())
 
     if channels < 1:
-        raise SmokeError(f"{path} has no audio channels")
+        raise SmokeError("audio fixture has no channels")
     if sample_width != 2:
-        raise SmokeError(f"{path} must be PCM16 WAV; sample_width={sample_width}")
+        raise SmokeError("audio fixture must be PCM16 WAV")
 
     pcm = np.frombuffer(frames, dtype="<i2").astype(np.float32)
     if channels > 1:
@@ -94,7 +223,7 @@ def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> Audio
         return audio
 
     if source_rate <= 0:
-        raise SmokeError(f"{path} has invalid sample rate {source_rate}")
+        raise SmokeError("audio fixture has an invalid sample rate")
     duration = audio.shape[0] / source_rate
     target_len = max(1, int(round(duration * sample_rate)))
     source_x = np.linspace(0.0, duration, num=audio.shape[0], endpoint=False)
@@ -120,11 +249,11 @@ def resolve_reference_text(wav_path: Path, value: str | None) -> Path | None:
 
 def reference_metadata(path: Path | None) -> dict[str, Any]:
     if path is None:
-        return {"path": None, "text_sha256_12": None, "words": None}
+        return {"artifact_id_sha256_12": None, "text_sha256_12": None, "words": None}
 
     text = path.read_text(encoding="utf-8").strip()
     return {
-        "path": str(path),
+        "artifact_id_sha256_12": text_digest(path.name),
         "text_sha256_12": text_digest(text),
         "words": _word_count(text),
     }
@@ -149,6 +278,9 @@ def redacted_transcript_event(event: dict[str, Any], received_at_ms: int) -> dic
         result["elapsed_ms"] = event.get("elapsed_ms")
     if "rms" in event:
         result["rms"] = event.get("rms")
+    if event_type == "final":
+        result["source_start_sample"] = event.get("source_start_sample")
+        result["source_end_sample"] = event.get("source_end_sample")
     if text:
         result.update(
             {
@@ -170,12 +302,14 @@ def build_summary(
     loading_events: list[str],
     ready_at: float | None,
     transcript_events: list[dict[str, Any]],
+    terminal_events: list[str],
     errors: list[str],
     reference_text_path: Path | None = None,
     min_final_word_coverage: float = DEFAULT_MIN_FINAL_WORD_COVERAGE,
     min_partial_events: int = DEFAULT_MIN_PARTIAL_EVENTS,
     min_final_events: int = DEFAULT_MIN_FINAL_EVENTS,
     max_transcript_gap_ms: int | None = DEFAULT_MAX_TRANSCRIPT_GAP_MS,
+    streamed_samples: int | None = None,
 ) -> dict[str, Any]:
     final_events = [event for event in transcript_events if event["type"] == "final"]
     partial_events = [event for event in transcript_events if event["type"] == "partial"]
@@ -195,6 +329,8 @@ def build_summary(
         failures.append("ready_missing")
     if errors:
         failures.append("error_events_present")
+    if terminal_events != ["eof_ack", "drained"]:
+        failures.append("terminal_sequence_invalid")
     if len(final_events) < min_final_events:
         failures.append("final_event_count_below_min")
     if len(partial_events) < min_partial_events:
@@ -210,15 +346,19 @@ def build_summary(
     ):
         failures.append("transcript_event_gap_above_max")
 
+    effective_streamed_samples = audio_samples if streamed_samples is None else streamed_samples
+
     return {
         "schema": "platform-ai.live-stt.stream-smoke.v1",
         "ok": not failures,
-        "url": url,
+        "url": redacted_stream_url(url),
         "fixture": {
-            "path": str(wav_path),
+            "artifact_id_sha256_12": text_digest(wav_path.name),
             "audio_sha256_12": bytes_digest(wav_path.read_bytes()),
             "duration_ms": int(audio_samples / TARGET_SAMPLE_RATE * 1000),
             "sample_rate": TARGET_SAMPLE_RATE,
+            "streamed_samples": effective_streamed_samples,
+            "streamed_duration_ms": int(effective_streamed_samples / TARGET_SAMPLE_RATE * 1000),
         },
         "reference": reference,
         "latency": {
@@ -234,6 +374,7 @@ def build_summary(
             "final_hallucination_count": final_hallucination_count,
             "error_count": len(errors),
             "max_transcript_gap_ms": max_gap_ms,
+            "terminal_sequence": terminal_events,
         },
         "coverage": {
             "final_words": final_word_count,
@@ -262,6 +403,7 @@ def final_event_count(transcript_events: list[dict[str, Any]]) -> int:
 
 
 async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
+    validate_stream_url(args.url)
     wav_path = Path(args.wav).expanduser().resolve()
     reference_text_path = resolve_reference_text(wav_path, args.reference_text)
     audio = load_wav_float32(wav_path)
@@ -275,8 +417,13 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     started_at = time.perf_counter()
     loading_events: list[str] = []
     transcript_events: list[dict[str, Any]] = []
+    terminal_events: list[str] = []
     errors: list[str] = []
     ready_at: float | None = None
+    samples_sent = 0
+    last_final_seq: int | None = None
+    last_final_source_end: int | None = None
+    eof_sent = asyncio.Event()
 
     async with websockets.connect(args.url, open_timeout=args.timeout_sec) as websocket:
         while ready_at is None:
@@ -284,40 +431,95 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             event_type = event.get("type")
             if event_type == "loading":
                 stage = event.get("stage", "-")
+                if stage not in {"live_model", "final_model"}:
+                    raise SmokeError("loading event has an invalid stage")
                 loading_events.append(f"loading:{stage}")
             elif event_type == "ready":
+                validate_ready_event(event)
                 ready_at = time.perf_counter()
             elif event_type == "error":
-                errors.append(str(event.get("msg", "error")))
+                errors.append("upstream_error")
                 break
 
         if ready_at is not None:
 
             async def receiver() -> None:
+                nonlocal last_final_seq, last_final_source_end
+                terminal_state = "streaming"
+
                 while True:
-                    event = json.loads(await websocket.recv())
+                    try:
+                        event = json.loads(await websocket.recv())
+                    except ConnectionClosedOK as exc:
+                        raise SmokeError("stream closed before drained") from exc
+                    except ConnectionClosed as exc:
+                        raise SmokeError("stream closed uncleanly") from exc
                     received_at_ms = int((time.perf_counter() - started_at) * 1000)
                     event_type = event.get("type")
                     if event_type in {"partial", "final"}:
+                        if terminal_state == "acked" and event_type == "partial":
+                            raise SmokeError("partial event received after eof_ack")
+                        validate_transcript_event(
+                            event,
+                            cumulative_samples_sent=samples_sent,
+                            previous_final_seq=last_final_seq,
+                            previous_final_source_end=last_final_source_end,
+                        )
                         transcript_events.append(redacted_transcript_event(event, received_at_ms))
+                        if event_type == "final":
+                            last_final_seq = int(cast(int, event["seq"]))
+                            last_final_source_end = int(cast(int, event["source_end_sample"]))
+                    elif event_type == "eof_ack":
+                        if not eof_sent.is_set() or terminal_state != "streaming":
+                            raise SmokeError("eof_ack is not caused by local eof")
+                        terminal_state = "acked"
+                        terminal_events.append("eof_ack")
+                    elif event_type == "drained":
+                        if not eof_sent.is_set() or terminal_state != "acked":
+                            raise SmokeError("drained received before valid eof_ack")
+                        terminal_state = "drained"
+                        terminal_events.append("drained")
+                        try:
+                            trailing = await websocket.recv()
+                        except ConnectionClosedOK as exc:
+                            if exc.rcvd is None or exc.rcvd.code != 1000:
+                                raise SmokeError(
+                                    "stream did not close with code 1000 after drained"
+                                ) from exc
+                            return
+                        except ConnectionClosed as exc:
+                            raise SmokeError("stream closed uncleanly after drained") from exc
+                        raise SmokeError(
+                            f"trailing event received after drained: {type(trailing).__name__}"
+                        )
                     elif event_type == "error":
-                        errors.append(str(event.get("msg", "error")))
+                        errors.append("upstream_error")
+                        return
+                    else:
+                        raise SmokeError("unexpected event type in stream state machine")
 
             receiver_task = asyncio.create_task(receiver())
-            for frame in frames:
-                await websocket.send(frame.astype(np.float32).tobytes())
-                await asyncio.sleep(args.frame_ms / 1000)
-
-            deadline = time.perf_counter() + args.final_wait_sec
-            while time.perf_counter() < deadline:
-                if final_event_count(transcript_events) >= args.min_final_events:
-                    break
-                await asyncio.sleep(0.05)
-            receiver_task.cancel()
             try:
-                await receiver_task
-            except asyncio.CancelledError:
-                pass
+                for frame in frames:
+                    frame_samples = int(frame.shape[0])
+                    samples_sent += frame_samples
+                    try:
+                        await websocket.send(frame.astype(np.float32).tobytes())
+                    except Exception:
+                        samples_sent -= frame_samples
+                        raise
+                    await asyncio.sleep(args.frame_ms / 1000)
+
+                try:
+                    await websocket.send(json.dumps({"type": "eof"}, separators=(",", ":")))
+                    eof_sent.set()
+                    await asyncio.wait_for(receiver_task, timeout=args.final_wait_sec)
+                except TimeoutError:
+                    errors.append("terminal_drain_timeout")
+            finally:
+                if not receiver_task.done():
+                    receiver_task.cancel()
+                await asyncio.gather(receiver_task, return_exceptions=True)
 
     return build_summary(
         url=args.url,
@@ -327,6 +529,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         loading_events=loading_events,
         ready_at=ready_at,
         transcript_events=transcript_events,
+        terminal_events=terminal_events,
         errors=errors,
         reference_text_path=reference_text_path,
         min_final_word_coverage=args.min_final_word_coverage,
@@ -335,12 +538,16 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         max_transcript_gap_ms=(
             args.max_transcript_gap_ms if args.max_transcript_gap_ms > 0 else None
         ),
+        streamed_samples=samples_sent,
     )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run transcript-free /ws/stream smoke")
-    parser.add_argument("--url", default="ws://127.0.0.1:18220/ws/stream")
+    parser.add_argument(
+        "--url",
+        default="ws://127.0.0.1:18220/ws/stream?protocol=source-ranges-v1",
+    )
     parser.add_argument(
         "--wav",
         default=str(Path(__file__).resolve().parents[1] / "tests/fixtures/sample-tr-cv17-001.wav"),
@@ -348,7 +555,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--frame-ms", type=int, default=DEFAULT_FRAME_MS)
     parser.add_argument("--tail-silence-sec", type=float, default=DEFAULT_TAIL_SILENCE_SEC)
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
-    parser.add_argument("--final-wait-sec", type=float, default=10.0)
+    parser.add_argument("--final-wait-sec", type=float, default=DEFAULT_FINAL_WAIT_SEC)
     parser.add_argument(
         "--reference-text",
         default=None,
@@ -372,7 +579,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    summary = asyncio.run(run_smoke(args))
+    try:
+        summary = asyncio.run(run_smoke(args))
+    except SmokeError:
+        print(
+            json.dumps(
+                {
+                    "schema": "platform-ai.live-stt.stream-smoke.error.v1",
+                    "ok": False,
+                    "error_code": "smoke_contract_failed",
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 1
+    except Exception:  # noqa: BLE001 - CLI boundary must never emit raw traceback/evidence
+        print(
+            json.dumps(
+                {
+                    "schema": "platform-ai.live-stt.stream-smoke.error.v1",
+                    "ok": False,
+                    "error_code": "smoke_internal_failed",
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 1
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if summary["ok"] else 1
 
