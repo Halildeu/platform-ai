@@ -606,6 +606,18 @@ function Assert-MeetingAiKeyring {
     }
 }
 
+function Clear-MeetingAiManagedProcessEnvironment {
+    $schema = Get-MeetingAiConfigSchema
+    foreach ($name in $schema.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        $secretTarget = $schema[$name].SecretTarget
+        if (-not [string]::IsNullOrWhiteSpace($secretTarget)) {
+            [Environment]::SetEnvironmentVariable($secretTarget, $null, "Process")
+        }
+    }
+    Clear-MeetingAiRuntimeTlsKey
+}
+
 function Import-MeetingAiRuntimeEnvironment {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -624,14 +636,7 @@ function Import-MeetingAiRuntimeEnvironment {
     # managed key first so an enabled-to-disabled reload cannot retain a
     # decrypted credential or stale permit binding in process memory.
     $schema = Get-MeetingAiConfigSchema
-    foreach ($name in $schema.Keys) {
-        [Environment]::SetEnvironmentVariable($name, $null, "Process")
-        $secretTarget = $schema[$name].SecretTarget
-        if (-not [string]::IsNullOrWhiteSpace($secretTarget)) {
-            [Environment]::SetEnvironmentVariable($secretTarget, $null, "Process")
-        }
-    }
-    Clear-MeetingAiRuntimeTlsKey
+    Clear-MeetingAiManagedProcessEnvironment
 
     $resolvedSecrets = @{}
     if ($values["MAI_INGESTION_ENABLED"].ToLowerInvariant() -eq "true") {
@@ -712,27 +717,19 @@ function Get-MeetingAiFileSha256 {
     }
 }
 
-function Assert-TranscriptReadyPreEnablePermit {
+function Assert-TranscriptReadyPermitFile {
     param(
+        [Parameter(Mandatory = $true)][string]$PermitPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedGitopsCommit,
+        [Parameter(Mandatory = $true)][string]$ExpectedPolicySha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedProducerImageDigest,
         [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [Parameter(Mandatory = $true)][string]$StartupScriptPath
+        [Parameter(Mandatory = $true)][string]$StartupScriptPath,
+        [ValidateSet("test", "stage", "prod")][string]$AppEnv
     )
 
-    if ($env:MAI_READY_CONSUMER_ENABLED -ne "true") { return }
-
-    foreach ($name in @(
-            "MAI_READY_PRE_ENABLE_PERMIT_PATH",
-            "MAI_READY_EXPECTED_GITOPS_COMMIT",
-            "MAI_READY_EXPECTED_POLICY_SHA256",
-            "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"
-        )) {
-        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-            throw "Transcript-ready startup permit binding is incomplete."
-        }
-    }
-
     $permitPath = Assert-MeetingAiRuntimePath `
-        -Path $env:MAI_READY_PRE_ENABLE_PERMIT_PATH `
+        -Path $PermitPath `
         -Purpose "Transcript-ready pre-enable permit"
     Assert-MeetingAiAcl -Path $permitPath
     $bytes = [IO.File]::ReadAllBytes($permitPath)
@@ -791,14 +788,13 @@ function Assert-TranscriptReadyPreEnablePermit {
 
     $binding = $permit.binding
     if ($null -eq $binding -or
-        $binding.expectedGitopsCommit -ne $env:MAI_READY_EXPECTED_GITOPS_COMMIT -or
-        $binding.policySha256 -ne $env:MAI_READY_EXPECTED_POLICY_SHA256) {
+        $binding.expectedGitopsCommit -ne $ExpectedGitopsCommit -or
+        $binding.policySha256 -ne $ExpectedPolicySha256) {
         throw "Transcript-ready pre-enable permit GitOps binding does not match."
     }
     $producer = $binding.producerCapability
     if ($null -eq $producer -or
-        $producer.transcriptImageDigest -ne
-            $env:MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST) {
+        $producer.transcriptImageDigest -ne $ExpectedProducerImageDigest) {
         throw "Transcript-ready pre-enable permit producer binding does not match."
     }
 
@@ -806,6 +802,27 @@ function Assert-TranscriptReadyPreEnablePermit {
     $repoCommit = (& git -C $repoFull rev-parse HEAD 2>$null).Trim().ToLowerInvariant()
     if ($LASTEXITCODE -ne 0 -or $repoCommit -notmatch '^[0-9a-f]{40}$') {
         throw "Platform-ai repository identity could not be read."
+    }
+    & git -C $repoFull diff --quiet --cached -- 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Platform-ai repository worktree is not clean."
+    }
+    & git -C $repoFull diff --quiet -- 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Platform-ai repository worktree is not clean."
+    }
+    $untracked = @(& git -C $repoFull ls-files --others --exclude-standard -- `
+        "deploy/gpu-host" "services/meeting-ai-service" 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Platform-ai repository worktree identity could not be verified."
+    }
+    if ($untracked.Count -ne 0) {
+        throw "Platform-ai repository worktree contains untracked deployed content."
+    }
+    if ($AppEnv -in @("stage", "prod") -and
+        (Test-Path -LiteralPath (Join-Path $repoFull `
+            "services\meeting-ai-service\.env") -PathType Leaf)) {
+        throw "Deployed meeting-ai repository contains a forbidden dotenv source."
     }
     $startupFull = Resolve-FixedLocalPath `
         -Path $StartupScriptPath -Purpose "Meeting-ai startup script"
@@ -818,6 +835,36 @@ function Assert-TranscriptReadyPreEnablePermit {
         $hostGuard.startupScriptSha256 -ne $startupSha256) {
         throw "Transcript-ready pre-enable permit host binding does not match."
     }
+}
+
+function Assert-TranscriptReadyPreEnablePermit {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$StartupScriptPath
+    )
+
+    if ($env:MAI_READY_CONSUMER_ENABLED -ne "true") { return }
+
+    foreach ($name in @(
+            "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+            "MAI_READY_EXPECTED_GITOPS_COMMIT",
+            "MAI_READY_EXPECTED_POLICY_SHA256",
+            "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST",
+            "MAI_APP_ENV"
+        )) {
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+            throw "Transcript-ready startup permit binding is incomplete."
+        }
+    }
+
+    [void](Assert-TranscriptReadyPermitFile `
+        -PermitPath $env:MAI_READY_PRE_ENABLE_PERMIT_PATH `
+        -ExpectedGitopsCommit $env:MAI_READY_EXPECTED_GITOPS_COMMIT `
+        -ExpectedPolicySha256 $env:MAI_READY_EXPECTED_POLICY_SHA256 `
+        -ExpectedProducerImageDigest $env:MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST `
+        -RepoRoot $RepoRoot `
+        -StartupScriptPath $StartupScriptPath `
+        -AppEnv $env:MAI_APP_ENV)
 }
 
 function Get-MeetingAiRuntimeTlsKeyPath {

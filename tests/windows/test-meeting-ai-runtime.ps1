@@ -31,6 +31,12 @@ $permitSource = Join-Path $env:RUNNER_TEMP "transcript-ready-pre-enable.json"
 $expectedGitopsCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 $expectedPolicySha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 $expectedProducerDigest = "sha256:" + (("c" * 64) -join "")
+$customReadyStream = "meeting:events:ci-custom"
+$customReadyGroup = "meeting-ai-ready-ci-custom"
+$customAnalysisSpec = "meeting-intelligence-ci-custom"
+$customTranscriptClientId = "meeting-ai-ci-custom"
+$previousCi = $env:CI
+$env:CI = "true"
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -51,6 +57,16 @@ function Assert-ThrowsLike {
         return
     }
     throw "Expected an exception containing '$Expected'."
+}
+
+function Write-FreshPermit {
+    param($Permit, [string]$Path)
+    $Permit["generatedAt"] = [DateTimeOffset]::UtcNow.ToString("o")
+    [IO.File]::WriteAllText(
+        $Path,
+        (($Permit | ConvertTo-Json -Depth 8) + "`n"),
+        (New-Object Text.UTF8Encoding($false))
+    )
 }
 
 try {
@@ -102,6 +118,20 @@ try {
     Assert-True ([string]::IsNullOrWhiteSpace(
         $env:MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI
     )) "DPAPI blob must not be exported to the child environment."
+
+    $env:MAI_INGESTION_ENABLED = "true"
+    $env:MAI_READY_CONSUMER_ENABLED = "true"
+    & $startScript `
+        -RepoRoot $repoRoot `
+        -Backend "mock" `
+        -AppEnv "test" `
+        -RuntimeConfigPath (Join-Path $runtimeRoot "missing-startup.env") `
+        -PythonExe "not-invoked.exe" `
+        -ValidateConfigurationOnly
+    Assert-True ($env:MAI_INGESTION_ENABLED -eq "false") `
+        "Missing test config must clear inherited ingestion enablement."
+    Assert-True ($env:MAI_READY_CONSUMER_ENABLED -eq "false") `
+        "Missing test config must clear inherited ready-consumer enablement."
 
     New-Item -ItemType Directory -Path $tlsSourceRoot -Force | Out-Null
     [IO.File]::WriteAllText(
@@ -177,21 +207,21 @@ try {
             }
         }
     }
-    [IO.File]::WriteAllText(
-        $permitSource,
-        (($permit | ConvertTo-Json -Depth 8) + "`n"),
-        (New-Object Text.UTF8Encoding($false))
-    )
+    Write-FreshPermit -Permit $permit -Path $permitSource
 
     & $configureScript `
         -ReadyConsumerEnabled "true" `
         -RuntimeAppEnv "test" `
         -ReadyRedisUrl $secureReadyRedisUrl `
+        -ReadyRedisStream $customReadyStream `
+        -ReadyRedisGroup $customReadyGroup `
         -ReadyProducerReplayHorizonSec 2592000 `
+        -AnalysisSpecVersion $customAnalysisSpec `
         -TranscriptServiceBaseUrl "https://transcript.internal.example" `
         -TranscriptServiceSnapshotPathTemplate "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}" `
         -TranscriptServiceCapabilityPathTemplate "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability" `
         -TranscriptServiceTokenUrl "https://auth.internal.example/oauth2/token" `
+        -TranscriptServiceClientId $customTranscriptClientId `
         -TranscriptServiceClientSecret $secureTranscriptCredential `
         -ReadyPermitSourcePath $permitSource `
         -ExpectedGitopsCommit $expectedGitopsCommit `
@@ -226,6 +256,81 @@ try {
         -StartupScriptPath $startScript
 
     $installedPermit = $env:MAI_READY_PRE_ENABLE_PERMIT_PATH
+    Assert-ThrowsLike {
+        & $startScript `
+            -RepoRoot $repoRoot `
+            -Backend "mock" `
+            -AppEnv "stage" `
+            -RuntimeConfigPath $configPath `
+            -PythonExe "not-invoked.exe" `
+            -ValidateConfigurationOnly
+    } "environment does not match the launcher"
+    & $startScript `
+        -RepoRoot $repoRoot `
+        -Backend "mock" `
+        -AppEnv "test" `
+        -RuntimeConfigPath $configPath `
+        -PythonExe "not-invoked.exe" `
+        -ValidateConfigurationOnly
+
+    $configPyPath = Join-Path $repoRoot `
+        "services\meeting-ai-service\app\core\config.py"
+    $configPyBytes = [IO.File]::ReadAllBytes($configPyPath)
+    try {
+        [IO.File]::AppendAllText(
+            $configPyPath,
+            "`n# ci tracked dirty probe`n",
+            (New-Object Text.UTF8Encoding($false))
+        )
+        Assert-ThrowsLike {
+            Assert-TranscriptReadyPreEnablePermit `
+                -RepoRoot $repoRoot `
+                -StartupScriptPath $startScript
+        } "worktree is not clean"
+    } finally {
+        [IO.File]::WriteAllBytes($configPyPath, $configPyBytes)
+    }
+
+    $untrackedProbe = Join-Path $repoRoot `
+        "services\meeting-ai-service\app\ci-untracked-probe.py"
+    try {
+        [IO.File]::WriteAllText(
+            $untrackedProbe,
+            "raise RuntimeError('must never execute')`n",
+            (New-Object Text.UTF8Encoding($false))
+        )
+        Assert-ThrowsLike {
+            Assert-TranscriptReadyPreEnablePermit `
+                -RepoRoot $repoRoot `
+                -StartupScriptPath $startScript
+        } "untracked deployed content"
+    } finally {
+        if (Test-Path -LiteralPath $untrackedProbe) {
+            Remove-Item -LiteralPath $untrackedProbe -Force
+        }
+    }
+
+    $dotenvProbe = Join-Path $repoRoot "services\meeting-ai-service\.env"
+    $env:MAI_APP_ENV = "stage"
+    try {
+        [IO.File]::WriteAllText(
+            $dotenvProbe,
+            "MAI_READY_CONSUMER_ENABLED=true`n",
+            (New-Object Text.UTF8Encoding($false))
+        )
+        Assert-ThrowsLike {
+            Assert-TranscriptReadyPreEnablePermit `
+                -RepoRoot $repoRoot `
+                -StartupScriptPath $startScript
+        } "forbidden dotenv source"
+    } finally {
+        if (Test-Path -LiteralPath $dotenvProbe) {
+            Remove-Item -LiteralPath $dotenvProbe -Force
+        }
+        $env:MAI_APP_ENV = "test"
+    }
+
+    $freshInstalledPermitContent = [IO.File]::ReadAllText($installedPermit)
     $stalePermit = (($permit | ConvertTo-Json -Depth 8) | ConvertFrom-Json)
     $stalePermit.generatedAt = [DateTimeOffset]::UtcNow.AddMinutes(-20).ToString("o")
     Write-MeetingAiSecretFileAtomic `
@@ -236,9 +341,75 @@ try {
             -RepoRoot $repoRoot `
             -StartupScriptPath $startScript
     } "outside the 900 second startup window"
+    $configBeforeRejectedMaintenance = [IO.File]::ReadAllBytes($configPath)
+    Assert-ThrowsLike {
+        & $configureScript `
+            -RotateEncryptionKey `
+            -StorePath $storePath `
+            -ConfigPath $configPath `
+            -Confirm:$false
+    } "requires a fresh permit source"
+    Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq
+        [Convert]::ToBase64String($configBeforeRejectedMaintenance)) `
+        "Rejected enabled maintenance must not mutate the config."
     Write-MeetingAiSecretFileAtomic `
         -Path $installedPermit `
-        -Content (($permit | ConvertTo-Json -Depth 8) + "`n")
+        -Content $freshInstalledPermitContent
+
+    Write-FreshPermit -Permit $permit -Path $permitSource
+    $permitFilesBeforeFailure = @(Get-ChildItem `
+        -LiteralPath (Split-Path -Parent $installedPermit) -File)
+    $configBeforeInjectedFailure = [IO.File]::ReadAllBytes($configPath)
+    $env:PLATFORM_AI_TEST_INJECT_MEETING_AI_CONFIG_WRITE_FAILURE = "1"
+    try {
+        Assert-ThrowsLike {
+            & $configureScript `
+                -RotateEncryptionKey `
+                -ReadyPermitSourcePath $permitSource `
+                -StorePath $storePath `
+                -ConfigPath $configPath `
+                -Confirm:$false
+        } "TEST_INJECTED_MEETING_AI_CONFIG_WRITE_FAILURE"
+    } finally {
+        Remove-Item Env:PLATFORM_AI_TEST_INJECT_MEETING_AI_CONFIG_WRITE_FAILURE `
+            -ErrorAction SilentlyContinue
+    }
+    Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq
+        [Convert]::ToBase64String($configBeforeInjectedFailure)) `
+        "Injected write failure must preserve the previous config."
+    Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
+        "Injected write failure must preserve the previous permit."
+    $permitFilesAfterFailure = @(Get-ChildItem `
+        -LiteralPath (Split-Path -Parent $installedPermit) -File)
+    Assert-True ($permitFilesAfterFailure.Count -eq $permitFilesBeforeFailure.Count) `
+        "Injected write failure must clean the staged permit."
+
+    Start-Sleep -Milliseconds 20
+    Write-FreshPermit -Permit $permit -Path $permitSource
+    $oldPermit = $installedPermit
+    & $configureScript `
+        -RotateEncryptionKey `
+        -ReadyPermitSourcePath $permitSource `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
+    $rotatedReadyValues = Read-MeetingAiConfigFile -Path $configPath
+    Assert-True ($rotatedReadyValues["MAI_READY_REDIS_STREAM"] -eq $customReadyStream) `
+        "Ready Redis stream must survive enabled maintenance."
+    Assert-True ($rotatedReadyValues["MAI_READY_REDIS_GROUP"] -eq $customReadyGroup) `
+        "Ready Redis group must survive enabled maintenance."
+    Assert-True ($rotatedReadyValues["MAI_ANALYSIS_SPEC_VERSION"] -eq `
+        $customAnalysisSpec) "Analysis spec must survive enabled maintenance."
+    Assert-True ($rotatedReadyValues["MAI_TRANSCRIPT_SERVICE_CLIENT_ID"] -eq `
+        $customTranscriptClientId) `
+        "Transcript client identity must survive enabled maintenance."
+    $installedPermit = $rotatedReadyValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+    Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
+        "Successful enabled maintenance must activate the new permit."
+    if ($oldPermit -ne $installedPermit) {
+        Assert-True (-not (Test-Path -LiteralPath $oldPermit -PathType Leaf)) `
+            "Successful enabled maintenance must revoke the previous permit."
+    }
 
     & $configureScript `
         -ReadyConsumerEnabled "false" `
@@ -266,6 +437,11 @@ try {
         $env:MAI_READY_PRE_ENABLE_PERMIT_PATH
     )) "Ready permit binding must be cleared from process memory on rollback."
 
+    & $configureScript `
+        -RuntimeAppEnv "stage" `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
     Assert-ThrowsLike {
         & $startScript `
             -RepoRoot $startupProbeRoot `
@@ -350,6 +526,7 @@ try {
     $env:MAI_INGESTION_ENCRYPTION_KEYS_JSON = $null
     $env:MAI_READY_REDIS_URL = $null
     $env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET = $null
+    $env:CI = $previousCi
     $secureCredential.Dispose()
     $secureReadyRedisUrl.Dispose()
     $secureTranscriptCredential.Dispose()

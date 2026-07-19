@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from app.core import config as config_module
 from app.core.config import Settings
 
 
@@ -19,6 +20,49 @@ def test_defaults() -> None:
     assert s.request_timeout == 60
     assert s.ingestion_enabled is False
     assert s.ready_consumer_enabled is False
+
+
+def test_settings_never_load_dotenv_implicitly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "MAI_READY_CONSUMER_ENABLED=true\nMAI_BACKEND=ollama\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings()
+
+    assert settings.ready_consumer_enabled is False
+    assert settings.backend == "mock"
+
+
+def test_cached_settings_load_dotenv_only_for_explicit_local_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "MAI_BACKEND=ollama\nMAI_LOG_LEVEL=DOTENV_ONLY\n",
+        encoding="utf-8",
+    )
+
+    try:
+        monkeypatch.setenv("MAI_APP_ENV", "test")
+        config_module._settings = None
+        assert config_module.get_settings().backend == "ollama"
+
+        monkeypatch.setenv("MAI_APP_ENV", "stage")
+        monkeypatch.setenv("MAI_BACKEND", "ollama")
+        config_module._settings = None
+        settings = config_module.get_settings()
+        assert settings.app_env == "stage"
+        assert settings.backend == "ollama"
+        assert settings.log_level == "INFO"
+        assert settings.ready_consumer_enabled is False
+    finally:
+        config_module._settings = None
 
 
 def test_backend_pattern_rejects_unknown() -> None:

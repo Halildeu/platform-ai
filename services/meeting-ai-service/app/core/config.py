@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 from pathlib import Path
 from string import Formatter
 from typing import Literal
@@ -86,7 +87,6 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="MAI_",
-        env_file=".env",
         extra="ignore",
         protected_namespaces=("settings_",),
     )
@@ -486,5 +486,11 @@ def get_settings() -> Settings:
     """Cached settings singleton."""
     global _settings
     if _settings is None:
-        _settings = Settings()
+        # A deployed process must have one authoritative settings source. The
+        # GPU-host launcher sets MAI_APP_ENV explicitly and imports the
+        # DPAPI-backed runtime config before Python starts. Local dotenv loading
+        # is therefore opt-in and limited to an explicit dev/test process.
+        process_env = os.environ.get("MAI_APP_ENV", "dev").lower()
+        env_file = ".env" if process_env in {"dev", "test"} else None
+        _settings = Settings(_env_file=env_file)
     return _settings
