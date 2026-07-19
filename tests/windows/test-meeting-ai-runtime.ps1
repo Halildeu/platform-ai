@@ -352,7 +352,12 @@ try {
     }
 
     $dotenvProbe = Join-Path $repoRoot "services\meeting-ai-service\.env"
-    $env:MAI_APP_ENV = "stage"
+    $permitBeforeDotenvProbe = [IO.File]::ReadAllText($installedPermit)
+    $stagePermit = ($permitBeforeDotenvProbe | ConvertFrom-Json)
+    $stagePermit.binding.targetAppEnv = "stage"
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedPermit `
+        -Content (($stagePermit | ConvertTo-Json -Depth 8) + "`n")
     try {
         [IO.File]::WriteAllText(
             $dotenvProbe,
@@ -360,15 +365,22 @@ try {
             (New-Object Text.UTF8Encoding($false))
         )
         Assert-ThrowsLike {
-            Assert-TranscriptReadyPreEnablePermit `
+            Assert-TranscriptReadyPermitFile `
+                -PermitPath $installedPermit `
+                -ExpectedGitopsCommit $expectedGitopsCommit `
+                -ExpectedPolicySha256 $expectedPolicySha256 `
+                -ExpectedProducerImageDigest $expectedProducerDigest `
                 -RepoRoot $repoRoot `
-                -StartupScriptPath $startScript
+                -StartupScriptPath $startScript `
+                -AppEnv "stage"
         } "forbidden dotenv source"
     } finally {
         if (Test-Path -LiteralPath $dotenvProbe) {
             Remove-Item -LiteralPath $dotenvProbe -Force
         }
-        $env:MAI_APP_ENV = "test"
+        Write-MeetingAiSecretFileAtomic `
+            -Path $installedPermit `
+            -Content $permitBeforeDotenvProbe
     }
 
     $freshInstalledPermitContent = [IO.File]::ReadAllText($installedPermit)
