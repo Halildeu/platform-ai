@@ -276,6 +276,13 @@ try {
     } else {
         "false"
     }
+    $permitToRevoke = ""
+    if ($effectiveReadyEnabled -eq "false" -and $null -ne $existing -and
+        $existing.ContainsKey("MAI_READY_PRE_ENABLE_PERMIT_PATH")) {
+        $permitToRevoke = Assert-MeetingAiRuntimePath `
+            -Path $existing["MAI_READY_PRE_ENABLE_PERMIT_PATH"] `
+            -Purpose "Transcript-ready pre-enable permit"
+    }
     $readyConfig = [ordered]@{
         "MAI_READY_CONSUMER_ENABLED" = $effectiveReadyEnabled
     }
@@ -463,6 +470,10 @@ try {
 
     [void](Initialize-MeetingAiDirectory -Path (Split-Path -Parent $StorePath))
     Write-MeetingAiConfigAtomic -Path $ConfigPath -Content $content
+    if (-not [string]::IsNullOrWhiteSpace($permitToRevoke) -and
+        (Test-Path -LiteralPath $permitToRevoke -PathType Leaf)) {
+        Remove-Item -LiteralPath $permitToRevoke -Force
+    }
     Write-Host "meeting-ai runtime config written: $ConfigPath"
     Write-Host "active encryption key id: $activeKeyId"
     Write-Host "Restart task with schtasks.exe /End and /Run for platform-ai-meeting-ai."

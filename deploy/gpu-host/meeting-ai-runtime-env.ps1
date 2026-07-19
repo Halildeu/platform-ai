@@ -620,6 +620,19 @@ function Import-MeetingAiRuntimeEnvironment {
     $values = Read-MeetingAiConfigFile -Path $full
     Assert-MeetingAiConfigValues -Values $values
 
+    # A valid runtime config is authoritative for this process. Clear every
+    # managed key first so an enabled-to-disabled reload cannot retain a
+    # decrypted credential or stale permit binding in process memory.
+    $schema = Get-MeetingAiConfigSchema
+    foreach ($name in $schema.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        $secretTarget = $schema[$name].SecretTarget
+        if (-not [string]::IsNullOrWhiteSpace($secretTarget)) {
+            [Environment]::SetEnvironmentVariable($secretTarget, $null, "Process")
+        }
+    }
+    Clear-MeetingAiRuntimeTlsKey
+
     $resolvedSecrets = @{}
     if ($values["MAI_INGESTION_ENABLED"].ToLowerInvariant() -eq "true") {
         $resolvedSecrets["MAI_MEETING_SERVICE_CLIENT_SECRET"] =
@@ -670,7 +683,6 @@ function Import-MeetingAiRuntimeEnvironment {
         }
     }
 
-    $schema = Get-MeetingAiConfigSchema
     foreach ($name in $values.Keys) {
         if (-not [string]::IsNullOrWhiteSpace($schema[$name].SecretTarget)) { continue }
         [Environment]::SetEnvironmentVariable($name, $values[$name], "Process")

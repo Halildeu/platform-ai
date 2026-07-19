@@ -240,6 +240,32 @@ try {
         -Path $installedPermit `
         -Content (($permit | ConvertTo-Json -Depth 8) + "`n")
 
+    & $configureScript `
+        -ReadyConsumerEnabled "false" `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
+    $disabledConfigText = [IO.File]::ReadAllText($configPath)
+    Assert-True ($disabledConfigText.Contains("MAI_READY_CONSUMER_ENABLED=false")) `
+        "Ready consumer rollback must be explicitly disabled."
+    Assert-True (-not $disabledConfigText.Contains("MAI_READY_REDIS_URL_DPAPI=")) `
+        "Ready Redis DPAPI blob must be removed by rollback."
+    Assert-True (-not $disabledConfigText.Contains(
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI="
+    )) "Transcript-service DPAPI blob must be removed by rollback."
+    Assert-True (-not (Test-Path -LiteralPath $installedPermit -PathType Leaf)) `
+        "Ready consumer rollback must revoke the installed permit."
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
+        "Disabled ready consumer runtime config import must succeed."
+    Assert-True ([string]::IsNullOrWhiteSpace($env:MAI_READY_REDIS_URL)) `
+        "Ready Redis credential must be cleared from process memory on rollback."
+    Assert-True ([string]::IsNullOrWhiteSpace(
+        $env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET
+    )) "Transcript-service credential must be cleared from process memory on rollback."
+    Assert-True ([string]::IsNullOrWhiteSpace(
+        $env:MAI_READY_PRE_ENABLE_PERMIT_PATH
+    )) "Ready permit binding must be cleared from process memory on rollback."
+
     Assert-ThrowsLike {
         & $startScript `
             -RepoRoot $startupProbeRoot `
