@@ -109,7 +109,12 @@ def _is_non_negative_number(value: object) -> bool:
     )
 
 
-def validate_transcript_event(event: dict[str, Any]) -> None:
+def validate_transcript_event(
+    event: dict[str, Any],
+    *,
+    cumulative_samples_sent: int,
+    previous_final_seq: int | None,
+) -> None:
     event_type = event.get("type")
     if event_type == "partial":
         valid = (
@@ -123,12 +128,15 @@ def validate_transcript_event(event: dict[str, Any]) -> None:
             and bool(event.get("source"))
         )
     elif event_type == "final":
+        sequence = event.get("seq")
+        expected_sequence = 0 if previous_final_seq is None else previous_final_seq + 1
         source_start = event.get("source_start_sample")
         source_end = event.get("source_end_sample")
         reason = event.get("reason")
         valid = (
             set(event) == FINAL_EVENT_KEYS
-            and _is_non_negative_int(event.get("seq"))
+            and _is_non_negative_int(sequence)
+            and int(cast(int, sequence)) == expected_sequence
             and isinstance(event.get("text"), str)
             and bool(str(event.get("text", "")).strip())
             and isinstance(reason, str)
@@ -138,6 +146,7 @@ def validate_transcript_event(event: dict[str, Any]) -> None:
             and _is_non_negative_int(source_start)
             and _is_non_negative_int(source_end)
             and int(cast(int, source_end)) > int(cast(int, source_start))
+            and int(cast(int, source_end)) <= cumulative_samples_sent
         )
     else:
         valid = False
@@ -254,6 +263,9 @@ def redacted_transcript_event(event: dict[str, Any], received_at_ms: int) -> dic
         result["elapsed_ms"] = event.get("elapsed_ms")
     if "rms" in event:
         result["rms"] = event.get("rms")
+    if event_type == "final":
+        result["source_start_sample"] = event.get("source_start_sample")
+        result["source_end_sample"] = event.get("source_end_sample")
     if text:
         result.update(
             {
@@ -282,6 +294,7 @@ def build_summary(
     min_partial_events: int = DEFAULT_MIN_PARTIAL_EVENTS,
     min_final_events: int = DEFAULT_MIN_FINAL_EVENTS,
     max_transcript_gap_ms: int | None = DEFAULT_MAX_TRANSCRIPT_GAP_MS,
+    streamed_samples: int | None = None,
 ) -> dict[str, Any]:
     final_events = [event for event in transcript_events if event["type"] == "final"]
     partial_events = [event for event in transcript_events if event["type"] == "partial"]
@@ -318,6 +331,8 @@ def build_summary(
     ):
         failures.append("transcript_event_gap_above_max")
 
+    effective_streamed_samples = audio_samples if streamed_samples is None else streamed_samples
+
     return {
         "schema": "platform-ai.live-stt.stream-smoke.v1",
         "ok": not failures,
@@ -327,6 +342,8 @@ def build_summary(
             "audio_sha256_12": bytes_digest(wav_path.read_bytes()),
             "duration_ms": int(audio_samples / TARGET_SAMPLE_RATE * 1000),
             "sample_rate": TARGET_SAMPLE_RATE,
+            "streamed_samples": effective_streamed_samples,
+            "streamed_duration_ms": int(effective_streamed_samples / TARGET_SAMPLE_RATE * 1000),
         },
         "reference": reference,
         "latency": {
@@ -388,6 +405,8 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     terminal_events: list[str] = []
     errors: list[str] = []
     ready_at: float | None = None
+    samples_sent = 0
+    last_final_seq: int | None = None
 
     async with websockets.connect(args.url, open_timeout=args.timeout_sec) as websocket:
         while ready_at is None:
@@ -406,13 +425,21 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         if ready_at is not None:
 
             async def receiver() -> None:
+                nonlocal last_final_seq
+
                 while True:
                     event = json.loads(await websocket.recv())
                     received_at_ms = int((time.perf_counter() - started_at) * 1000)
                     event_type = event.get("type")
                     if event_type in {"partial", "final"}:
-                        validate_transcript_event(event)
+                        validate_transcript_event(
+                            event,
+                            cumulative_samples_sent=samples_sent,
+                            previous_final_seq=last_final_seq,
+                        )
                         transcript_events.append(redacted_transcript_event(event, received_at_ms))
+                        if event_type == "final":
+                            last_final_seq = int(cast(int, event["seq"]))
                     elif event_type in {"eof_ack", "drained"}:
                         terminal_events.append(str(event_type))
                         if event_type == "drained":
@@ -423,7 +450,13 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
 
             receiver_task = asyncio.create_task(receiver())
             for frame in frames:
-                await websocket.send(frame.astype(np.float32).tobytes())
+                frame_samples = int(frame.shape[0])
+                samples_sent += frame_samples
+                try:
+                    await websocket.send(frame.astype(np.float32).tobytes())
+                except Exception:
+                    samples_sent -= frame_samples
+                    raise
                 await asyncio.sleep(args.frame_ms / 1000)
 
             try:
@@ -452,6 +485,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         max_transcript_gap_ms=(
             args.max_transcript_gap_ms if args.max_transcript_gap_ms > 0 else None
         ),
+        streamed_samples=samples_sent,
     )
 
 

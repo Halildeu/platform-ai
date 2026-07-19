@@ -588,11 +588,7 @@ async def stream_endpoint(
             # hard worker deadline. Two kill joins are included because failure
             # cleanup must also complete before the socket can close fail-closed.
             "terminal_timeout_ms": math.ceil(
-                (
-                    settings.stream_final_timeout_sec
-                    + (2 * settings.worker_kill_grace_sec)
-                )
-                * 1_000
+                (settings.stream_final_timeout_sec + (2 * settings.worker_kill_grace_sec)) * 1_000
             ),
         }
     )
@@ -757,9 +753,7 @@ async def stream_endpoint(
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
         started = time.perf_counter()
         try:
-            if reason == "eof" and isinstance(
-                final_service, SupervisedFinalWhisperService
-            ):
+            if reason == "eof" and isinstance(final_service, SupervisedFinalWhisperService):
                 transcribe = final_service.transcribe_loaded_array
             else:
                 transcribe = final_service.transcribe_array
@@ -771,9 +765,7 @@ async def stream_endpoint(
             text = (
                 await final_call
                 if getattr(final_service, "hard_timeout", False)
-                else await asyncio.wait_for(
-                    final_call, timeout=settings.stream_final_timeout_sec
-                )
+                else await asyncio.wait_for(final_call, timeout=settings.stream_final_timeout_sec)
             )
         except Exception as exc:  # Keep non-terminal streams alive by falling back to draft.
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
@@ -826,20 +818,34 @@ async def stream_endpoint(
             "source_start_sample": source_start_sample,
             "source_end_sample": source_end_sample,
         }
-        if not defer_final:
-            await emit_final(final_payload)
-        last_final_text = text
-        recent_final_text = _append_recent_final_text(recent_final_text, text)
 
-        # A forced commit happens while speech is still continuous, so a small
-        # tail helps avoid boundary loss. A silence commit already has an
-        # utterance boundary; carrying tail there pollutes the next segment with
-        # the previous words and creates repeated alternatives in practice.
-        await advance_segment(
-            retain_tail=reason == "forced",
-            commit_end_sample=commit_end_sample,
-            committed_audio=audio,
-        )
+        async def publish_and_advance() -> None:
+            nonlocal last_final_text, recent_final_text
+
+            if not defer_final:
+                await emit_final(final_payload)
+            last_final_text = text
+            recent_final_text = _append_recent_final_text(recent_final_text, text)
+
+            # A forced commit happens while speech is still continuous, so a small
+            # tail helps avoid boundary loss. A silence commit already has an
+            # utterance boundary; carrying tail there pollutes the next segment with
+            # the previous words and creates repeated alternatives in practice.
+            await advance_segment(
+                retain_tail=reason == "forced",
+                commit_end_sample=commit_end_sample,
+                committed_audio=audio,
+            )
+
+        # Once a final reaches the transport it cannot be recalled. Complete the
+        # matching segment-state transition before propagating cancellation so EOF
+        # cannot finalize the same seq/source range a second time.
+        transition_task = asyncio.create_task(publish_and_advance())
+        try:
+            await asyncio.shield(transition_task)
+        except asyncio.CancelledError:
+            await transition_task
+            raise
         return final_payload
 
     async def infer_live_partial() -> None:

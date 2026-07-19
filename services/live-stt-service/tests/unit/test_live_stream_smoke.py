@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from types import ModuleType
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,7 +124,13 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
             return None
 
     monkeypatch.setattr(smoke.websockets, "connect", lambda *_args, **_kwargs: FakeConnection())
-    monkeypatch.setattr(smoke, "audio_frames", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        smoke,
+        "audio_frames",
+        lambda audio, **_kwargs: (
+            [np.asarray(audio[:16_000], dtype=np.float32)] if audio.size else []
+        ),
+    )
     args = smoke.parse_args(
         [
             "--wav",
@@ -139,7 +146,10 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
 
     assert summary["ok"] is True
     assert summary["events"]["terminal_sequence"] == ["eof_ack", "drained"]
-    assert websocket.sent == ['{"type":"eof"}']
+    assert len(websocket.sent) == 2
+    assert isinstance(websocket.sent[0], bytes)
+    assert websocket.sent[1] == '{"type":"eof"}'
+    assert summary["fixture"]["streamed_samples"] == 16_000
 
 
 def test_transcript_contract_rejects_final_without_source_range() -> None:
@@ -154,8 +164,77 @@ def test_transcript_contract_rejects_final_without_source_range() -> None:
                 "reason": "eof",
                 "elapsed_ms": 200,
                 "rms": 0.02,
-            }
+            },
+            cumulative_samples_sent=16_000,
+            previous_final_seq=None,
         )
+
+
+def test_transcript_contract_rejects_future_range_and_non_contiguous_final_seq() -> None:
+    smoke = _load_smoke_module()
+    final = {
+        "type": "final",
+        "seq": 0,
+        "text": "Kaynağa bağlı final",
+        "reason": "eof",
+        "elapsed_ms": 200,
+        "rms": 0.02,
+        "source_start_sample": 0,
+        "source_end_sample": 16_000,
+    }
+
+    smoke.validate_transcript_event(
+        final,
+        cumulative_samples_sent=16_000,
+        previous_final_seq=None,
+    )
+    with pytest.raises(smoke.SmokeError, match="final event violates"):
+        smoke.validate_transcript_event(
+            {**final, "source_end_sample": 16_001},
+            cumulative_samples_sent=16_000,
+            previous_final_seq=None,
+        )
+    with pytest.raises(smoke.SmokeError, match="final event violates"):
+        smoke.validate_transcript_event(
+            final,
+            cumulative_samples_sent=16_000,
+            previous_final_seq=0,
+        )
+    with pytest.raises(smoke.SmokeError, match="final event violates"):
+        smoke.validate_transcript_event(
+            {**final, "seq": 1},
+            cumulative_samples_sent=16_000,
+            previous_final_seq=None,
+        )
+    with pytest.raises(smoke.SmokeError, match="final event violates"):
+        smoke.validate_transcript_event(
+            {**final, "seq": 2},
+            cumulative_samples_sent=16_000,
+            previous_final_seq=0,
+        )
+
+
+def test_redacted_final_retains_numeric_source_range_without_text() -> None:
+    smoke = _load_smoke_module()
+    raw_text = "Bu metin kanıta girmemeli"
+
+    redacted = smoke.redacted_transcript_event(
+        {
+            "type": "final",
+            "seq": 3,
+            "text": raw_text,
+            "reason": "eof",
+            "elapsed_ms": 200,
+            "rms": 0.02,
+            "source_start_sample": 32_000,
+            "source_end_sample": 48_000,
+        },
+        900,
+    )
+
+    assert redacted["source_start_sample"] == 32_000
+    assert redacted["source_end_sample"] == 48_000
+    assert raw_text not in json.dumps(redacted, ensure_ascii=False)
 
 
 def test_wav_loader_resamples_common_voice_fixture_to_16khz_float32() -> None:

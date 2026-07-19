@@ -7,6 +7,7 @@ instead of surfacing in production.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -18,7 +19,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from app.core import config as config_module
 from app.core.config import Settings, get_settings
@@ -185,6 +186,74 @@ def test_eof_does_not_wait_for_stalled_draft_inference(
         "final",
         "drained",
     ]
+
+
+def test_eof_waits_for_published_final_state_transition_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.0,
+    )
+    final_reached_transport = threading.Event()
+    release_final_transition = threading.Event()
+    original_send_json = WebSocket.send_json
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        return "Yarışsız kalıcı final." if _is_final_service(self) else "Yarışsız taslak"
+
+    async def blocking_final_send(
+        websocket: WebSocket,
+        data: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        await original_send_json(websocket, data, *args, **kwargs)
+        if (
+            isinstance(data, dict)
+            and data.get("type") == "final"
+            and data.get("reason") == "forced"
+            and not final_reached_transport.is_set()
+        ):
+            final_reached_transport.set()
+            await asyncio.to_thread(release_final_transition.wait, 2.0)
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+    monkeypatch.setattr(WebSocket, "send_json", blocking_final_send)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert final_reached_transport.wait(timeout=1.0)
+        pre_eof_events: list[dict[str, Any]] = []
+        while True:
+            event = ws.receive_json()
+            pre_eof_events.append(event)
+            if event["type"] == "final":
+                break
+        ws.send_text('{"type":"eof"}')
+        time.sleep(0.05)
+        release_final_transition.set()
+        terminal_events = [ws.receive_json(), ws.receive_json()]
+
+    for event in (*pre_eof_events, *terminal_events):
+        assert_valid(event)
+    finals = [event for event in pre_eof_events if event["type"] == "final"]
+    assert len(finals) == 1
+    assert finals[0]["seq"] == 0
+    assert [event["type"] for event in terminal_events] == ["eof_ack", "drained"]
 
 
 def test_eof_flushes_late_final_before_drained(monkeypatch: pytest.MonkeyPatch) -> None:
