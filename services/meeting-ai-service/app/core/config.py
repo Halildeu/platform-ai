@@ -490,8 +490,13 @@ def get_settings() -> Settings:
         # GPU-host launcher sets MAI_APP_ENV explicitly and imports the
         # DPAPI-backed runtime config before Python starts. Local dotenv loading
         # is therefore opt-in and limited to an explicit dev/test process.
-        process_env = os.environ.get("MAI_APP_ENV", "dev").lower()
-        env_file = ".env" if process_env in {"dev", "test"} else None
+        process_env = os.environ.get("MAI_APP_ENV", "").lower()
+        local_dotenv_opt_in = os.environ.get("PLATFORM_AI_LOAD_LOCAL_DOTENV") == "1"
+        env_file = (
+            ".env"
+            if local_dotenv_opt_in and process_env in {"dev", "test"}
+            else None
+        )
         # `_env_file` is a documented BaseSettings runtime parameter, but the
         # generated subclass constructor exposed to mypy omits it.
         _settings = Settings(_env_file=env_file)  # type: ignore[call-arg]

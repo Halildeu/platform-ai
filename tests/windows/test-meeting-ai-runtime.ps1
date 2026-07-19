@@ -195,6 +195,7 @@ try {
         checks = @([ordered]@{ name = "ci-contract"; passed = $true; message = "ok" })
         requiredRemediationEvidence = @()
         binding = [ordered]@{
+            targetAppEnv = "test"
             expectedGitopsCommit = $expectedGitopsCommit
             policySha256 = $expectedPolicySha256
             producerCapability = [ordered]@{
@@ -256,6 +257,46 @@ try {
         -StartupScriptPath $startScript
 
     $installedPermit = $env:MAI_READY_PRE_ENABLE_PERMIT_PATH
+    $installedReceipt = $env:MAI_READY_ACTIVATION_RECEIPT_PATH
+    Assert-True (-not (Test-Path -LiteralPath $permitSource)) `
+        "A successful activation must consume the permit source."
+    Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
+        "A successful activation must write a durable activation receipt."
+    Assert-TranscriptReadyActivationReceiptFile `
+        -ReceiptPath $installedReceipt `
+        -PermitPath $installedPermit `
+        -ExpectedGitopsCommit $expectedGitopsCommit `
+        -ExpectedPolicySha256 $expectedPolicySha256 `
+        -ExpectedProducerImageDigest $expectedProducerDigest `
+        -RepoRoot $repoRoot `
+        -StartupScriptPath $startScript `
+        -AppEnv "test"
+    Assert-ThrowsLike {
+        Assert-TranscriptReadyPermitFile `
+            -PermitPath $installedPermit `
+            -ExpectedGitopsCommit $expectedGitopsCommit `
+            -ExpectedPolicySha256 $expectedPolicySha256 `
+            -ExpectedProducerImageDigest $expectedProducerDigest `
+            -RepoRoot $repoRoot `
+            -StartupScriptPath $startScript `
+            -AppEnv "stage"
+    } "environment or GitOps binding does not match"
+
+    $configBeforeReplay = [IO.File]::ReadAllBytes($configPath)
+    [IO.File]::WriteAllBytes($permitSource, [IO.File]::ReadAllBytes($installedPermit))
+    Assert-ThrowsLike {
+        & $configureScript `
+            -RotateEncryptionKey `
+            -ReadyPermitSourcePath $permitSource `
+            -StorePath $storePath `
+            -ConfigPath $configPath `
+            -Confirm:$false
+    } "already consumed"
+    Assert-True (-not (Test-Path -LiteralPath $permitSource)) `
+        "A replayed permit source must be consumed while being rejected."
+    Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq
+        [Convert]::ToBase64String($configBeforeReplay)) `
+        "A replayed permit must not mutate the active config."
     Assert-ThrowsLike {
         & $startScript `
             -RepoRoot $repoRoot `
@@ -357,8 +398,12 @@ try {
         -Content $freshInstalledPermitContent
 
     Write-FreshPermit -Permit $permit -Path $permitSource
-    $permitFilesBeforeFailure = @(Get-ChildItem `
-        -LiteralPath (Split-Path -Parent $installedPermit) -File)
+    $activePermitRoot = Split-Path -Parent $installedPermit
+    $activationReceiptRoot = Split-Path -Parent $installedReceipt
+    $consumptionRoot = Join-Path $runtimeRoot "permits\consumed"
+    $permitFilesBeforeFailure = @(Get-ChildItem -LiteralPath $activePermitRoot -File)
+    $receiptFilesBeforeFailure = @(Get-ChildItem -LiteralPath $activationReceiptRoot -File)
+    $consumptionFilesBeforeFailure = @(Get-ChildItem -LiteralPath $consumptionRoot -File)
     $configBeforeInjectedFailure = [IO.File]::ReadAllBytes($configPath)
     $env:PLATFORM_AI_TEST_INJECT_MEETING_AI_CONFIG_WRITE_FAILURE = "1"
     try {
@@ -379,14 +424,25 @@ try {
         "Injected write failure must preserve the previous config."
     Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
         "Injected write failure must preserve the previous permit."
-    $permitFilesAfterFailure = @(Get-ChildItem `
-        -LiteralPath (Split-Path -Parent $installedPermit) -File)
+    Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
+        "Injected write failure must preserve the previous activation receipt."
+    Assert-True (-not (Test-Path -LiteralPath $permitSource)) `
+        "A failed activation must still consume its one-use source."
+    $permitFilesAfterFailure = @(Get-ChildItem -LiteralPath $activePermitRoot -File)
+    $receiptFilesAfterFailure = @(Get-ChildItem -LiteralPath $activationReceiptRoot -File)
+    $consumptionFilesAfterFailure = @(Get-ChildItem -LiteralPath $consumptionRoot -File)
     Assert-True ($permitFilesAfterFailure.Count -eq $permitFilesBeforeFailure.Count) `
         "Injected write failure must clean the staged permit."
+    Assert-True ($receiptFilesAfterFailure.Count -eq $receiptFilesBeforeFailure.Count) `
+        "Injected write failure must clean the staged activation receipt."
+    Assert-True ($consumptionFilesAfterFailure.Count -eq
+        ($consumptionFilesBeforeFailure.Count + 1)) `
+        "Injected write failure must retain the one-use consumption record."
 
     Start-Sleep -Milliseconds 20
     Write-FreshPermit -Permit $permit -Path $permitSource
     $oldPermit = $installedPermit
+    $oldReceipt = $installedReceipt
     & $configureScript `
         -RotateEncryptionKey `
         -ReadyPermitSourcePath $permitSource `
@@ -404,12 +460,43 @@ try {
         $customTranscriptClientId) `
         "Transcript client identity must survive enabled maintenance."
     $installedPermit = $rotatedReadyValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+    $installedReceipt = $rotatedReadyValues["MAI_READY_ACTIVATION_RECEIPT_PATH"]
     Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
         "Successful enabled maintenance must activate the new permit."
+    Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
+        "Successful enabled maintenance must activate a new receipt."
     if ($oldPermit -ne $installedPermit) {
         Assert-True (-not (Test-Path -LiteralPath $oldPermit -PathType Leaf)) `
             "Successful enabled maintenance must revoke the previous permit."
     }
+    if ($oldReceipt -ne $installedReceipt) {
+        Assert-True (-not (Test-Path -LiteralPath $oldReceipt -PathType Leaf)) `
+            "Successful enabled maintenance must revoke the previous receipt."
+    }
+
+    Start-Sleep -Milliseconds 20
+    Write-FreshPermit -Permit $permit -Path $permitSource
+    $preRestorePermit = $installedPermit
+    $preRestoreReceipt = $installedReceipt
+    & $configureScript `
+        -RestoreBackup `
+        -ReadyPermitSourcePath $permitSource `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
+    $enabledRestoreValues = Read-MeetingAiConfigFile -Path $configPath
+    Assert-True ($enabledRestoreValues["MAI_READY_CONSUMER_ENABLED"] -eq "true") `
+        "Enabled-to-enabled restore must keep the ready consumer enabled."
+    $installedPermit = $enabledRestoreValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+    $installedReceipt = $enabledRestoreValues["MAI_READY_ACTIVATION_RECEIPT_PATH"]
+    Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
+        "Enabled restore must activate a fresh permit."
+    Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
+        "Enabled restore must activate a fresh receipt."
+    Assert-True (-not (Test-Path -LiteralPath $preRestorePermit -PathType Leaf)) `
+        "Enabled restore must revoke the superseded permit."
+    Assert-True (-not (Test-Path -LiteralPath $preRestoreReceipt -PathType Leaf)) `
+        "Enabled restore must revoke the superseded receipt."
 
     & $configureScript `
         -ReadyConsumerEnabled "false" `
@@ -426,6 +513,60 @@ try {
     )) "Transcript-service DPAPI blob must be removed by rollback."
     Assert-True (-not (Test-Path -LiteralPath $installedPermit -PathType Leaf)) `
         "Ready consumer rollback must revoke the installed permit."
+    Assert-True (-not (Test-Path -LiteralPath $installedReceipt -PathType Leaf)) `
+        "Ready consumer rollback must revoke the activation receipt."
+
+    $disabledBeforeFailedRestore = [IO.File]::ReadAllBytes($configPath)
+    Start-Sleep -Milliseconds 20
+    Write-FreshPermit -Permit $permit -Path $permitSource
+    $env:PLATFORM_AI_TEST_INJECT_MEETING_AI_CONFIG_WRITE_FAILURE = "1"
+    try {
+        Assert-ThrowsLike {
+            & $configureScript `
+                -RestoreBackup `
+                -ReadyPermitSourcePath $permitSource `
+                -StorePath $storePath `
+                -ConfigPath $configPath `
+                -Confirm:$false
+        } "TEST_INJECTED_MEETING_AI_CONFIG_WRITE_FAILURE"
+    } finally {
+        Remove-Item Env:PLATFORM_AI_TEST_INJECT_MEETING_AI_CONFIG_WRITE_FAILURE `
+            -ErrorAction SilentlyContinue
+    }
+    Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq
+        [Convert]::ToBase64String($disabledBeforeFailedRestore)) `
+        "Failed disabled-to-enabled restore must preserve the disabled config."
+
+    Start-Sleep -Milliseconds 20
+    Write-FreshPermit -Permit $permit -Path $permitSource
+    & $configureScript `
+        -RestoreBackup `
+        -ReadyPermitSourcePath $permitSource `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
+    $restoredEnabledValues = Read-MeetingAiConfigFile -Path $configPath
+    Assert-True ($restoredEnabledValues["MAI_READY_CONSUMER_ENABLED"] -eq "true") `
+        "Disabled-to-enabled restore must activate the ready consumer."
+    $installedPermit = $restoredEnabledValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+    $installedReceipt = $restoredEnabledValues["MAI_READY_ACTIVATION_RECEIPT_PATH"]
+    Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
+        "Disabled-to-enabled restore must install a fresh permit."
+    Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
+        "Disabled-to-enabled restore must install a fresh receipt."
+
+    & $configureScript `
+        -RestoreBackup `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
+    $restoredDisabledValues = Read-MeetingAiConfigFile -Path $configPath
+    Assert-True ($restoredDisabledValues["MAI_READY_CONSUMER_ENABLED"] -eq "false") `
+        "Enabled-to-disabled restore must restore the disabled config."
+    Assert-True (-not (Test-Path -LiteralPath $installedPermit -PathType Leaf)) `
+        "Enabled-to-disabled restore must revoke the permit."
+    Assert-True (-not (Test-Path -LiteralPath $installedReceipt -PathType Leaf)) `
+        "Enabled-to-disabled restore must revoke the receipt."
     Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
         "Disabled ready consumer runtime config import must succeed."
     Assert-True ([string]::IsNullOrWhiteSpace($env:MAI_READY_REDIS_URL)) `

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -137,6 +138,22 @@ def stream_event_type(fields: dict[object, object]) -> str | None:
                 return _decode(value)
         except (UnicodeDecodeError, ReadyEventContractError):
             continue
+    return None
+
+
+def payload_event_type(fields: dict[object, object]) -> str | None:
+    """Read the inner routing field without accepting the payload contract."""
+    for key, value in fields.items():
+        try:
+            if _decode(key) != "payload":
+                continue
+            payload = json.loads(_bytes(value))
+            if not isinstance(payload, dict):
+                return None
+            event_type = payload.get("eventType")
+            return event_type if isinstance(event_type, str) else None
+        except (json.JSONDecodeError, UnicodeDecodeError, ReadyEventContractError):
+            return None
     return None
 
 

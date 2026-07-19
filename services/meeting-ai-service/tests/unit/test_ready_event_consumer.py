@@ -467,6 +467,9 @@ def test_unrelated_shared_stream_event_is_acked_without_poison_or_inbox_row(tmp_
         runtime, _, redis, transcripts = _runtime(tmp_path)
         fields = _fields()
         fields[b"eventType"] = b"meeting.participant.joined"
+        payload = json.loads(fields[b"payload"])
+        payload["eventType"] = "meeting.participant.joined"
+        fields[b"payload"] = json.dumps(payload).encode()
         await runtime.process_message("7-0", fields)
         with sqlite3.connect(_settings(tmp_path).ingestion_store_path) as connection:
             row_count = int(
@@ -481,6 +484,22 @@ def test_unrelated_shared_stream_event_is_acked_without_poison_or_inbox_row(tmp_
     assert redis.added == []
     assert transcript_calls == 0
     assert row_count == 0
+
+
+def test_outer_unrelated_but_inner_ready_is_poisoned_not_silently_acked(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> FakeRedis:
+        runtime, _, redis, _ = _runtime(tmp_path)
+        fields = _fields()
+        fields[b"eventType"] = b"meeting.participant.joined"
+        await runtime.process_message("8-0", fields)
+        return redis
+
+    redis = asyncio.run(scenario())
+    assert len(redis.added) == 1
+    assert len(redis.acked) == 1
+    assert redis.added[0]["fields"]["errorCode"] == "event_contract_invalid"
 
 
 def test_result_outbox_full_is_backpressure_without_failure_or_ack(tmp_path: Path) -> None:

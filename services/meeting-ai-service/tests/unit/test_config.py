@@ -50,6 +50,7 @@ def test_cached_settings_load_dotenv_only_for_explicit_local_env(
 
     try:
         monkeypatch.setenv("MAI_APP_ENV", "test")
+        monkeypatch.setenv("PLATFORM_AI_LOAD_LOCAL_DOTENV", "1")
         config_module._settings = None
         assert config_module.get_settings().backend == "ollama"
 
@@ -60,6 +61,30 @@ def test_cached_settings_load_dotenv_only_for_explicit_local_env(
         assert settings.app_env == "stage"
         assert settings.backend == "ollama"
         assert settings.log_level == "INFO"
+        assert settings.ready_consumer_enabled is False
+    finally:
+        config_module._settings = None
+
+
+def test_cached_settings_reject_dotenv_self_declared_deployed_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "MAI_APP_ENV=stage\n"
+        "MAI_READY_CONSUMER_ENABLED=true\n"
+        "MAI_BACKEND=ollama\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MAI_APP_ENV", raising=False)
+    monkeypatch.setenv("PLATFORM_AI_LOAD_LOCAL_DOTENV", "1")
+
+    try:
+        config_module._settings = None
+        settings = config_module.get_settings()
+        assert settings.app_env == "dev"
+        assert settings.backend == "mock"
         assert settings.ready_consumer_enabled is False
     finally:
         config_module._settings = None

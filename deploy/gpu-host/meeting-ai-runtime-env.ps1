@@ -107,6 +107,7 @@ function Get-MeetingAiConfigSchema {
             SecretTarget = ""
         }
         "MAI_READY_PRE_ENABLE_PERMIT_PATH" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_ACTIVATION_RECEIPT_PATH" = @{ Required = $false; SecretTarget = "" }
         "MAI_READY_EXPECTED_GITOPS_COMMIT" = @{ Required = $false; SecretTarget = "" }
         "MAI_READY_EXPECTED_POLICY_SHA256" = @{ Required = $false; SecretTarget = "" }
         "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST" = @{
@@ -440,7 +441,10 @@ function Unprotect-MeetingAiSecret {
 }
 
 function Assert-MeetingAiConfigValues {
-    param([Parameter(Mandatory = $true)]$Values)
+    param(
+        [Parameter(Mandatory = $true)]$Values,
+        [switch]$SkipReadyArtifactExistence
+    )
 
     if (-not $Values.ContainsKey("MAI_INGESTION_ENABLED")) {
         throw "Runtime config is missing MAI_INGESTION_ENABLED."
@@ -524,6 +528,7 @@ function Assert-MeetingAiConfigValues {
         "MAI_TRANSCRIPT_SERVICE_SCOPE",
         "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE",
         "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+        "MAI_READY_ACTIVATION_RECEIPT_PATH",
         "MAI_READY_EXPECTED_GITOPS_COMMIT",
         "MAI_READY_EXPECTED_POLICY_SHA256",
         "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"
@@ -561,13 +566,26 @@ function Assert-MeetingAiConfigValues {
         '^sha256:[0-9a-f]{64}$') {
         throw "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST must be an immutable image digest."
     }
-    $permitPath = Assert-MeetingAiRuntimePath `
-        -Path $Values["MAI_READY_PRE_ENABLE_PERMIT_PATH"] `
-        -Purpose "Transcript-ready pre-enable permit"
-    if (-not (Test-Path -LiteralPath $permitPath -PathType Leaf)) {
-        throw "MAI_READY_PRE_ENABLE_PERMIT_PATH must reference an existing permit file."
+    if (-not $SkipReadyArtifactExistence) {
+        $readyArtifacts = @(
+            [pscustomobject]@{
+                Name = "MAI_READY_PRE_ENABLE_PERMIT_PATH"
+                Purpose = "Transcript-ready pre-enable permit"
+            }
+            [pscustomobject]@{
+                Name = "MAI_READY_ACTIVATION_RECEIPT_PATH"
+                Purpose = "Transcript-ready activation receipt"
+            }
+        )
+        foreach ($artifact in $readyArtifacts) {
+            $artifactPath = Assert-MeetingAiRuntimePath `
+                -Path $Values[$artifact.Name] -Purpose $artifact.Purpose
+            if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+                throw "$($artifact.Name) must reference an existing runtime artifact file."
+            }
+            Assert-MeetingAiAcl -Path $artifactPath
+        }
     }
-    Assert-MeetingAiAcl -Path $permitPath
 }
 
 function Assert-MeetingAiKeyring {
@@ -807,9 +825,10 @@ function Assert-TranscriptReadyPermitFile {
 
     $binding = $permit.binding
     if ($null -eq $binding -or
+        $binding.targetAppEnv -ne $AppEnv -or
         $binding.expectedGitopsCommit -ne $ExpectedGitopsCommit -or
         $binding.policySha256 -ne $ExpectedPolicySha256) {
-        throw "Transcript-ready pre-enable permit GitOps binding does not match."
+        throw "Transcript-ready pre-enable permit environment or GitOps binding does not match."
     }
     $producer = $binding.producerCapability
     if ($null -eq $producer -or
@@ -865,6 +884,79 @@ function Assert-TranscriptReadyPermitFile {
     }
 }
 
+function Assert-TranscriptReadyActivationReceiptFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [Parameter(Mandatory = $true)][string]$PermitPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedGitopsCommit,
+        [Parameter(Mandatory = $true)][string]$ExpectedPolicySha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedProducerImageDigest,
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$StartupScriptPath,
+        [ValidateSet("test", "stage", "prod")][string]$AppEnv
+    )
+
+    $receiptFull = Assert-MeetingAiRuntimePath `
+        -Path $ReceiptPath -Purpose "Transcript-ready activation receipt"
+    Assert-MeetingAiAcl -Path $receiptFull
+    $bytes = [IO.File]::ReadAllBytes($receiptFull)
+    if ($bytes.Length -lt 2 -or $bytes.Length -gt 65536) {
+        throw "Transcript-ready activation receipt has an invalid size."
+    }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and
+        $bytes[2] -eq 0xBF) {
+        throw "Transcript-ready activation receipt must be UTF-8 without BOM."
+    }
+    try {
+        $json = (New-Object Text.UTF8Encoding($false, $true)).GetString($bytes)
+    } finally {
+        [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+    try {
+        $receipt = $json | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Transcript-ready activation receipt is not valid JSON."
+    } finally {
+        $json = $null
+    }
+    $activatedAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+            [string]$receipt.activatedAt,
+            [Globalization.CultureInfo]::InvariantCulture,
+            ([Globalization.DateTimeStyles]::AssumeUniversal -bor
+                [Globalization.DateTimeStyles]::AdjustToUniversal),
+            [ref]$activatedAt
+        ) -or $activatedAt -gt [DateTimeOffset]::UtcNow.AddSeconds(30)) {
+        throw "Transcript-ready activation receipt has an invalid activation time."
+    }
+
+    $permitFull = Assert-MeetingAiRuntimePath `
+        -Path $PermitPath -Purpose "Transcript-ready pre-enable permit"
+    $permitSha256 = Get-MeetingAiFileSha256 `
+        -Path $permitFull -Purpose "Transcript-ready pre-enable permit"
+    $repoFull = Resolve-FixedLocalPath -Path $RepoRoot -Purpose "Platform-ai repository"
+    $headResult = Invoke-MeetingAiGitCapture -GitArgs @("-C", $repoFull, "rev-parse", "HEAD")
+    if ($headResult.ExitCode -ne 0 -or $headResult.Output.Count -ne 1) {
+        throw "Platform-ai repository identity could not be read for activation receipt."
+    }
+    $repoCommit = "$($headResult.Output[0])".Trim().ToLowerInvariant()
+    $startupFull = Resolve-FixedLocalPath `
+        -Path $StartupScriptPath -Purpose "Meeting-ai startup script"
+    $startupSha256 = Get-MeetingAiFileSha256 `
+        -Path $startupFull -Purpose "Meeting-ai startup script"
+
+    if ($receipt.schemaVersion -ne "faz24.transcriptReadyActivationReceipt.v1" -or
+        $receipt.permitSha256 -ne $permitSha256 -or
+        $receipt.targetAppEnv -ne $AppEnv -or
+        $receipt.expectedGitopsCommit -ne $ExpectedGitopsCommit -or
+        $receipt.policySha256 -ne $ExpectedPolicySha256 -or
+        $receipt.producerImageDigest -ne $ExpectedProducerImageDigest -or
+        $receipt.platformAiCommit -ne $repoCommit -or
+        $receipt.startupScriptSha256 -ne $startupSha256) {
+        throw "Transcript-ready activation receipt binding does not match."
+    }
+}
+
 function Assert-TranscriptReadyPreEnablePermit {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -875,6 +967,7 @@ function Assert-TranscriptReadyPreEnablePermit {
 
     foreach ($name in @(
             "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+            "MAI_READY_ACTIVATION_RECEIPT_PATH",
             "MAI_READY_EXPECTED_GITOPS_COMMIT",
             "MAI_READY_EXPECTED_POLICY_SHA256",
             "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST",
@@ -886,6 +979,15 @@ function Assert-TranscriptReadyPreEnablePermit {
     }
 
     [void](Assert-TranscriptReadyPermitFile `
+        -PermitPath $env:MAI_READY_PRE_ENABLE_PERMIT_PATH `
+        -ExpectedGitopsCommit $env:MAI_READY_EXPECTED_GITOPS_COMMIT `
+        -ExpectedPolicySha256 $env:MAI_READY_EXPECTED_POLICY_SHA256 `
+        -ExpectedProducerImageDigest $env:MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST `
+        -RepoRoot $RepoRoot `
+        -StartupScriptPath $StartupScriptPath `
+        -AppEnv $env:MAI_APP_ENV)
+    [void](Assert-TranscriptReadyActivationReceiptFile `
+        -ReceiptPath $env:MAI_READY_ACTIVATION_RECEIPT_PATH `
         -PermitPath $env:MAI_READY_PRE_ENABLE_PERMIT_PATH `
         -ExpectedGitopsCommit $env:MAI_READY_EXPECTED_GITOPS_COMMIT `
         -ExpectedPolicySha256 $env:MAI_READY_EXPECTED_POLICY_SHA256 `

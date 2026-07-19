@@ -26,6 +26,7 @@ from app.models.ready_event import (
     ParsedTranscriptReadyEvent,
     ReadyEventContractError,
     parse_transcript_ready_event,
+    payload_event_type,
     payload_sha256,
     stream_event_type,
 )
@@ -232,9 +233,11 @@ class ReadyEventConsumerRuntime:
         assert self._inbox is not None
         outer_event_type = stream_event_type(fields)
         if outer_event_type is not None and outer_event_type != "meeting.transcript.ready":
-            await self._ack(message_id)
-            mai_ready_consumer_events_total.labels(outcome="ignored").inc()
-            return
+            inner_event_type = payload_event_type(fields)
+            if inner_event_type == outer_event_type:
+                await self._ack(message_id)
+                mai_ready_consumer_events_total.labels(outcome="ignored").inc()
+                return
         try:
             event = parse_transcript_ready_event(
                 fields,

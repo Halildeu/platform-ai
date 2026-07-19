@@ -69,8 +69,10 @@ if (-not $PSCmdlet.ShouldProcess($ConfigPath, $operation)) {
 $mutex = New-Object Threading.Mutex($false, "Global\platform-ai-meeting-ai-config-v1")
 $lockTaken = $false
 $stagedPermitPath = ""
+$stagedActivationReceiptPath = ""
 $previousPermitPath = ""
-$permitActivated = $false
+$previousActivationReceiptPath = ""
+$activationCommitted = $false
 
 function Get-ExistingValue {
     param(
@@ -150,6 +152,171 @@ function Install-MeetingAiTlsPublicFile {
         -Purpose "Installed TLS material")
 }
 
+function ConvertTo-MeetingAiConfigContent {
+    param([Parameter(Mandatory = $true)]$Values)
+
+    $lines = @(
+        "# platform-ai meeting-ai runtime config v1"
+        "# Secret fields are DPAPI LocalMachine ciphertext. Do not copy to another host."
+    )
+    foreach ($name in $Values.Keys) {
+        $lines += "{0}={1}" -f $name, $Values[$name]
+    }
+    return ($lines -join "`r`n") + "`r`n"
+}
+
+function Write-MeetingAiExclusiveRuntimeFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content
+    )
+
+    $full = Assert-MeetingAiRuntimePath -Path $Path -Purpose "Runtime consumption record"
+    [void](Initialize-MeetingAiDirectory -Path (Split-Path -Parent $full))
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open(
+            $full,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Content)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        } finally {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+        }
+    } catch [IO.IOException] {
+        throw "Transcript-ready pre-enable permit was already consumed."
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    Set-Acl -LiteralPath $full -AclObject (New-MeetingAiAcl)
+    Assert-MeetingAiAcl -Path $full
+}
+
+function New-TranscriptReadyActivation {
+    param(
+        [Parameter(Mandatory = $true)][string]$PermitSourcePath,
+        [ValidateSet("test", "stage", "prod")][string]$TargetAppEnv,
+        [Parameter(Mandatory = $true)][string]$ExpectedGitopsCommit,
+        [Parameter(Mandatory = $true)][string]$ExpectedPolicySha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedProducerImageDigest,
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$StartupScriptPath
+    )
+
+    $source = Resolve-FixedLocalPath `
+        -Path $PermitSourcePath -Purpose "Transcript-ready pre-enable permit source"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or
+        (Get-Item -LiteralPath $source -Force).Length -gt 1048576) {
+        throw "Transcript-ready pre-enable permit source is missing or too large."
+    }
+    $consumingPath = Join-Path (Split-Path -Parent $source) `
+        (".{0}.consuming-{1}" -f (Split-Path -Leaf $source), [Guid]::NewGuid().ToString("N"))
+    [IO.File]::Move($source, $consumingPath)
+    $permitPath = ""
+    $receiptPath = ""
+    $permitContent = $null
+    try {
+        $permitBytes = [IO.File]::ReadAllBytes($consumingPath)
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        $hashBytes = $null
+        try {
+            $permitContent = (New-Object Text.UTF8Encoding($false, $true)).GetString(
+                $permitBytes
+            )
+            $hashBytes = $hasher.ComputeHash($permitBytes)
+            $permitSha256 = ([BitConverter]::ToString($hashBytes)).Replace(
+                "-", ""
+            ).ToLowerInvariant()
+        } finally {
+            $hasher.Dispose()
+            if ($null -ne $hashBytes) { [Array]::Clear($hashBytes, 0, $hashBytes.Length) }
+            [Array]::Clear($permitBytes, 0, $permitBytes.Length)
+        }
+
+        $consumptionPath = Join-Path (Get-MeetingAiRuntimeRoot) `
+            ("permits\consumed\{0}.json" -f $permitSha256)
+        $consumption = [ordered]@{
+            schemaVersion = "faz24.transcriptReadyPermitConsumption.v1"
+            permitSha256 = $permitSha256
+            targetAppEnv = $TargetAppEnv
+            consumedAt = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        Write-MeetingAiExclusiveRuntimeFile `
+            -Path $consumptionPath `
+            -Content (($consumption | ConvertTo-Json -Depth 4) + "`n")
+
+        $permitPath = Join-Path (Get-MeetingAiRuntimeRoot) `
+            ("permits\active\transcript-ready-pre-enable-{0}.json" -f $permitSha256)
+        Write-MeetingAiSecretFileAtomic -Path $permitPath -Content $permitContent
+        [void](Assert-TranscriptReadyPermitFile `
+            -PermitPath $permitPath `
+            -ExpectedGitopsCommit $ExpectedGitopsCommit `
+            -ExpectedPolicySha256 $ExpectedPolicySha256 `
+            -ExpectedProducerImageDigest $ExpectedProducerImageDigest `
+            -RepoRoot $RepoRoot `
+            -StartupScriptPath $StartupScriptPath `
+            -AppEnv $TargetAppEnv)
+
+        $headResult = Invoke-MeetingAiGitCapture -GitArgs @(
+            "-C", $RepoRoot, "rev-parse", "HEAD"
+        )
+        if ($headResult.ExitCode -ne 0 -or $headResult.Output.Count -ne 1) {
+            throw "Platform-ai repository identity could not be read for activation."
+        }
+        $platformAiCommit = "$($headResult.Output[0])".Trim().ToLowerInvariant()
+        $startupSha256 = Get-MeetingAiFileSha256 `
+            -Path $StartupScriptPath -Purpose "Meeting-ai startup script"
+        $receipt = [ordered]@{
+            schemaVersion = "faz24.transcriptReadyActivationReceipt.v1"
+            permitSha256 = $permitSha256
+            targetAppEnv = $TargetAppEnv
+            expectedGitopsCommit = $ExpectedGitopsCommit
+            policySha256 = $ExpectedPolicySha256
+            producerImageDigest = $ExpectedProducerImageDigest
+            platformAiCommit = $platformAiCommit
+            startupScriptSha256 = $startupSha256
+            activatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $receiptPath = Join-Path (Get-MeetingAiRuntimeRoot) `
+            ("permits\activations\transcript-ready-activation-{0}.json" -f $permitSha256)
+        Write-MeetingAiSecretFileAtomic `
+            -Path $receiptPath -Content (($receipt | ConvertTo-Json -Depth 4) + "`n")
+        [void](Assert-TranscriptReadyActivationReceiptFile `
+            -ReceiptPath $receiptPath `
+            -PermitPath $permitPath `
+            -ExpectedGitopsCommit $ExpectedGitopsCommit `
+            -ExpectedPolicySha256 $ExpectedPolicySha256 `
+            -ExpectedProducerImageDigest $ExpectedProducerImageDigest `
+            -RepoRoot $RepoRoot `
+            -StartupScriptPath $StartupScriptPath `
+            -AppEnv $TargetAppEnv)
+
+        return [pscustomobject]@{
+            PermitPath = $permitPath
+            ReceiptPath = $receiptPath
+            PermitSha256 = $permitSha256
+        }
+    } catch {
+        foreach ($path in @($permitPath, $receiptPath)) {
+            if (-not [string]::IsNullOrWhiteSpace($path) -and
+                (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Remove-Item -LiteralPath $path -Force
+            }
+        }
+        throw
+    } finally {
+        $permitContent = $null
+        if (Test-Path -LiteralPath $consumingPath -PathType Leaf) {
+            Remove-Item -LiteralPath $consumingPath -Force
+        }
+    }
+}
+
 try {
     $lockTaken = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
     if (-not $lockTaken) { throw "Another meeting-ai configuration operation is in progress." }
@@ -161,13 +328,59 @@ try {
         if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
             throw "No meeting-ai runtime config backup exists."
         }
+        $currentValues = $null
+        if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
+            $currentValues = Read-MeetingAiConfigFile -Path $ConfigPath
+            Assert-MeetingAiConfigValues -Values $currentValues
+        }
         $backupValues = Read-MeetingAiConfigFile -Path $backupPath
-        Assert-MeetingAiConfigValues -Values $backupValues
-        $backupContent = [IO.File]::ReadAllText(
-            $backupPath,
-            (New-Object Text.UTF8Encoding($false, $true))
-        )
+        Assert-MeetingAiConfigValues -Values $backupValues -SkipReadyArtifactExistence
+        if ($backupValues.ContainsKey("MAI_READY_CONSUMER_ENABLED") -and
+            $backupValues["MAI_READY_CONSUMER_ENABLED"].ToLowerInvariant() -eq "true") {
+            if ([string]::IsNullOrWhiteSpace($ReadyPermitSourcePath)) {
+                throw "Restoring an enabled ready-consumer backup requires a fresh permit source."
+            }
+            $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+            $startupScript = Join-Path $scriptDir "start-meeting-ai.ps1"
+            $activation = New-TranscriptReadyActivation `
+                -PermitSourcePath $ReadyPermitSourcePath `
+                -TargetAppEnv $backupValues["MAI_APP_ENV"].ToLowerInvariant() `
+                -ExpectedGitopsCommit $backupValues["MAI_READY_EXPECTED_GITOPS_COMMIT"] `
+                -ExpectedPolicySha256 $backupValues["MAI_READY_EXPECTED_POLICY_SHA256"] `
+                -ExpectedProducerImageDigest `
+                    $backupValues["MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"] `
+                -RepoRoot $repoRoot -StartupScriptPath $startupScript
+            $stagedPermitPath = $activation.PermitPath
+            $stagedActivationReceiptPath = $activation.ReceiptPath
+            $backupValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"] = $stagedPermitPath
+            $backupValues["MAI_READY_ACTIVATION_RECEIPT_PATH"] = `
+                $stagedActivationReceiptPath
+        }
+        $backupContent = ConvertTo-MeetingAiConfigContent -Values $backupValues
+        if ($env:CI -eq "true" -and
+            $env:PLATFORM_AI_TEST_INJECT_MEETING_AI_CONFIG_WRITE_FAILURE -eq "1") {
+            throw "TEST_INJECTED_MEETING_AI_CONFIG_WRITE_FAILURE"
+        }
         Write-MeetingAiConfigAtomic -Path $ConfigPath -Content $backupContent
+        if (-not [string]::IsNullOrWhiteSpace($stagedPermitPath)) {
+            $activationCommitted = $true
+        }
+        if ($null -ne $currentValues -and
+            $currentValues.ContainsKey("MAI_READY_PRE_ENABLE_PERMIT_PATH")) {
+            foreach ($name in @(
+                    "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+                    "MAI_READY_ACTIVATION_RECEIPT_PATH"
+                )) {
+                if (-not $currentValues.ContainsKey($name)) { continue }
+                $oldArtifact = Assert-MeetingAiRuntimePath `
+                    -Path $currentValues[$name] -Purpose "Previous ready activation artifact"
+                if ($oldArtifact -ne $stagedPermitPath -and
+                    $oldArtifact -ne $stagedActivationReceiptPath -and
+                    (Test-Path -LiteralPath $oldArtifact -PathType Leaf)) {
+                    Remove-Item -LiteralPath $oldArtifact -Force
+                }
+            }
+        }
         Write-Host "meeting-ai runtime config backup restored: $ConfigPath"
         Write-Host "Restart task with schtasks.exe /End and /Run for platform-ai-meeting-ai."
         return
@@ -296,11 +509,17 @@ try {
         "false"
     }
     $permitToRevoke = ""
+    $receiptToRevoke = ""
     if ($effectiveReadyEnabled -eq "false" -and $null -ne $existing -and
         $existing.ContainsKey("MAI_READY_PRE_ENABLE_PERMIT_PATH")) {
         $permitToRevoke = Assert-MeetingAiRuntimePath `
             -Path $existing["MAI_READY_PRE_ENABLE_PERMIT_PATH"] `
             -Purpose "Transcript-ready pre-enable permit"
+        if ($existing.ContainsKey("MAI_READY_ACTIVATION_RECEIPT_PATH")) {
+            $receiptToRevoke = Assert-MeetingAiRuntimePath `
+                -Path $existing["MAI_READY_ACTIVATION_RECEIPT_PATH"] `
+                -Purpose "Transcript-ready activation receipt"
+        }
     }
     $readyConfig = [ordered]@{
         "MAI_READY_CONSUMER_ENABLED" = $effectiveReadyEnabled
@@ -334,36 +553,12 @@ try {
             $previousPermitPath = Assert-MeetingAiRuntimePath `
                 -Path $existing["MAI_READY_PRE_ENABLE_PERMIT_PATH"] `
                 -Purpose "Previous transcript-ready pre-enable permit"
-        }
-        $permitSource = Resolve-FixedLocalPath `
-            -Path $ReadyPermitSourcePath `
-            -Purpose "Transcript-ready pre-enable permit source"
-        if (-not (Test-Path -LiteralPath $permitSource -PathType Leaf) -or
-            (Get-Item -LiteralPath $permitSource -Force).Length -gt 1048576) {
-            throw "Transcript-ready pre-enable permit source is missing or too large."
-        }
-        $permitBytes = [IO.File]::ReadAllBytes($permitSource)
-        $permitHasher = [Security.Cryptography.SHA256]::Create()
-        $permitHashBytes = $null
-        try {
-            $permitUtf8 = New-Object Text.UTF8Encoding($false, $true)
-            $permitContent = $permitUtf8.GetString($permitBytes)
-            $permitHashBytes = $permitHasher.ComputeHash($permitBytes)
-            $permitSha256 = ([BitConverter]::ToString($permitHashBytes)).Replace(
-                "-", ""
-            ).ToLowerInvariant()
-        } finally {
-            $permitHasher.Dispose()
-            if ($null -ne $permitHashBytes) {
-                [Array]::Clear($permitHashBytes, 0, $permitHashBytes.Length)
+            if ($existing.ContainsKey("MAI_READY_ACTIVATION_RECEIPT_PATH")) {
+                $previousActivationReceiptPath = Assert-MeetingAiRuntimePath `
+                    -Path $existing["MAI_READY_ACTIVATION_RECEIPT_PATH"] `
+                    -Purpose "Previous transcript-ready activation receipt"
             }
-            [Array]::Clear($permitBytes, 0, $permitBytes.Length)
         }
-        $stagedPermitPath = Join-Path (Get-MeetingAiRuntimeRoot) `
-            ("permits\transcript-ready-pre-enable-{0}.json" -f $permitSha256)
-        Write-MeetingAiSecretFileAtomic -Path $stagedPermitPath -Content $permitContent
-        $permitContent = $null
-
         $effectiveExpectedGitopsCommit = Get-SuppliedOrExistingValue `
             -Existing $existing -Name "MAI_READY_EXPECTED_GITOPS_COMMIT" `
             -Supplied $ExpectedGitopsCommit
@@ -375,14 +570,16 @@ try {
             -Supplied $ExpectedProducerImageDigest
         $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
         $startupScript = Join-Path $scriptDir "start-meeting-ai.ps1"
-        [void](Assert-TranscriptReadyPermitFile `
-            -PermitPath $stagedPermitPath `
+        $activation = New-TranscriptReadyActivation `
+            -PermitSourcePath $ReadyPermitSourcePath `
+            -TargetAppEnv $effectiveAppEnv.ToLowerInvariant() `
             -ExpectedGitopsCommit $effectiveExpectedGitopsCommit `
             -ExpectedPolicySha256 $effectiveExpectedPolicySha256 `
             -ExpectedProducerImageDigest $effectiveExpectedProducerDigest `
             -RepoRoot $repoRoot `
-            -StartupScriptPath $startupScript `
-            -AppEnv $effectiveAppEnv.ToLowerInvariant())
+            -StartupScriptPath $startupScript
+        $stagedPermitPath = $activation.PermitPath
+        $stagedActivationReceiptPath = $activation.ReceiptPath
 
         $replayHorizon = if ($ReadyProducerReplayHorizonSec -gt 0) {
             $ReadyProducerReplayHorizonSec.ToString(
@@ -438,6 +635,7 @@ try {
                 "transcript:analysis-job-capability:issue"
             )
             "MAI_READY_PRE_ENABLE_PERMIT_PATH" = $stagedPermitPath
+            "MAI_READY_ACTIVATION_RECEIPT_PATH" = $stagedActivationReceiptPath
             "MAI_READY_EXPECTED_GITOPS_COMMIT" = $effectiveExpectedGitopsCommit
             "MAI_READY_EXPECTED_POLICY_SHA256" = $effectiveExpectedPolicySha256
             "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST" = `
@@ -509,14 +707,7 @@ try {
     foreach ($name in $readyConfig.Keys) {
         $config[$name] = $readyConfig[$name]
     }
-    $lines = @(
-        "# platform-ai meeting-ai runtime config v1"
-        "# Secret fields are DPAPI LocalMachine ciphertext. Do not copy to another host."
-    )
-    foreach ($name in $config.Keys) {
-        $lines += "{0}={1}" -f $name, $config[$name]
-    }
-    $content = ($lines -join "`r`n") + "`r`n"
+    $content = ConvertTo-MeetingAiConfigContent -Values $config
 
     [void](Initialize-MeetingAiDirectory -Path (Split-Path -Parent $StorePath))
     if ($env:CI -eq "true" -and
@@ -525,26 +716,39 @@ try {
     }
     Write-MeetingAiConfigAtomic -Path $ConfigPath -Content $content
     if ($effectiveReadyEnabled -eq "true") {
-        $permitActivated = $true
+        $activationCommitted = $true
         if (-not [string]::IsNullOrWhiteSpace($previousPermitPath) -and
             $previousPermitPath -ne $stagedPermitPath -and
             (Test-Path -LiteralPath $previousPermitPath -PathType Leaf)) {
             Remove-Item -LiteralPath $previousPermitPath -Force
+        }
+        if (-not [string]::IsNullOrWhiteSpace($previousActivationReceiptPath) -and
+            $previousActivationReceiptPath -ne $stagedActivationReceiptPath -and
+            (Test-Path -LiteralPath $previousActivationReceiptPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $previousActivationReceiptPath -Force
         }
     }
     if (-not [string]::IsNullOrWhiteSpace($permitToRevoke) -and
         (Test-Path -LiteralPath $permitToRevoke -PathType Leaf)) {
         Remove-Item -LiteralPath $permitToRevoke -Force
     }
+    if (-not [string]::IsNullOrWhiteSpace($receiptToRevoke) -and
+        (Test-Path -LiteralPath $receiptToRevoke -PathType Leaf)) {
+        Remove-Item -LiteralPath $receiptToRevoke -Force
+    }
     Write-Host "meeting-ai runtime config written: $ConfigPath"
     Write-Host "active encryption key id: $activeKeyId"
     Write-Host "Restart task with schtasks.exe /End and /Run for platform-ai-meeting-ai."
 } finally {
-    if (-not $permitActivated -and
-        -not [string]::IsNullOrWhiteSpace($stagedPermitPath) -and
-        $stagedPermitPath -ne $previousPermitPath -and
-        (Test-Path -LiteralPath $stagedPermitPath -PathType Leaf)) {
-        Remove-Item -LiteralPath $stagedPermitPath -Force
+    if (-not $activationCommitted) {
+        foreach ($artifact in @($stagedPermitPath, $stagedActivationReceiptPath)) {
+            if (-not [string]::IsNullOrWhiteSpace($artifact) -and
+                $artifact -ne $previousPermitPath -and
+                $artifact -ne $previousActivationReceiptPath -and
+                (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+                Remove-Item -LiteralPath $artifact -Force
+            }
+        }
     }
     if ($lockTaken) { [void]$mutex.ReleaseMutex() }
     $mutex.Dispose()

@@ -98,6 +98,19 @@ mevcut config'i yeni backup yaparak iki surum arasinda geri donulebilir kalir:
 .\deploy\gpu-host\configure-meeting-ai.ps1 -RestoreBackup
 ```
 
+Backup transcript-ready consumer'i acik duruma getiriyorsa eski aktivasyon izni
+yeniden kullanilmaz. Hedef ortama bagli yeni, tek-kullanimlik permit verilmelidir:
+
+```powershell
+.\deploy\gpu-host\configure-meeting-ai.ps1 `
+  -RestoreBackup `
+  -ReadyPermitSourcePath C:\secure-transfer\transcript-ready-permit.json
+```
+
+Kaynak permit atomik olarak tuketilir; hash tabanli consumption kaydi replay'i
+reddeder. Yeni permit ve activation receipt once dar ACL'li runtime kokunde
+hazirlanir, config ancak ikisi de dogrulandiktan sonra atomik olarak degistirilir.
+
 `/health` sadece senkron `/transcribe` modelinin lazy-load durumunu gosterir.
 Canli urun yuzeyi icin asil readiness `/ws/stream` handshake'idir:
 `loading/live_model -> loading/final_model -> ready`. `update.ps1` restart
