@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib.util
 import json
 import time
@@ -539,6 +540,73 @@ def test_main_redacts_failure_stderr_and_exception_details(
         "schema": "platform-ai.live-stt.stream-smoke.error.v1",
         "ok": False,
         "error_code": expected_code,
+    }
+    assert captured.err == ""
+    assert secret not in captured.out
+    assert "Traceback" not in captured.out
+
+
+def test_main_retrieves_concurrent_receiver_failure_without_stderr_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    smoke = _load_smoke_module()
+    secret = "/Users/private/tenant-a/meeting.wav?access_token=do-not-log"
+    events = [
+        {"type": "loading", "stage": "live_model"},
+        {"type": "loading", "stage": "final_model"},
+        {
+            "type": "ready",
+            "sample_rate": 16_000,
+            "live_model": "fixture-live",
+            "final_model": "fixture-final",
+            "partial_mode": "stable-v1",
+            "protocol": "source-ranges-v1",
+            "capabilities": ["eof", "source-ranges-v1"],
+            "supports_eof": True,
+            "terminal_timeout_ms": 60_000,
+        },
+        {"type": "unexpected"},
+    ]
+
+    class FakeWebsocket:
+        async def recv(self) -> str:
+            await asyncio.sleep(0)
+            return json.dumps(events.pop(0))
+
+        async def send(self, payload: bytes | str) -> None:
+            if isinstance(payload, bytes):
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                raise RuntimeError(secret)
+
+    class FakeConnection:
+        async def __aenter__(self) -> FakeWebsocket:
+            return FakeWebsocket()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(smoke.websockets, "connect", lambda *_args, **_kwargs: FakeConnection())
+    monkeypatch.setattr(
+        smoke,
+        "load_wav_float32",
+        lambda _path: np.ones(16, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        smoke,
+        "audio_frames",
+        lambda _audio, **_kwargs: [np.ones(1, dtype=np.float32)],
+    )
+
+    assert smoke.main(["--wav", secret, "--tail-silence-sec", "0"]) == 1
+    gc.collect()
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out) == {
+        "schema": "platform-ai.live-stt.stream-smoke.error.v1",
+        "ok": False,
+        "error_code": "smoke_internal_failed",
     }
     assert captured.err == ""
     assert secret not in captured.out

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import hashlib
 import json
 import math
@@ -500,27 +499,27 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                         raise SmokeError("unexpected event type in stream state machine")
 
             receiver_task = asyncio.create_task(receiver())
-            for frame in frames:
-                frame_samples = int(frame.shape[0])
-                samples_sent += frame_samples
-                try:
-                    await websocket.send(frame.astype(np.float32).tobytes())
-                except Exception:
-                    samples_sent -= frame_samples
-                    raise
-                await asyncio.sleep(args.frame_ms / 1000)
-
             try:
-                await websocket.send(json.dumps({"type": "eof"}, separators=(",", ":")))
-                eof_sent.set()
-                await asyncio.wait_for(receiver_task, timeout=args.final_wait_sec)
-            except TimeoutError:
-                errors.append("terminal_drain_timeout")
+                for frame in frames:
+                    frame_samples = int(frame.shape[0])
+                    samples_sent += frame_samples
+                    try:
+                        await websocket.send(frame.astype(np.float32).tobytes())
+                    except Exception:
+                        samples_sent -= frame_samples
+                        raise
+                    await asyncio.sleep(args.frame_ms / 1000)
+
+                try:
+                    await websocket.send(json.dumps({"type": "eof"}, separators=(",", ":")))
+                    eof_sent.set()
+                    await asyncio.wait_for(receiver_task, timeout=args.final_wait_sec)
+                except TimeoutError:
+                    errors.append("terminal_drain_timeout")
             finally:
                 if not receiver_task.done():
                     receiver_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await receiver_task
+                await asyncio.gather(receiver_task, return_exceptions=True)
 
     return build_summary(
         url=args.url,
