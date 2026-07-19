@@ -492,5 +492,7 @@ def get_settings() -> Settings:
         # is therefore opt-in and limited to an explicit dev/test process.
         process_env = os.environ.get("MAI_APP_ENV", "dev").lower()
         env_file = ".env" if process_env in {"dev", "test"} else None
-        _settings = Settings(_env_file=env_file)
+        # `_env_file` is a documented BaseSettings runtime parameter, but the
+        # generated subclass constructor exposed to mypy omits it.
+        _settings = Settings(_env_file=env_file)  # type: ignore[call-arg]
     return _settings

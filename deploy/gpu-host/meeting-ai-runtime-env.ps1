@@ -717,6 +717,25 @@ function Get-MeetingAiFileSha256 {
     }
 }
 
+function Invoke-MeetingAiGitCapture {
+    param([Parameter(Mandatory = $true)][string[]]$GitArgs)
+
+    # Windows PowerShell 5.1 converts native stderr into error records. Git can
+    # emit harmless line-ending warnings while still returning the exit code we
+    # need, so capture it under Continue and keep all value-bearing output local.
+    $oldEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(& git @GitArgs 2> $null)
+        return [pscustomobject]@{
+            ExitCode = $LASTEXITCODE
+            Output = $output
+        }
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
+}
+
 function Assert-TranscriptReadyPermitFile {
     param(
         [Parameter(Mandatory = $true)][string]$PermitPath,
@@ -799,24 +818,33 @@ function Assert-TranscriptReadyPermitFile {
     }
 
     $repoFull = Resolve-FixedLocalPath -Path $RepoRoot -Purpose "Platform-ai repository"
-    $repoCommit = (& git -C $repoFull rev-parse HEAD 2>$null).Trim().ToLowerInvariant()
-    if ($LASTEXITCODE -ne 0 -or $repoCommit -notmatch '^[0-9a-f]{40}$') {
+    $headResult = Invoke-MeetingAiGitCapture -GitArgs @(
+        "-C", $repoFull, "rev-parse", "HEAD"
+    )
+    if ($headResult.ExitCode -ne 0 -or $headResult.Output.Count -ne 1) {
         throw "Platform-ai repository identity could not be read."
     }
-    & git -C $repoFull diff --quiet --cached -- 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Platform-ai repository worktree is not clean."
+    $repoCommit = "$($headResult.Output[0])".Trim().ToLowerInvariant()
+    if ($repoCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "Platform-ai repository identity could not be read."
     }
-    & git -C $repoFull diff --quiet -- 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Platform-ai repository worktree is not clean."
-    }
-    $untracked = @(& git -C $repoFull ls-files --others --exclude-standard -- `
-        "deploy/gpu-host" "services/meeting-ai-service" 2>$null)
-    if ($LASTEXITCODE -ne 0) {
+    $dirtyResult = Invoke-MeetingAiGitCapture -GitArgs @(
+        "-C", $repoFull, "status", "--porcelain", "--untracked-files=no"
+    )
+    if ($dirtyResult.ExitCode -ne 0) {
         throw "Platform-ai repository worktree identity could not be verified."
     }
-    if ($untracked.Count -ne 0) {
+    if ($dirtyResult.Output.Count -ne 0) {
+        throw "Platform-ai repository worktree is not clean."
+    }
+    $untrackedResult = Invoke-MeetingAiGitCapture -GitArgs @(
+        "-C", $repoFull, "ls-files", "--others", "--exclude-standard", "--",
+        "deploy/gpu-host", "services/meeting-ai-service"
+    )
+    if ($untrackedResult.ExitCode -ne 0) {
+        throw "Platform-ai repository worktree identity could not be verified."
+    }
+    if ($untrackedResult.Output.Count -ne 0) {
         throw "Platform-ai repository worktree contains untracked deployed content."
     }
     if ($AppEnv -in @("stage", "prod") -and
