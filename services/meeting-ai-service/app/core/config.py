@@ -403,9 +403,7 @@ class Settings(BaseSettings):
             self.transcript_service_client_id
             and self.transcript_service_client_secret.get_secret_value()
         ):
-            raise ValueError(
-                "ready consumer requires transcript-service client credentials"
-            )
+            raise ValueError("ready consumer requires transcript-service client credentials")
         if self.transcript_service_permissions != ["transcript:canonical:read"]:
             raise ValueError(
                 "MAI_TRANSCRIPT_SERVICE_SCOPE must request only transcript:canonical:read"

@@ -295,11 +295,13 @@ def test_missing_segments_is_terminal(tmp_path: Path) -> None:
 def test_snapshot_and_capability_use_separate_permissions_without_second_transfer(
     tmp_path: Path,
 ) -> None:
-    async def scenario() -> tuple[
-        list[dict[str, list[str]]],
-        list[httpx.Request],
-        str,
-    ]:
+    async def scenario() -> (
+        tuple[
+            list[dict[str, list[str]]],
+            list[httpx.Request],
+            str,
+        ]
+    ):
         token_forms: list[dict[str, list[str]]] = []
         service_requests: list[httpx.Request] = []
 

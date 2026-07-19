@@ -316,6 +316,7 @@ class ReadyEventConsumerRuntime:
         try:
             snapshot = await self._transcripts.fetch(event)
             segments = [segment.model_dump() for segment in snapshot.segments]
+
             async def persist_result(
                 command: AnalysisCommand,
                 result: AnalyzeResponse,

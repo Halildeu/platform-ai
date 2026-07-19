@@ -606,7 +606,8 @@ def test_real_mtls_handshake_requires_trusted_client_certificate(tmp_path: Path)
                 body = json.dumps(_acknowledgment()).encode()
             writer.write(
                 f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\n"
-                f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body
+                f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                + body
             )
             await writer.drain()
         finally:

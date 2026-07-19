@@ -320,9 +320,7 @@ class HttpCanonicalTranscriptClient:
             )
         try:
             capability = response.headers["X-Analysis-Job-Capability"].strip()
-            expires_at_header = response.headers[
-                "X-Analysis-Job-Capability-Expires-At"
-            ].strip()
+            expires_at_header = response.headers["X-Analysis-Job-Capability-Expires-At"].strip()
             if not capability or len(capability) > 8192 or len(expires_at_header) > 128:
                 raise ValueError("invalid capability headers")
             capability_expires_at = _aware_datetime(expires_at_header)
