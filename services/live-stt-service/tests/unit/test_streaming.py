@@ -31,7 +31,7 @@ from app.services.streaming_models import (
     get_final_service,
     get_live_service,
 )
-from app.services.worker import WorkerTimeoutError
+from app.services.worker import WorkerCrashedError, WorkerTimeoutError
 
 
 @pytest.fixture(autouse=True)
@@ -523,6 +523,100 @@ def test_supervised_final_worker_timeout_terminates_and_respawns(
 
     assert recovered == "Yeniden başlayan worker yanıtı"
     assert service.model_loaded is True
+
+
+def test_supervised_final_worker_does_not_respawn_when_kill_cannot_stop_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnkillableProcess:
+        terminated = False
+        killed = False
+
+        def is_alive(self) -> bool:
+            return True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedFinalWhisperService)
+    service._timeout_sec = 0.01
+    service._load_timeout_sec = 0.01
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = UnkillableProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    service._restart_blocked = False
+    starts: list[None] = []
+    monkeypatch.setattr(service, "_start", lambda: starts.append(None))
+
+    with pytest.raises(WorkerCrashedError, match="could not be stopped safely"):
+        service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+
+    assert service._process.terminated is True
+    assert service._process.killed is True
+    assert service._restart_blocked is True
+    assert service.model_loaded is False
+    assert starts == []
+
+    with pytest.raises(WorkerCrashedError, match="restart is blocked"):
+        service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False)
+    assert starts == []
+
+
+def test_terminal_decode_timeout_never_reloads_model_inside_declared_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        alive = True
+        terminated = False
+        killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedFinalWhisperService)
+    service._timeout_sec = 0.01
+    service._load_timeout_sec = 10.0
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    service._restart_blocked = False
+    old_process = service._process
+    starts: list[None] = []
+    monkeypatch.setattr(service, "_start", lambda: starts.append(None))
+
+    with pytest.raises(WorkerTimeoutError, match="exceeded timeout"):
+        service.transcribe_loaded_array(np.ones(1600, dtype=np.float32), vad=False)
+
+    assert old_process.terminated is True
+    assert old_process.killed is True
+    assert starts == []
+    assert service.model_loaded is False
+
+    with pytest.raises(WorkerCrashedError, match="not ready"):
+        service.transcribe_loaded_array(np.ones(1600, dtype=np.float32), vad=False)
+    assert starts == []
 
 
 def test_direct_stream_service_passes_role_specific_beam_size() -> None:

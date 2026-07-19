@@ -218,6 +218,7 @@ class SupervisedFinalWhisperService:
         self._task_queue: Any = None
         self._result_queue: Any = None
         self._model_loaded = False
+        self._restart_blocked = False
         self._start()
 
     def _start(self) -> None:
@@ -231,6 +232,7 @@ class SupervisedFinalWhisperService:
         )
         self._process.start()
         self._model_loaded = False
+        self._restart_blocked = False
 
     def _is_alive(self) -> bool:
         return self._process is not None and self._process.is_alive()
@@ -244,7 +246,7 @@ class SupervisedFinalWhisperService:
         if callable(cancel_join_thread):
             cancel_join_thread()
 
-    def _terminate_and_restart(self) -> None:
+    def _terminate_and_restart(self, *, restart: bool = True) -> None:
         task_queue = self._task_queue
         result_queue = self._result_queue
         process = self._process
@@ -254,10 +256,22 @@ class SupervisedFinalWhisperService:
             if process.is_alive():
                 process.kill()
                 process.join(timeout=self._kill_grace_sec)
+            if process.is_alive():
+                # Starting another GPU worker while the old native process is
+                # still alive would make process/VRAM use unbounded. Keep the
+                # supervisor permanently fail-closed until the service is
+                # restarted by its orchestrator.
+                self._model_loaded = False
+                self._restart_blocked = True
+                raise WorkerCrashedError(
+                    "streaming final worker could not be stopped safely"
+                )
         self._close_queue(task_queue)
         self._close_queue(result_queue)
         self._process = None
-        self._start()
+        self._model_loaded = False
+        if restart:
+            self._start()
 
     def _invoke(
         self,
@@ -266,12 +280,17 @@ class SupervisedFinalWhisperService:
         timeout_sec: float,
         audio: bytes | None = None,
         vad: bool = False,
+        restart_on_failure: bool = True,
     ) -> str:
         deadline = time.monotonic() + timeout_sec
+        if getattr(self, "_restart_blocked", False):
+            raise WorkerCrashedError("streaming final worker restart is blocked")
         if not self._call_lock.acquire(timeout=timeout_sec):
             raise WorkerTimeoutError("streaming final worker queue exceeded timeout")
         try:
             if not self._is_alive():
+                if not restart_on_failure:
+                    raise WorkerCrashedError("streaming final worker is not alive")
                 self._terminate_and_restart()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -288,19 +307,19 @@ class SupervisedFinalWhisperService:
                     timeout=remaining,
                 )
             except queue.Full as exc:
-                self._terminate_and_restart()
+                self._terminate_and_restart(restart=restart_on_failure)
                 raise WorkerTimeoutError(
                     "streaming final worker queue exceeded timeout"
                 ) from exc
             while True:
                 if not self._is_alive():
-                    self._terminate_and_restart()
+                    self._terminate_and_restart(restart=restart_on_failure)
                     raise WorkerCrashedError(
                         "streaming final worker exited before response"
                     )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    self._terminate_and_restart()
+                    self._terminate_and_restart(restart=restart_on_failure)
                     raise WorkerTimeoutError("streaming final worker exceeded timeout")
                 try:
                     response = self._result_queue.get(timeout=min(0.1, remaining))
@@ -337,6 +356,27 @@ class SupervisedFinalWhisperService:
             timeout_sec=self._timeout_sec,
             audio=contiguous.astype("<f4", copy=False).tobytes(),
             vad=vad,
+        )
+
+    def transcribe_loaded_array(
+        self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
+    ) -> str:
+        """Decode only with the worker that was proven ready for this stream.
+
+        EOF must never hide a cold model reload behind the terminal timeout
+        advertised during the ready handshake. If the supervised worker was
+        recycled after readiness, this connection fails closed and a new
+        connection performs model loading before it can receive audio.
+        """
+        if not self.model_loaded:
+            raise WorkerCrashedError("streaming final worker is not ready")
+        contiguous = np.ascontiguousarray(audio, dtype=np.float32)
+        return self._invoke(
+            "transcribe",
+            timeout_sec=self._timeout_sec,
+            audio=contiguous.astype("<f4", copy=False).tobytes(),
+            vad=vad,
+            restart_on_failure=False,
         )
 
 

@@ -12,6 +12,8 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
+import re
 import sys
 import time
 import wave
@@ -39,6 +41,26 @@ DEFAULT_MIN_FINAL_EVENTS = 1
 DEFAULT_MAX_TRANSCRIPT_GAP_MS = 6000
 STREAM_PROTOCOL = "source-ranges-v1"
 READY_CAPABILITIES = ["eof", STREAM_PROTOCOL]
+PARTIAL_EVENT_KEYS = {
+    "type",
+    "seq",
+    "confirmed",
+    "tentative",
+    "elapsed_ms",
+    "rms",
+    "source",
+}
+FINAL_EVENT_KEYS = {
+    "type",
+    "seq",
+    "text",
+    "reason",
+    "elapsed_ms",
+    "rms",
+    "source_start_sample",
+    "source_end_sample",
+}
+FINAL_REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 AudioArray = NDArray[np.float32]
 
 
@@ -72,6 +94,56 @@ def validate_ready_event(event: dict[str, Any]) -> None:
         or not 1_000 <= expected_terminal_timeout_ms <= 120_000
     ):
         raise SmokeError("ready event does not satisfy source-ranges-v1 contract")
+
+
+def _is_non_negative_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _is_non_negative_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int | float)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
+
+
+def validate_transcript_event(event: dict[str, Any]) -> None:
+    event_type = event.get("type")
+    if event_type == "partial":
+        valid = (
+            set(event) == PARTIAL_EVENT_KEYS
+            and _is_non_negative_int(event.get("seq"))
+            and isinstance(event.get("confirmed"), str)
+            and isinstance(event.get("tentative"), str)
+            and _is_non_negative_int(event.get("elapsed_ms"))
+            and _is_non_negative_number(event.get("rms"))
+            and isinstance(event.get("source"), str)
+            and bool(event.get("source"))
+        )
+    elif event_type == "final":
+        source_start = event.get("source_start_sample")
+        source_end = event.get("source_end_sample")
+        reason = event.get("reason")
+        valid = (
+            set(event) == FINAL_EVENT_KEYS
+            and _is_non_negative_int(event.get("seq"))
+            and isinstance(event.get("text"), str)
+            and bool(str(event.get("text", "")).strip())
+            and isinstance(reason, str)
+            and FINAL_REASON_RE.fullmatch(reason) is not None
+            and _is_non_negative_int(event.get("elapsed_ms"))
+            and _is_non_negative_number(event.get("rms"))
+            and _is_non_negative_int(source_start)
+            and _is_non_negative_int(source_end)
+            and int(cast(int, source_end)) > int(cast(int, source_start))
+        )
+    else:
+        valid = False
+
+    if not valid:
+        raise SmokeError(f"{event_type or 'unknown'} event violates source-ranges-v1 contract")
 
 
 def _word_count(text: str) -> int:
@@ -339,6 +411,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     received_at_ms = int((time.perf_counter() - started_at) * 1000)
                     event_type = event.get("type")
                     if event_type in {"partial", "final"}:
+                        validate_transcript_event(event)
                         transcript_events.append(redacted_transcript_event(event, received_at_ms))
                     elif event_type in {"eof_ack", "drained"}:
                         terminal_events.append(str(event_type))

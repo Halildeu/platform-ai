@@ -88,7 +88,7 @@ def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ready["protocol"] == "source-ranges-v1"
     assert ready["capabilities"] == ["eof", "source-ranges-v1"]
     assert ready["supports_eof"] is True
-    assert ready["terminal_timeout_ms"] == 60_000
+    assert ready["terminal_timeout_ms"] == 34_000
 
 
 def test_partial_and_final_payload_shapes_match_contract() -> None:
@@ -133,6 +133,58 @@ def test_eof_without_audio_emits_ack_then_drained(monkeypatch: pytest.MonkeyPatc
     assert_valid(eof_ack)
     assert_valid(drained)
     assert [eof_ack["type"], drained["type"]] == ["eof_ack", "drained"]
+
+
+def test_eof_does_not_wait_for_stalled_draft_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+    )
+    draft_started = threading.Event()
+    release_draft = threading.Event()
+
+    def blocking_draft(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if _is_final_service(self):
+            return "Kapanış finali kalıcı."
+        draft_started.set()
+        release_draft.wait(timeout=2.0)
+        return "Bu geç taslak yayınlanmamalı"
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        blocking_draft,
+    )
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert draft_started.wait(timeout=1.0)
+        started = time.monotonic()
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        ack_elapsed = time.monotonic() - started
+        release_draft.set()
+        final = ws.receive_json()
+        drained = ws.receive_json()
+
+    for event in (eof_ack, final, drained):
+        assert_valid(event)
+    assert ack_elapsed < 0.5
+    assert [eof_ack["type"], final["type"], drained["type"]] == [
+        "eof_ack",
+        "final",
+        "drained",
+    ]
 
 
 def test_eof_flushes_late_final_before_drained(monkeypatch: pytest.MonkeyPatch) -> None:

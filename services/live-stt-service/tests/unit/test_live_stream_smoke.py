@@ -86,13 +86,17 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
             "tentative": "aktif",
             "elapsed_ms": 100,
             "rms": 0.02,
+            "source": "fixture-live",
         },
         {
             "type": "final",
             "seq": 0,
             "text": "Kelime akışı aktif ve doğru",
+            "reason": "eof",
             "elapsed_ms": 200,
             "rms": 0.02,
+            "source_start_sample": 0,
+            "source_end_sample": 16_000,
         },
         {"type": "eof_ack"},
         {"type": "drained"},
@@ -136,6 +140,22 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
     assert summary["ok"] is True
     assert summary["events"]["terminal_sequence"] == ["eof_ack", "drained"]
     assert websocket.sent == ['{"type":"eof"}']
+
+
+def test_transcript_contract_rejects_final_without_source_range() -> None:
+    smoke = _load_smoke_module()
+
+    with pytest.raises(smoke.SmokeError, match="final event violates"):
+        smoke.validate_transcript_event(
+            {
+                "type": "final",
+                "seq": 0,
+                "text": "Eksik final",
+                "reason": "eof",
+                "elapsed_ms": 200,
+                "rms": 0.02,
+            }
+        )
 
 
 def test_wav_loader_resamples_common_voice_fixture_to_16khz_float32() -> None:

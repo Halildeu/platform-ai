@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import re
 import time
 
@@ -37,7 +38,11 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
 from app.services.hallucination import is_hallucination
-from app.services.streaming_models import get_final_service, get_live_service
+from app.services.streaming_models import (
+    SupervisedFinalWhisperService,
+    get_final_service,
+    get_live_service,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -578,10 +583,17 @@ async def stream_endpoint(
             "protocol": STREAM_PROTOCOL,
             "capabilities": ["eof", STREAM_PROTOCOL],
             "supports_eof": True,
-            # EOF can first wait for an in-flight periodic final and then flush
-            # the remaining tail. Consumers combine this declared upper bound
-            # with their own durable-persistence budget before admitting audio.
-            "terminal_timeout_ms": int(settings.stream_final_timeout_sec * 2 * 1_000),
+            # EOF cancels (without awaiting) an in-flight draft/final coroutine.
+            # The terminal decode uses only the model proven ready above and its
+            # hard worker deadline. Two kill joins are included because failure
+            # cleanup must also complete before the socket can close fail-closed.
+            "terminal_timeout_ms": math.ceil(
+                (
+                    settings.stream_final_timeout_sec
+                    + (2 * settings.worker_kill_grace_sec)
+                )
+                * 1_000
+            ),
         }
     )
     logger.info(
@@ -745,8 +757,14 @@ async def stream_endpoint(
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
         started = time.perf_counter()
         try:
+            if reason == "eof" and isinstance(
+                final_service, SupervisedFinalWhisperService
+            ):
+                transcribe = final_service.transcribe_loaded_array
+            else:
+                transcribe = final_service.transcribe_array
             final_call = run_in_threadpool(
-                final_service.transcribe_array,
+                transcribe,
                 audio,
                 settings.stream_final_vad_filter,
             )
@@ -982,12 +1000,15 @@ async def stream_endpoint(
             text = message.get("text")
             if text is not None:
                 _decode_terminal_control(text)
-                # No live partial may cross the acknowledged terminal boundary.
-                # A partial already in flight is allowed to finish before the
-                # acknowledgement; after eof_ack only late finals and drained
-                # are valid server events.
+                # No draft/native call may hold the terminal boundary open. The
+                # coroutine cancellation prevents a late partial from resuming
+                # and publishing even if its abandoned thread eventually exits.
+                # Final inference is supervised separately and stays bounded.
                 stop_inference.set()
-                await inference_task
+                if not inference_task.done():
+                    inference_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await inference_task
                 await send_json({"type": "eof_ack"})
                 final_payload = await reject_post_eof_frame()
                 if final_payload is not None:
