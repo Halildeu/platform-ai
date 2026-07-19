@@ -211,9 +211,9 @@ def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> Audio
         frames = wav.readframes(wav.getnframes())
 
     if channels < 1:
-        raise SmokeError(f"{path} has no audio channels")
+        raise SmokeError("audio fixture has no channels")
     if sample_width != 2:
-        raise SmokeError(f"{path} must be PCM16 WAV; sample_width={sample_width}")
+        raise SmokeError("audio fixture must be PCM16 WAV")
 
     pcm = np.frombuffer(frames, dtype="<i2").astype(np.float32)
     if channels > 1:
@@ -224,7 +224,7 @@ def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> Audio
         return audio
 
     if source_rate <= 0:
-        raise SmokeError(f"{path} has invalid sample rate {source_rate}")
+        raise SmokeError("audio fixture has an invalid sample rate")
     duration = audio.shape[0] / source_rate
     target_len = max(1, int(round(duration * sample_rate)))
     source_x = np.linspace(0.0, duration, num=audio.shape[0], endpoint=False)
@@ -580,7 +580,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    summary = asyncio.run(run_smoke(args))
+    try:
+        summary = asyncio.run(run_smoke(args))
+    except SmokeError:
+        print(
+            json.dumps(
+                {
+                    "schema": "platform-ai.live-stt.stream-smoke.error.v1",
+                    "ok": False,
+                    "error_code": "smoke_contract_failed",
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 1
+    except Exception:  # noqa: BLE001 - CLI boundary must never emit raw traceback/evidence
+        print(
+            json.dumps(
+                {
+                    "schema": "platform-ai.live-stt.stream-smoke.error.v1",
+                    "ok": False,
+                    "error_code": "smoke_internal_failed",
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 1
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if summary["ok"] else 1
 

@@ -212,6 +212,7 @@ class _SupervisedWhisperService:
         self._kill_grace_sec = settings.worker_kill_grace_sec
         self._ctx = mp.get_context("spawn")
         self._call_lock = threading.Lock()
+        self._closing = threading.Event()
         self._process: Any | None = None
         self._task_queue: Any = None
         self._result_queue: Any = None
@@ -221,6 +222,8 @@ class _SupervisedWhisperService:
         self._start()
 
     def _start(self) -> None:
+        if self._is_closing():
+            raise WorkerCrashedError(f"streaming {self.role} worker is shutting down")
         self._generation = getattr(self, "_generation", 0) + 1
         self._task_queue = self._ctx.Queue(maxsize=1)
         self._result_queue = self._ctx.Queue(maxsize=1)
@@ -237,6 +240,10 @@ class _SupervisedWhisperService:
     def _is_alive(self) -> bool:
         return self._process is not None and self._process.is_alive()
 
+    def _is_closing(self) -> bool:
+        closing = getattr(self, "_closing", None)
+        return closing is not None and closing.is_set()
+
     @staticmethod
     def _close_queue(queue_object: Any) -> None:
         close = getattr(queue_object, "close", None)
@@ -246,16 +253,24 @@ class _SupervisedWhisperService:
         if callable(cancel_join_thread):
             cancel_join_thread()
 
-    def _terminate_and_restart(self, *, restart: bool = True) -> None:
+    def _terminate_and_restart(
+        self, *, restart: bool = True, deadline: float | None = None
+    ) -> None:
         task_queue = self._task_queue
         result_queue = self._result_queue
         process = self._process
+
+        def join_timeout() -> float:
+            if deadline is None:
+                return self._kill_grace_sec
+            return max(0.0, min(self._kill_grace_sec, deadline - time.monotonic()))
+
         if process is not None and process.is_alive():
             process.terminate()
-            process.join(timeout=self._kill_grace_sec)
+            process.join(timeout=join_timeout())
             if process.is_alive():
                 process.kill()
-                process.join(timeout=self._kill_grace_sec)
+                process.join(timeout=join_timeout())
             if process.is_alive():
                 # Starting another GPU worker while the old native process is
                 # still alive would make process/VRAM use unbounded. Keep the
@@ -270,95 +285,114 @@ class _SupervisedWhisperService:
         self._close_queue(result_queue)
         self._process = None
         self._model_loaded = False
-        if restart:
+        if restart and not self._is_closing():
             self._start()
 
-    def _invoke(
+    def _invoke_locked(
         self,
         operation: str,
         *,
-        timeout_sec: float,
+        deadline: float,
         audio: bytes | None = None,
         vad: bool = False,
         restart_on_failure: bool = True,
         required_generation: int | None = None,
         require_loaded: bool = False,
     ) -> str:
-        deadline = time.monotonic() + timeout_sec
+        if self._is_closing():
+            raise WorkerCrashedError(
+                f"streaming {getattr(self, 'role', 'final')} worker is shutting down"
+            )
         if getattr(self, "_restart_blocked", False):
             raise WorkerCrashedError(
                 f"streaming {getattr(self, 'role', 'final')} worker restart is blocked"
             )
-        if not self._call_lock.acquire(timeout=timeout_sec):
+        if required_generation is not None and (
+            self._generation != required_generation
+            or (require_loaded and not self._model_loaded)
+            or not self._is_alive()
+        ):
+            raise WorkerCrashedError(
+                f"streaming {getattr(self, 'role', 'final')} worker readiness changed"
+            )
+        if not self._is_alive():
+            if not restart_on_failure:
+                raise WorkerCrashedError(
+                    f"streaming {getattr(self, 'role', 'final')} worker is not alive"
+                )
+            self._terminate_and_restart()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise WorkerTimeoutError(
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
             )
+        job_id = str(uuid.uuid4())
         try:
-            if required_generation is not None and (
-                self._generation != required_generation
-                or (require_loaded and not self._model_loaded)
-                or not self._is_alive()
-            ):
+            self._task_queue.put(
+                {
+                    "type": operation,
+                    "job_id": job_id,
+                    "audio": audio,
+                    "vad": vad,
+                },
+                timeout=remaining,
+            )
+        except queue.Full as exc:
+            self._terminate_and_restart(restart=restart_on_failure)
+            raise WorkerTimeoutError(
+                f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
+            ) from exc
+        while True:
+            if self._is_closing():
                 raise WorkerCrashedError(
-                    f"streaming {getattr(self, 'role', 'final')} worker readiness changed"
+                    f"streaming {getattr(self, 'role', 'final')} worker is shutting down"
                 )
             if not self._is_alive():
-                if not restart_on_failure:
-                    raise WorkerCrashedError(
-                        f"streaming {getattr(self, 'role', 'final')} worker is not alive"
-                    )
-                self._terminate_and_restart()
+                self._terminate_and_restart(restart=restart_on_failure)
+                raise WorkerCrashedError(
+                    f"streaming {getattr(self, 'role', 'final')} worker exited before response"
+                )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise WorkerTimeoutError(
-                    f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
-                )
-            job_id = str(uuid.uuid4())
-            try:
-                self._task_queue.put(
-                    {
-                        "type": operation,
-                        "job_id": job_id,
-                        "audio": audio,
-                        "vad": vad,
-                    },
-                    timeout=remaining,
-                )
-            except queue.Full as exc:
                 self._terminate_and_restart(restart=restart_on_failure)
                 raise WorkerTimeoutError(
-                    f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
-                ) from exc
-            while True:
-                if not self._is_alive():
-                    self._terminate_and_restart(restart=restart_on_failure)
-                    raise WorkerCrashedError(
-                        f"streaming {getattr(self, 'role', 'final')} worker exited before response"
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self._terminate_and_restart(restart=restart_on_failure)
-                    raise WorkerTimeoutError(
-                        f"streaming {getattr(self, 'role', 'final')} worker exceeded timeout"
-                    )
-                try:
-                    response = self._result_queue.get(timeout=min(0.1, remaining))
-                except queue.Empty:
-                    continue
-                if response.get("job_id") != job_id:
-                    continue
-                if not response.get("ok"):
-                    raise RuntimeError(str(response.get("error_class", "RuntimeError")))
-                text = str(response.get("text", ""))
-                if operation == "load":
-                    self._model_loaded = True
-                return text
-        finally:
-            self._call_lock.release()
+                    f"streaming {getattr(self, 'role', 'final')} worker exceeded timeout"
+                )
+            try:
+                response = self._result_queue.get(timeout=min(0.1, remaining))
+            except queue.Empty:
+                continue
+            if response.get("job_id") != job_id:
+                continue
+            if not response.get("ok"):
+                raise RuntimeError(str(response.get("error_class", "RuntimeError")))
+            text = str(response.get("text", ""))
+            if operation == "load":
+                self._model_loaded = True
+            return text
+
+    def _acquire_call_lock(self, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._call_lock.acquire(timeout=remaining):
+            raise WorkerTimeoutError(
+                f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
+            )
+
+    def _ensure_model_locked(self) -> None:
+        if self._model_loaded and self._is_alive():
+            return
+        self._invoke_locked(
+            "load",
+            deadline=time.monotonic() + self._load_timeout_sec,
+        )
 
     def ensure_model(self) -> None:
-        if not self._model_loaded:
-            self._invoke("load", timeout_sec=self._load_timeout_sec)
+        deadline = time.monotonic() + self._load_timeout_sec
+        self._acquire_call_lock(deadline)
+        try:
+            self._ensure_model_locked()
+        finally:
+            self._call_lock.release()
 
     @property
     def model_loaded(self) -> bool:
@@ -367,28 +401,38 @@ class _SupervisedWhisperService:
     @property
     def ready_generation(self) -> int:
         """Return the loaded worker generation under the single-flight lock."""
-        with self._call_lock:
+        deadline = time.monotonic() + self._load_timeout_sec
+        self._acquire_call_lock(deadline)
+        try:
             if not self._model_loaded or not self._is_alive():
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker is not ready"
                 )
             return self._generation
+        finally:
+            self._call_lock.release()
 
     def transcribe_array(
         self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
     ) -> str:
-        # A timeout recycles the child process. Reload the pinned model under the
-        # separate cold-load budget before applying the much shorter inference
-        # budget; otherwise the first post-timeout request can repeatedly kill a
-        # healthy replacement while it is still loading the model.
-        self.ensure_model()
         contiguous = np.ascontiguousarray(audio, dtype=np.float32)
-        return self._invoke(
-            "transcribe",
-            timeout_sec=self._timeout_sec,
-            audio=contiguous.astype("<f4", copy=False).tobytes(),
-            vad=vad,
-        )
+        queue_deadline = time.monotonic() + self._load_timeout_sec + self._timeout_sec
+        self._acquire_call_lock(queue_deadline)
+        try:
+            # Readiness is rechecked after acquiring the shared single-flight lock.
+            # A preceding timeout may have recycled the process while this call waited.
+            self._ensure_model_locked()
+            ready_generation = self._generation
+            return self._invoke_locked(
+                "transcribe",
+                deadline=time.monotonic() + self._timeout_sec,
+                audio=contiguous.astype("<f4", copy=False).tobytes(),
+                vad=vad,
+                required_generation=ready_generation,
+                require_loaded=True,
+            )
+        finally:
+            self._call_lock.release()
 
     def transcribe_loaded_array(
         self,
@@ -404,23 +448,36 @@ class _SupervisedWhisperService:
         connection performs model loading before it can receive audio.
         """
         contiguous = np.ascontiguousarray(audio, dtype=np.float32)
-        return self._invoke(
-            "transcribe",
-            timeout_sec=self._timeout_sec,
-            audio=contiguous.astype("<f4", copy=False).tobytes(),
-            vad=vad,
-            restart_on_failure=False,
-            required_generation=expected_generation,
-            require_loaded=True,
-        )
+        deadline = time.monotonic() + self._timeout_sec
+        self._acquire_call_lock(deadline)
+        try:
+            return self._invoke_locked(
+                "transcribe",
+                deadline=deadline,
+                audio=contiguous.astype("<f4", copy=False).tobytes(),
+                vad=vad,
+                restart_on_failure=False,
+                required_generation=expected_generation,
+                require_loaded=True,
+            )
+        finally:
+            self._call_lock.release()
 
     @property
     def healthy(self) -> bool:
-        return not self._restart_blocked and self._is_alive()
+        return not self._restart_blocked and not self._is_closing() and self._is_alive()
 
-    def close(self) -> None:
-        with self._call_lock:
-            self._terminate_and_restart(restart=False)
+    def close(self, *, deadline: float) -> None:
+        closing = getattr(self, "_closing", None)
+        if closing is None:
+            closing = threading.Event()
+            self._closing = closing
+        closing.set()
+        self._acquire_call_lock(deadline)
+        try:
+            self._terminate_and_restart(restart=False, deadline=deadline)
+        finally:
+            self._call_lock.release()
 
 
 class SupervisedFinalWhisperService(_SupervisedWhisperService):
@@ -563,10 +620,34 @@ def streaming_services_healthy() -> bool:
         return all(service.healthy for service in supervised)
 
 
-def shutdown_streaming_services() -> None:
+def shutdown_streaming_services(*, timeout_sec: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_sec
     with _services_lock:
         supervised = [*_supervised_live_services.values(), *_supervised_final_services.values()]
-        _supervised_live_services.clear()
-        _supervised_final_services.clear()
-    for service in supervised:
-        service.close()
+    closed: list[_SupervisedWhisperService] = []
+    failures: list[Exception] = []
+    for index, service in enumerate(supervised):
+        remaining_services = len(supervised) - index
+        remaining_total = max(0.0, deadline - time.monotonic())
+        service_deadline = time.monotonic() + (remaining_total / remaining_services)
+        try:
+            service.close(deadline=service_deadline)
+            closed.append(service)
+        except Exception as exc:  # noqa: BLE001 - all workers still get a close attempt
+            failures.append(exc)
+            logger.error(
+                "Streaming worker shutdown failed role=%s err=%s",
+                service.role,
+                type(exc).__name__,
+            )
+    with _services_lock:
+        for key, service in list(_supervised_live_services.items()):
+            if service in closed:
+                del _supervised_live_services[key]
+        for key, service in list(_supervised_final_services.items()):
+            if service in closed:
+                del _supervised_final_services[key]
+    if failures:
+        raise WorkerCrashedError(
+            f"{len(failures)} streaming worker(s) did not stop within the shutdown deadline"
+        ) from failures[0]

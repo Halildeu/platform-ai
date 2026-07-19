@@ -508,6 +508,43 @@ def test_summary_redacts_url_paths_and_upstream_error_values(tmp_path: Path) -> 
     assert summary["fixture"]["artifact_id_sha256_12"]
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        ("contract", "smoke_contract_failed"),
+        ("internal", "smoke_internal_failed"),
+    ],
+)
+def test_main_redacts_failure_stderr_and_exception_details(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+    expected_code: str,
+) -> None:
+    smoke = _load_smoke_module()
+    secret = "/Users/private/tenant-a/meeting.wav?access_token=do-not-log"
+
+    async def fail(_args: object) -> dict[str, object]:
+        if failure == "contract":
+            raise smoke.SmokeError(secret)
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(smoke, "run_smoke", fail)
+
+    assert smoke.main([]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert payload == {
+        "schema": "platform-ai.live-stt.stream-smoke.error.v1",
+        "ok": False,
+        "error_code": expected_code,
+    }
+    assert captured.err == ""
+    assert secret not in captured.out
+    assert "Traceback" not in captured.out
+
+
 def test_summary_fails_when_final_word_coverage_is_too_low() -> None:
     smoke = _load_smoke_module()
     raw_text = "Eksik"

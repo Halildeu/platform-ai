@@ -6,7 +6,6 @@ Run:
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -109,8 +108,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         consumer_thread.join(timeout=5)
     from app.services.streaming_models import shutdown_streaming_services
 
-    with contextlib.suppress(Exception):
+    try:
         shutdown_streaming_services()
+    except Exception as exc:  # noqa: BLE001 - shutdown tried every supervised worker
+        logger.error(
+            "streaming worker shutdown incomplete",
+            extra={"correlation_id": "shutdown", "error_class": type(exc).__name__},
+        )
     logger.info("live-stt-service stopping", extra={"correlation_id": "shutdown"})
 
 

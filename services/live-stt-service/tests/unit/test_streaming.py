@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -24,6 +25,7 @@ from app.api.stream import (
 )
 from app.core import config as config_module
 from app.core.config import Settings
+from app.services import streaming_models as streaming_models_module
 from app.services.hallucination import is_hallucination
 from app.services.streaming_models import (
     DirectWhisperService,
@@ -31,6 +33,7 @@ from app.services.streaming_models import (
     SupervisedLiveWhisperService,
     get_final_service,
     get_live_service,
+    shutdown_streaming_services,
 )
 from app.services.worker import WorkerCrashedError, WorkerTimeoutError
 
@@ -623,6 +626,121 @@ def test_supervised_live_worker_timeout_kills_native_child_without_spawning_thre
     assert old_process.terminated is True
     assert old_process.killed is True
     assert starts == [None]
+
+
+def test_waiting_live_call_reloads_recycled_worker_before_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def is_alive(self) -> bool:
+            return True
+
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._timeout_sec = 0.5
+    service._load_timeout_sec = 0.5
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._model_loaded = True
+    service._restart_blocked = False
+    service._generation = 1
+    service._closing = threading.Event()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    operations: list[str] = []
+    results: list[BaseException | str] = []
+    transcribe_calls = 0
+
+    def fake_invoke_locked(operation: str, **_kwargs: object) -> str:
+        nonlocal transcribe_calls
+        operations.append(operation)
+        if operation == "load":
+            service._model_loaded = True
+            return ""
+        transcribe_calls += 1
+        if transcribe_calls == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=1.0)
+            service._model_loaded = False
+            service._generation += 1
+            raise WorkerTimeoutError("first inference recycled worker")
+        assert service._model_loaded is True
+        return "recovered"
+
+    monkeypatch.setattr(service, "_invoke_locked", fake_invoke_locked)
+
+    def transcribe() -> None:
+        try:
+            results.append(service.transcribe_array(np.ones(1600, dtype=np.float32), vad=False))
+        except BaseException as exc:  # noqa: BLE001 - assertion captures thread result
+            results.append(exc)
+
+    first = threading.Thread(target=transcribe)
+    second = threading.Thread(target=transcribe)
+    first.start()
+    assert first_entered.wait(timeout=1.0)
+    second.start()
+    release_first.set()
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert any(isinstance(result, WorkerTimeoutError) for result in results)
+    assert "recovered" in results
+    assert operations == ["transcribe", "load", "transcribe"]
+
+
+def test_supervised_worker_close_is_bounded_while_call_lock_is_held() -> None:
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._call_lock = threading.Lock()
+    service._closing = threading.Event()
+    service._call_lock.acquire()
+    started = time.monotonic()
+    try:
+        with pytest.raises(WorkerTimeoutError, match="queue exceeded timeout"):
+            service.close(deadline=time.monotonic() + 0.02)
+    finally:
+        service._call_lock.release()
+
+    assert time.monotonic() - started < 0.2
+    assert service._closing.is_set()
+
+
+def test_shutdown_attempts_every_worker_and_keeps_failed_worker_cached() -> None:
+    calls: list[str] = []
+
+    class FakeService:
+        def __init__(self, role: str, *, fails: bool) -> None:
+            self.role = role
+            self.fails = fails
+
+        def close(self, *, deadline: float) -> None:
+            assert deadline >= time.monotonic()
+            calls.append(self.role)
+            if self.fails:
+                raise WorkerCrashedError("fixture worker remained alive")
+
+    failed = FakeService("live", fails=True)
+    closed = FakeService("final", fails=False)
+    saved_live = dict(streaming_models_module._supervised_live_services)
+    saved_final = dict(streaming_models_module._supervised_final_services)
+    streaming_models_module._supervised_live_services.clear()
+    streaming_models_module._supervised_final_services.clear()
+    streaming_models_module._supervised_live_services["failed"] = failed  # type: ignore[assignment]
+    streaming_models_module._supervised_final_services["closed"] = closed  # type: ignore[assignment]
+    try:
+        with pytest.raises(WorkerCrashedError, match="1 streaming worker"):
+            shutdown_streaming_services(timeout_sec=0.2)
+        assert calls == ["live", "final"]
+        assert streaming_models_module._supervised_live_services == {"failed": failed}
+        assert streaming_models_module._supervised_final_services == {}
+    finally:
+        streaming_models_module._supervised_live_services.clear()
+        streaming_models_module._supervised_live_services.update(saved_live)
+        streaming_models_module._supervised_final_services.clear()
+        streaming_models_module._supervised_final_services.update(saved_final)
 
 
 def test_terminal_decode_timeout_never_reloads_model_inside_declared_budget(
