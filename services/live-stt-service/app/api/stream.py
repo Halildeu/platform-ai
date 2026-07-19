@@ -43,6 +43,7 @@ from app.services.streaming_models import (
     get_final_service,
     get_live_service,
 )
+from app.services.worker import WorkerCrashedError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -557,12 +558,22 @@ async def stream_endpoint(
     final_service = get_final_service(settings)
     debug_enabled = settings.stream_debug
     min_infer_samples = int(settings.min_infer_sec * SAMPLE_RATE)
+    # One absolute EOF budget covers cancellation of an in-flight publication,
+    # the supervised decode/kill path, ack/final/drained, diagnostics and close.
+    terminal_timeout_sec = (
+        settings.stream_final_timeout_sec
+        + (2 * settings.worker_kill_grace_sec)
+        + (6 * settings.stream_transport_timeout_sec)
+    )
+    final_worker_generation: int | None = None
 
     try:
         await websocket.send_json({"type": "loading", "stage": "live_model"})
         await run_in_threadpool(live_service.ensure_model)
         await websocket.send_json({"type": "loading", "stage": "final_model"})
         await run_in_threadpool(final_service.ensure_model)
+        if isinstance(final_service, SupervisedFinalWhisperService):
+            final_worker_generation = final_service.ready_generation
     except WebSocketDisconnect:
         logger.info("WS disconnected during model load")
         return
@@ -587,9 +598,7 @@ async def stream_endpoint(
             # The terminal decode uses only the model proven ready above and its
             # hard worker deadline. Two kill joins are included because failure
             # cleanup must also complete before the socket can close fail-closed.
-            "terminal_timeout_ms": math.ceil(
-                (settings.stream_final_timeout_sec + (2 * settings.worker_kill_grace_sec)) * 1_000
-            ),
+            "terminal_timeout_ms": math.ceil(terminal_timeout_sec * 1_000),
         }
     )
     logger.info(
@@ -621,12 +630,16 @@ async def stream_endpoint(
         if not debug_enabled:
             return
         with contextlib.suppress(Exception):
-            async with send_lock:
-                await websocket.send_json({"type": "debug", "event": event, **payload})
+            await send_json({"type": "debug", "event": event, **payload})
 
     async def send_json(payload: dict[str, object]) -> None:
-        async with send_lock:
-            await websocket.send_json(payload)
+        async with asyncio.timeout(settings.stream_transport_timeout_sec):
+            async with send_lock:
+                await websocket.send_json(payload)
+
+    async def close_websocket(code: int = 1000) -> None:
+        async with asyncio.timeout(settings.stream_transport_timeout_sec):
+            await websocket.close(code=code)
 
     async def emit_final(payload: dict[str, object]) -> None:
         await send_json(payload)
@@ -754,14 +767,20 @@ async def stream_endpoint(
         started = time.perf_counter()
         try:
             if reason == "eof" and isinstance(final_service, SupervisedFinalWhisperService):
-                transcribe = final_service.transcribe_loaded_array
+                if final_worker_generation is None:
+                    raise WorkerCrashedError("streaming final worker readiness is unavailable")
+                final_call = run_in_threadpool(
+                    final_service.transcribe_loaded_array,
+                    audio,
+                    settings.stream_final_vad_filter,
+                    final_worker_generation,
+                )
             else:
-                transcribe = final_service.transcribe_array
-            final_call = run_in_threadpool(
-                transcribe,
-                audio,
-                settings.stream_final_vad_filter,
-            )
+                final_call = run_in_threadpool(
+                    final_service.transcribe_array,
+                    audio,
+                    settings.stream_final_vad_filter,
+                )
             text = (
                 await final_call
                 if getattr(final_service, "hard_timeout", False)
@@ -974,28 +993,28 @@ async def stream_endpoint(
 
         terminal_task = asyncio.create_task(finalize_terminal())
         receive_task = asyncio.create_task(websocket.receive())
-        done, _ = await asyncio.wait(
-            {terminal_task, receive_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        try:
+            done, _ = await asyncio.wait(
+                {terminal_task, receive_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
-        # A client frame or disconnect observed before finalization completes is
-        # not allowed to race the terminal boundary. Prefer the protocol failure
-        # even when both tasks became ready in the same event-loop turn.
-        if receive_task in done:
-            message = receive_task.result()
-            terminal_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await terminal_task
-            if message.get("type") == "websocket.disconnect":
-                raise WebSocketDisconnect(code=int(message.get("code", 1000)))
-            raise StreamProtocolError("post_eof_frame")
+            # A client frame or disconnect observed before finalization completes is
+            # not allowed to race the terminal boundary. Prefer the protocol failure
+            # even when both tasks became ready in the same event-loop turn.
+            if receive_task in done:
+                message = receive_task.result()
+                if message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=int(message.get("code", 1000)))
+                raise StreamProtocolError("post_eof_frame")
 
-        final_payload = await terminal_task
-        receive_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await receive_task
-        return final_payload
+            return await terminal_task
+        finally:
+            for task in (terminal_task, receive_task):
+                if not task.done():
+                    task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
     try:
         while True:
@@ -1006,21 +1025,21 @@ async def stream_endpoint(
             text = message.get("text")
             if text is not None:
                 _decode_terminal_control(text)
-                # No draft/native call may hold the terminal boundary open. The
-                # coroutine cancellation prevents a late partial from resuming
-                # and publishing even if its abandoned thread eventually exits.
-                # Final inference is supervised separately and stays bounded.
-                stop_inference.set()
-                if not inference_task.done():
-                    inference_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await inference_task
-                await send_json({"type": "eof_ack"})
-                final_payload = await reject_post_eof_frame()
-                if final_payload is not None:
-                    await emit_final(final_payload)
-                await send_json({"type": "drained"})
-                await websocket.close(code=1000)
+                # This single absolute deadline includes an in-flight publication,
+                # model/kill time, every terminal write and the clean close. Any
+                # timeout closes fail-closed without claiming drained.
+                async with asyncio.timeout(terminal_timeout_sec):
+                    stop_inference.set()
+                    if not inference_task.done():
+                        inference_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await inference_task
+                    await send_json({"type": "eof_ack"})
+                    final_payload = await reject_post_eof_frame()
+                    if final_payload is not None:
+                        await emit_final(final_payload)
+                    await send_json({"type": "drained"})
+                    await close_websocket(code=1000)
                 return
 
             data = message.get("bytes")
@@ -1074,11 +1093,11 @@ async def stream_endpoint(
         logger.warning("WS stream protocol rejected reason=%s", str(exc))
         with contextlib.suppress(Exception):
             await send_json({"type": "error", "msg": str(exc)})
-            await websocket.close(code=1003)
+            await close_websocket(code=1003)
     except Exception:
         logger.exception("WS stream error")
         with contextlib.suppress(Exception):
-            await websocket.close()
+            await close_websocket()
     finally:
         stop_inference.set()
         if terminal_task is not None and not terminal_task.done():

@@ -13,6 +13,7 @@ from types import ModuleType
 
 import numpy as np
 import pytest
+from websockets.frames import Close
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = ROOT / "scripts" / "live_stream_smoke.py"
@@ -99,20 +100,28 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
             "source_start_sample": 0,
             "source_end_sample": 16_000,
         },
-        {"type": "eof_ack"},
-        {"type": "drained"},
     ]
 
     class FakeWebsocket:
         def __init__(self) -> None:
             self.sent: list[bytes | str] = []
+            self.terminal_ready = asyncio.Event()
+            self.closed = False
 
         async def recv(self) -> str:
-            assert events, "fake websocket event queue exhausted"
+            while not events:
+                if self.closed:
+                    close = Close(1000, "")
+                    raise smoke.ConnectionClosedOK(close, close, True)
+                await self.terminal_ready.wait()
             return json.dumps(events.pop(0))
 
         async def send(self, payload: bytes | str) -> None:
             self.sent.append(payload)
+            if payload == '{"type":"eof"}':
+                events.extend([{"type": "eof_ack"}, {"type": "drained"}])
+                self.closed = True
+                self.terminal_ready.set()
 
     websocket = FakeWebsocket()
 
@@ -170,7 +179,7 @@ def test_transcript_contract_rejects_final_without_source_range() -> None:
         )
 
 
-def test_transcript_contract_rejects_future_range_and_non_contiguous_final_seq() -> None:
+def test_transcript_contract_rejects_future_range_and_non_increasing_final_seq() -> None:
     smoke = _load_smoke_module()
     final = {
         "type": "final",
@@ -200,18 +209,154 @@ def test_transcript_contract_rejects_future_range_and_non_contiguous_final_seq()
             cumulative_samples_sent=16_000,
             previous_final_seq=0,
         )
+    smoke.validate_transcript_event(
+        {**final, "seq": 7},
+        cumulative_samples_sent=16_000,
+        previous_final_seq=None,
+    )
+    smoke.validate_transcript_event(
+        {**final, "seq": 9},
+        cumulative_samples_sent=16_000,
+        previous_final_seq=7,
+    )
     with pytest.raises(smoke.SmokeError, match="final event violates"):
         smoke.validate_transcript_event(
-            {**final, "seq": 1},
+            {**final, "seq": 6},
             cumulative_samples_sent=16_000,
-            previous_final_seq=None,
+            previous_final_seq=7,
         )
-    with pytest.raises(smoke.SmokeError, match="final event violates"):
-        smoke.validate_transcript_event(
-            {**final, "seq": 2},
-            cumulative_samples_sent=16_000,
-            previous_final_seq=0,
-        )
+
+
+def test_run_smoke_rejects_terminal_ack_before_local_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smoke = _load_smoke_module()
+    events = [
+        {"type": "loading", "stage": "live_model"},
+        {"type": "loading", "stage": "final_model"},
+        {
+            "type": "ready",
+            "sample_rate": 16_000,
+            "live_model": "fixture-live",
+            "final_model": "fixture-final",
+            "partial_mode": "stable-v1",
+            "protocol": "source-ranges-v1",
+            "capabilities": ["eof", "source-ranges-v1"],
+            "supports_eof": True,
+            "terminal_timeout_ms": 60_000,
+        },
+        {"type": "eof_ack"},
+    ]
+
+    class FakeWebsocket:
+        async def recv(self) -> str:
+            return json.dumps(events.pop(0))
+
+        async def send(self, _payload: bytes | str) -> None:
+            return None
+
+    websocket = FakeWebsocket()
+
+    class FakeConnection:
+        async def __aenter__(self) -> FakeWebsocket:
+            return websocket
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(smoke.websockets, "connect", lambda *_args, **_kwargs: FakeConnection())
+    monkeypatch.setattr(
+        smoke,
+        "audio_frames",
+        lambda audio, **_kwargs: [np.asarray(audio[:1], dtype=np.float32)],
+    )
+    args = smoke.parse_args(["--wav", str(FIXTURE), "--tail-silence-sec", "0", "--frame-ms", "1"])
+
+    with pytest.raises(smoke.SmokeError, match="not caused by local eof"):
+        asyncio.run(smoke.run_smoke(args))
+
+
+@pytest.mark.parametrize(
+    ("terminal_events", "expected_error"),
+    [
+        (
+            [
+                {"type": "eof_ack"},
+                {
+                    "type": "partial",
+                    "seq": 0,
+                    "confirmed": "",
+                    "tentative": "gecikmis",
+                    "elapsed_ms": 1,
+                    "rms": 0.01,
+                    "source": "fixture-live",
+                },
+            ],
+            "partial event received after eof_ack",
+        ),
+        (
+            [
+                {"type": "eof_ack"},
+                {"type": "drained"},
+                {"type": "error", "msg": "trailing"},
+            ],
+            "trailing event received after drained",
+        ),
+    ],
+)
+def test_run_smoke_rejects_invalid_post_ack_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_events: list[dict[str, object]],
+    expected_error: str,
+) -> None:
+    smoke = _load_smoke_module()
+    events: list[dict[str, object]] = [
+        {"type": "loading", "stage": "live_model"},
+        {"type": "loading", "stage": "final_model"},
+        {
+            "type": "ready",
+            "sample_rate": 16_000,
+            "live_model": "fixture-live",
+            "final_model": "fixture-final",
+            "partial_mode": "stable-v1",
+            "protocol": "source-ranges-v1",
+            "capabilities": ["eof", "source-ranges-v1"],
+            "supports_eof": True,
+            "terminal_timeout_ms": 60_000,
+        },
+    ]
+    terminal_ready = asyncio.Event()
+
+    class FakeWebsocket:
+        async def recv(self) -> str:
+            while not events:
+                await terminal_ready.wait()
+            return json.dumps(events.pop(0))
+
+        async def send(self, payload: bytes | str) -> None:
+            if payload == '{"type":"eof"}':
+                events.extend(terminal_events)
+                terminal_ready.set()
+
+    websocket = FakeWebsocket()
+
+    class FakeConnection:
+        async def __aenter__(self) -> FakeWebsocket:
+            return websocket
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(smoke.websockets, "connect", lambda *_args, **_kwargs: FakeConnection())
+    monkeypatch.setattr(
+        smoke,
+        "audio_frames",
+        lambda audio, **_kwargs: [np.asarray(audio[:1], dtype=np.float32)],
+    )
+    args = smoke.parse_args(["--wav", str(FIXTURE), "--tail-silence-sec", "0", "--frame-ms", "1"])
+
+    with pytest.raises(smoke.SmokeError, match=expected_error):
+        asyncio.run(smoke.run_smoke(args))
 
 
 def test_redacted_final_retains_numeric_source_range_without_text() -> None:

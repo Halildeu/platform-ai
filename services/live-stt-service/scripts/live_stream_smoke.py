@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import websockets
 from numpy.typing import NDArray
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVICE_ROOT) not in sys.path:
@@ -129,14 +130,13 @@ def validate_transcript_event(
         )
     elif event_type == "final":
         sequence = event.get("seq")
-        expected_sequence = 0 if previous_final_seq is None else previous_final_seq + 1
         source_start = event.get("source_start_sample")
         source_end = event.get("source_end_sample")
         reason = event.get("reason")
         valid = (
             set(event) == FINAL_EVENT_KEYS
             and _is_non_negative_int(sequence)
-            and int(cast(int, sequence)) == expected_sequence
+            and (previous_final_seq is None or int(cast(int, sequence)) > previous_final_seq)
             and isinstance(event.get("text"), str)
             and bool(str(event.get("text", "")).strip())
             and isinstance(reason, str)
@@ -407,6 +407,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     ready_at: float | None = None
     samples_sent = 0
     last_final_seq: int | None = None
+    eof_sent = asyncio.Event()
 
     async with websockets.connect(args.url, open_timeout=args.timeout_sec) as websocket:
         while ready_at is None:
@@ -426,12 +427,20 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
 
             async def receiver() -> None:
                 nonlocal last_final_seq
+                terminal_state = "streaming"
 
                 while True:
-                    event = json.loads(await websocket.recv())
+                    try:
+                        event = json.loads(await websocket.recv())
+                    except ConnectionClosedOK as exc:
+                        raise SmokeError("stream closed before drained") from exc
+                    except ConnectionClosed as exc:
+                        raise SmokeError("stream closed uncleanly") from exc
                     received_at_ms = int((time.perf_counter() - started_at) * 1000)
                     event_type = event.get("type")
                     if event_type in {"partial", "final"}:
+                        if terminal_state == "acked" and event_type == "partial":
+                            raise SmokeError("partial event received after eof_ack")
                         validate_transcript_event(
                             event,
                             cumulative_samples_sent=samples_sent,
@@ -440,10 +449,29 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                         transcript_events.append(redacted_transcript_event(event, received_at_ms))
                         if event_type == "final":
                             last_final_seq = int(cast(int, event["seq"]))
-                    elif event_type in {"eof_ack", "drained"}:
-                        terminal_events.append(str(event_type))
-                        if event_type == "drained":
+                    elif event_type == "eof_ack":
+                        if not eof_sent.is_set() or terminal_state != "streaming":
+                            raise SmokeError("eof_ack is not caused by local eof")
+                        terminal_state = "acked"
+                        terminal_events.append("eof_ack")
+                    elif event_type == "drained":
+                        if not eof_sent.is_set() or terminal_state != "acked":
+                            raise SmokeError("drained received before valid eof_ack")
+                        terminal_state = "drained"
+                        terminal_events.append("drained")
+                        try:
+                            trailing = await websocket.recv()
+                        except ConnectionClosedOK as exc:
+                            if exc.rcvd is None or exc.rcvd.code != 1000:
+                                raise SmokeError(
+                                    "stream did not close with code 1000 after drained"
+                                ) from exc
                             return
+                        except ConnectionClosed as exc:
+                            raise SmokeError("stream closed uncleanly after drained") from exc
+                        raise SmokeError(
+                            f"trailing event received after drained: {type(trailing).__name__}"
+                        )
                     elif event_type == "error":
                         errors.append(str(event.get("msg", "error")))
                         return
@@ -461,10 +489,13 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
 
             try:
                 await websocket.send(json.dumps({"type": "eof"}, separators=(",", ":")))
+                eof_sent.set()
                 await asyncio.wait_for(receiver_task, timeout=args.final_wait_sec)
             except TimeoutError:
                 errors.append("terminal_drain_timeout")
-                receiver_task.cancel()
+            finally:
+                if not receiver_task.done():
+                    receiver_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await receiver_task
 

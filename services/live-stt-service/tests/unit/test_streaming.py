@@ -480,6 +480,7 @@ def test_supervised_final_worker_timeout_terminates_and_respawns(
     service._task_queue = queue.Queue(maxsize=1)
     service._result_queue = queue.Queue(maxsize=1)
     service._model_loaded = True
+    service._generation = 1
     old_process = service._process
     restarts: list[FakeProcess] = []
 
@@ -553,6 +554,7 @@ def test_supervised_final_worker_does_not_respawn_when_kill_cannot_stop_process(
     service._task_queue = queue.Queue(maxsize=1)
     service._result_queue = queue.Queue(maxsize=1)
     service._model_loaded = True
+    service._generation = 1
     service._restart_blocked = False
     starts: list[None] = []
     monkeypatch.setattr(service, "_start", lambda: starts.append(None))
@@ -602,21 +604,75 @@ def test_terminal_decode_timeout_never_reloads_model_inside_declared_budget(
     service._result_queue = queue.Queue(maxsize=1)
     service._model_loaded = True
     service._restart_blocked = False
+    service._generation = 1
     old_process = service._process
     starts: list[None] = []
     monkeypatch.setattr(service, "_start", lambda: starts.append(None))
 
     with pytest.raises(WorkerTimeoutError, match="exceeded timeout"):
-        service.transcribe_loaded_array(np.ones(1600, dtype=np.float32), vad=False)
+        service.transcribe_loaded_array(
+            np.ones(1600, dtype=np.float32),
+            vad=False,
+            expected_generation=1,
+        )
 
     assert old_process.terminated is True
     assert old_process.killed is True
     assert starts == []
     assert service.model_loaded is False
 
-    with pytest.raises(WorkerCrashedError, match="not ready"):
-        service.transcribe_loaded_array(np.ones(1600, dtype=np.float32), vad=False)
+    with pytest.raises(WorkerCrashedError, match="readiness changed"):
+        service.transcribe_loaded_array(
+            np.ones(1600, dtype=np.float32),
+            vad=False,
+            expected_generation=1,
+        )
     assert starts == []
+
+
+def test_terminal_decode_rechecks_ready_generation_after_waiting_for_lock() -> None:
+    class FakeProcess:
+        def is_alive(self) -> bool:
+            return True
+
+    service = object.__new__(SupervisedFinalWhisperService)
+    service._timeout_sec = 0.5
+    service._load_timeout_sec = 0.5
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._model_loaded = True
+    service._restart_blocked = False
+    service._generation = 1
+    result: list[BaseException | str] = []
+
+    def terminal_decode() -> None:
+        try:
+            result.append(
+                service.transcribe_loaded_array(
+                    np.ones(1600, dtype=np.float32),
+                    vad=False,
+                    expected_generation=1,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - assertion captures thread result
+            result.append(exc)
+
+    service._call_lock.acquire()
+    thread = threading.Thread(target=terminal_decode)
+    thread.start()
+    service._generation = 2
+    service._model_loaded = False
+    service._call_lock.release()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert len(result) == 1
+    assert isinstance(result[0], WorkerCrashedError)
+    assert "readiness changed" in str(result[0])
+    assert service._task_queue.empty()
 
 
 def test_direct_stream_service_passes_role_specific_beam_size() -> None:

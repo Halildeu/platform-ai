@@ -48,6 +48,7 @@ class Settings(BaseSettings):
       STT_LIVE_BEAM_SIZE          1 (default; low-latency draft)
       STT_FINAL_BEAM_SIZE         1 (default; ADR-0031 final revision)
       STT_STREAM_FINAL_VAD_FILTER False (default; direct-stream final uses RMS gate)
+      STT_STREAM_TRANSPORT_TIMEOUT_SEC 2.0 (default; per-WebSocket-write cap)
     """
 
     model_config = SettingsConfigDict(
@@ -118,6 +119,10 @@ class Settings(BaseSettings):
     # acknowledged; an unbounded model call would otherwise make that contract
     # impossible to size safely.
     stream_final_timeout_sec: float = Field(default=30.0, ge=1.0, le=60.0)
+    # Every WebSocket write is bounded independently. This is also part of the
+    # advertised EOF budget so peer backpressure cannot hold terminal drain
+    # open indefinitely after the model deadline has expired.
+    stream_transport_timeout_sec: float = Field(default=2.0, ge=0.05, le=10.0)
     # Production final decoding runs in a supervised child process so a native/GPU
     # hang can be terminated rather than merely abandoning a Python waiter.
     stream_final_worker_backend: str = Field(default="process", pattern="^(process|inline)$")
@@ -160,9 +165,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_stream_tuning(self) -> Self:
         """Keep model provenance and low-latency knobs internally consistent."""
-        if self.model_sha256 and not re.fullmatch(
-            r"(?:sha256:)?[0-9a-f]{64}", self.model_sha256
-        ):
+        if self.model_sha256 and not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", self.model_sha256):
             raise ValueError("model_sha256 must be a lowercase full SHA-256 digest")
         if self.environment in {"staging", "production"}:
             if not re.fullmatch(r"[0-9a-f]{40}", self.model_revision):
@@ -184,9 +187,7 @@ class Settings(BaseSettings):
             self.environment in {"staging", "production"}
             and self.stream_final_worker_backend != "process"
         ):
-            raise ValueError(
-                "stream_final_worker_backend must be process in staging/production"
-            )
+            raise ValueError("stream_final_worker_backend must be process in staging/production")
         return self
 
 

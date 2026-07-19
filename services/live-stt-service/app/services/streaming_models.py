@@ -162,12 +162,8 @@ def _supervised_final_worker_main(
         role="final",
         no_speech_threshold=cast(float, config["no_speech_threshold"]),
         log_prob_threshold=cast(float, config["log_prob_threshold"]),
-        compression_ratio_threshold=cast(
-            float, config["compression_ratio_threshold"]
-        ),
-        condition_on_previous_text=cast(
-            bool, config["condition_on_previous_text"]
-        ),
+        compression_ratio_threshold=cast(float, config["compression_ratio_threshold"]),
+        condition_on_previous_text=cast(bool, config["condition_on_previous_text"]),
     )
     while True:
         task = task_queue.get()
@@ -186,9 +182,7 @@ def _supervised_final_worker_main(
                 text = service.transcribe_array(audio, bool(task.get("vad", False)))
             result_queue.put({"job_id": job_id, "ok": True, "text": text})
         except BaseException as exc:  # noqa: BLE001 - child reports class only
-            result_queue.put(
-                {"job_id": job_id, "ok": False, "error_class": type(exc).__name__}
-            )
+            result_queue.put({"job_id": job_id, "ok": False, "error_class": type(exc).__name__})
 
 
 class SupervisedFinalWhisperService:
@@ -219,9 +213,11 @@ class SupervisedFinalWhisperService:
         self._result_queue: Any = None
         self._model_loaded = False
         self._restart_blocked = False
+        self._generation = 0
         self._start()
 
     def _start(self) -> None:
+        self._generation = getattr(self, "_generation", 0) + 1
         self._task_queue = self._ctx.Queue(maxsize=1)
         self._result_queue = self._ctx.Queue(maxsize=1)
         self._process = self._ctx.Process(
@@ -263,9 +259,7 @@ class SupervisedFinalWhisperService:
                 # restarted by its orchestrator.
                 self._model_loaded = False
                 self._restart_blocked = True
-                raise WorkerCrashedError(
-                    "streaming final worker could not be stopped safely"
-                )
+                raise WorkerCrashedError("streaming final worker could not be stopped safely")
         self._close_queue(task_queue)
         self._close_queue(result_queue)
         self._process = None
@@ -281,6 +275,8 @@ class SupervisedFinalWhisperService:
         audio: bytes | None = None,
         vad: bool = False,
         restart_on_failure: bool = True,
+        required_generation: int | None = None,
+        require_loaded: bool = False,
     ) -> str:
         deadline = time.monotonic() + timeout_sec
         if getattr(self, "_restart_blocked", False):
@@ -288,6 +284,12 @@ class SupervisedFinalWhisperService:
         if not self._call_lock.acquire(timeout=timeout_sec):
             raise WorkerTimeoutError("streaming final worker queue exceeded timeout")
         try:
+            if required_generation is not None and (
+                self._generation != required_generation
+                or (require_loaded and not self._model_loaded)
+                or not self._is_alive()
+            ):
+                raise WorkerCrashedError("streaming final worker readiness changed")
             if not self._is_alive():
                 if not restart_on_failure:
                     raise WorkerCrashedError("streaming final worker is not alive")
@@ -308,15 +310,11 @@ class SupervisedFinalWhisperService:
                 )
             except queue.Full as exc:
                 self._terminate_and_restart(restart=restart_on_failure)
-                raise WorkerTimeoutError(
-                    "streaming final worker queue exceeded timeout"
-                ) from exc
+                raise WorkerTimeoutError("streaming final worker queue exceeded timeout") from exc
             while True:
                 if not self._is_alive():
                     self._terminate_and_restart(restart=restart_on_failure)
-                    raise WorkerCrashedError(
-                        "streaming final worker exited before response"
-                    )
+                    raise WorkerCrashedError("streaming final worker exited before response")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._terminate_and_restart(restart=restart_on_failure)
@@ -329,18 +327,28 @@ class SupervisedFinalWhisperService:
                     continue
                 if not response.get("ok"):
                     raise RuntimeError(str(response.get("error_class", "RuntimeError")))
-                return str(response.get("text", ""))
+                text = str(response.get("text", ""))
+                if operation == "load":
+                    self._model_loaded = True
+                return text
         finally:
             self._call_lock.release()
 
     def ensure_model(self) -> None:
         if not self._model_loaded:
             self._invoke("load", timeout_sec=self._load_timeout_sec)
-            self._model_loaded = True
 
     @property
     def model_loaded(self) -> bool:
         return self._model_loaded and self._is_alive()
+
+    @property
+    def ready_generation(self) -> int:
+        """Return the loaded worker generation under the single-flight lock."""
+        with self._call_lock:
+            if not self._model_loaded or not self._is_alive():
+                raise WorkerCrashedError("streaming final worker is not ready")
+            return self._generation
 
     def transcribe_array(
         self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
@@ -359,7 +367,10 @@ class SupervisedFinalWhisperService:
         )
 
     def transcribe_loaded_array(
-        self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
+        self,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+        expected_generation: int,
     ) -> str:
         """Decode only with the worker that was proven ready for this stream.
 
@@ -368,8 +379,6 @@ class SupervisedFinalWhisperService:
         recycled after readiness, this connection fails closed and a new
         connection performs model loading before it can receive audio.
         """
-        if not self.model_loaded:
-            raise WorkerCrashedError("streaming final worker is not ready")
         contiguous = np.ascontiguousarray(audio, dtype=np.float32)
         return self._invoke(
             "transcribe",
@@ -377,6 +386,8 @@ class SupervisedFinalWhisperService:
             audio=contiguous.astype("<f4", copy=False).tobytes(),
             vad=vad,
             restart_on_failure=False,
+            required_generation=expected_generation,
+            require_loaded=True,
         )
 
 
@@ -465,9 +476,7 @@ def get_final_service(
         )
         with _services_lock:
             if service_key not in _supervised_final_services:
-                _supervised_final_services[service_key] = SupervisedFinalWhisperService(
-                    settings
-                )
+                _supervised_final_services[service_key] = SupervisedFinalWhisperService(settings)
             return _supervised_final_services[service_key]
     return _named(
         "final",

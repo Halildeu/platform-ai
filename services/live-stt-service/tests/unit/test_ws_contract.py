@@ -89,7 +89,7 @@ def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ready["protocol"] == "source-ranges-v1"
     assert ready["capabilities"] == ["eof", "source-ranges-v1"]
     assert ready["supports_eof"] is True
-    assert ready["terminal_timeout_ms"] == 34_000
+    assert ready["terminal_timeout_ms"] == 46_000
 
 
 def test_partial_and_final_payload_shapes_match_contract() -> None:
@@ -256,6 +256,67 @@ def test_eof_waits_for_published_final_state_transition_without_duplicate(
     assert [event["type"] for event in terminal_events] == ["eof_ack", "drained"]
 
 
+def test_blocked_final_transport_closes_bounded_without_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(
+        monkeypatch,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.0,
+        transport_timeout_sec=0.05,
+    )
+    final_reached_transport = threading.Event()
+    original_send_json = WebSocket.send_json
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        return "Sınırlı final." if _is_final_service(self) else "Sınırlı taslak"
+
+    async def never_returning_final_send(
+        websocket: WebSocket,
+        data: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        await original_send_json(websocket, data, *args, **kwargs)
+        if (
+            isinstance(data, dict)
+            and data.get("type") == "final"
+            and data.get("reason") == "forced"
+        ):
+            final_reached_transport.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+    monkeypatch.setattr(WebSocket, "send_json", never_returning_final_send)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert final_reached_transport.wait(timeout=1.0)
+        started = time.monotonic()
+        ws.send_text('{"type":"eof"}')
+        observed_types: list[str] = []
+        with pytest.raises(WebSocketDisconnect):
+            while True:
+                observed_types.append(str(ws.receive_json()["type"]))
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert "final" in observed_types
+    assert "drained" not in observed_types
+
+
 def test_eof_flushes_late_final_before_drained(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_fast_stream_timing(
         monkeypatch,
@@ -411,6 +472,7 @@ def _patch_fast_stream_timing(
     forced_commit_sec: float = 60.0,
     silence_commit_sec: float = 0.1,
     tail_overlap_sec: float = 0.0,
+    transport_timeout_sec: float = 2.0,
 ) -> None:
     settings = Settings(
         live_infer_interval_ms=1,
@@ -419,6 +481,7 @@ def _patch_fast_stream_timing(
         forced_commit_sec=forced_commit_sec,
         silence_commit_sec=silence_commit_sec,
         tail_overlap_sec=tail_overlap_sec,
+        stream_transport_timeout_sec=transport_timeout_sec,
         silence_rms=0.001,
         min_speech_rms=0.001,
         min_infer_sec=0.01,
