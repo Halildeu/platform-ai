@@ -876,6 +876,19 @@ try {
         return $copy
     }
 
+    function ConvertTo-TestMeetingAiConfigContent {
+        param([Parameter(Mandatory = $true)]$Values)
+
+        $lines = @(
+            "# platform-ai meeting-ai runtime config v1"
+            "# Secret fields are DPAPI LocalMachine ciphertext. Do not copy to another host."
+        )
+        foreach ($name in $Values.Keys) {
+            $lines += "{0}={1}" -f $name, $Values[$name]
+        }
+        return ($lines -join "`r`n") + "`r`n"
+    }
+
     function Write-RestoreConflictFixture {
         param(
             [Parameter(Mandatory = $true)][string]$Path,
@@ -885,10 +898,10 @@ try {
 
         Write-MeetingAiSecretFileAtomic `
             -Path $Path `
-            -Content (ConvertTo-MeetingAiConfigContent -Values $CurrentValues)
+            -Content (ConvertTo-TestMeetingAiConfigContent -Values $CurrentValues)
         Write-MeetingAiSecretFileAtomic `
             -Path "$Path.bak" `
-            -Content (ConvertTo-MeetingAiConfigContent -Values $BackupValues)
+            -Content (ConvertTo-TestMeetingAiConfigContent -Values $BackupValues)
     }
 
     $lookupConflictPath = Join-Path $runtimeRoot "lookup-conflict.env"
