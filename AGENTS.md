@@ -39,7 +39,7 @@ Repo-spesifik öne çıkanlar:
 - **PII/KVKK boundary**: Ses dosyası + transcript = hassas veri. Encryption + retention ADR + audit + consent zorunlu.
 - **STT model pin**: Whisper model adı + version + hash environment variable ile pin'lenir.
 - **GPU disiplini**: PoC CPU-only önce → metrik ölç → Codex consensus → GPU karar.
-- **Cross-AI Peer Review**: Code yazan sağlayıcı review yapmaz. Python repo'da Codex review thread her PR için zorunlu.
+- **Cross-AI Peer Review**: Code yazan sağlayıcı review yapmaz (provider-distinct). Kullanıcı 2026-07-20 esnetmesi (gitops#2708): Codex, Claude, MiniMax veya GLM'den mevcut ve doğrulanabilir olan(lar) reviewer kanal; spesifik model kilidi yok. Canonical detay: platform-k8s-gitops `docs/context-priority-rules.md` §11.
 - **Test koşmadan "tests added" YASAK**: pytest output + coverage rapor olmadan PR yeşil sayılmaz.
 - **Faz 24 ERP/CRM-agnostic product contract**: Meeting Intelligence belirli bir ERP/CRM markasına göre tasarlanmaz. Pilot müşteri veya adapter örnekleri vendor-specific dokümanda kalır; servis adı, API/DTO, model prompt'u, observability etiketi, acceptance gate ve "done" dili vendor-specific olamaz.
 - **Platform ekosistem reuse**: Standalone publish yok; auth/notification/audit/permission reuse zorunlu.
