@@ -786,6 +786,36 @@ try {
         "Atomic rotation backup is missing."
     Assert-MeetingAiAcl -Path "$configPath.bak"
 
+    $keyringProbe = Join-Path $PSScriptRoot "exercise-meeting-ai-keyring.py"
+    $keyringMaterialPath = Join-Path $runtimeRoot "meeting-ai-keyring-probe.json"
+    function Write-KeyringProbeMaterial {
+        param($Values)
+
+        $json = Unprotect-MeetingAiSecret `
+            -ProtectedBase64 $Values["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
+            -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
+        $material = [ordered]@{
+            activeKeyId = $Values["MAI_INGESTION_ACTIVE_KEY_ID"]
+            lookupKeyId = $Values["MAI_INGESTION_LOOKUP_KEY_ID"]
+            keys = ($json | ConvertFrom-Json)
+        }
+        Write-MeetingAiSecretFileAtomic `
+            -Path $keyringMaterialPath `
+            -Content (($material | ConvertTo-Json -Depth 4 -Compress) + "`n")
+        $json = $null
+        $material = $null
+    }
+
+    Write-KeyringProbeMaterial -Values $beforeValues
+    & $pythonExe $keyringProbe seed `
+        --store $storePath --keyring $keyringMaterialPath --expected-active $beforeActive
+    if ($LASTEXITCODE -ne 0) { throw "Initial retained-row keyring probe failed." }
+    Write-KeyringProbeMaterial -Values $rotatedValues
+    & $pythonExe $keyringProbe verify `
+        --store $storePath --keyring $keyringMaterialPath `
+        --expected-active $rotatedValues["MAI_INGESTION_ACTIVE_KEY_ID"]
+    if ($LASTEXITCODE -ne 0) { throw "Rotated retained-row keyring probe failed." }
+
     & $configureScript `
         -RestoreBackup `
         -StorePath $storePath `
@@ -796,6 +826,18 @@ try {
         "Backup restore did not restore the previous active key."
     Assert-True ($restoredValues["MAI_INGESTION_LOOKUP_KEY_ID"] -eq $beforeLookup) `
         "Backup restore did not preserve the blind-index key id."
+    $restoredJson = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $restoredValues["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
+        -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
+    $restoredKeyring = $restoredJson | ConvertFrom-Json
+    $rotatedActive = $rotatedValues["MAI_INGESTION_ACTIVE_KEY_ID"]
+    Assert-True ($null -ne $restoredKeyring.PSObject.Properties[$rotatedActive]) `
+        "Backup restore must retain the post-rotation DEK for database rollback."
+    Write-KeyringProbeMaterial -Values $restoredValues
+    & $pythonExe $keyringProbe verify `
+        --store $storePath --keyring $keyringMaterialPath --expected-active $beforeActive
+    if ($LASTEXITCODE -ne 0) { throw "Restored retained-row keyring probe failed." }
+    Remove-Item -LiteralPath $keyringMaterialPath -Force
 
     $acl = Get-Acl -LiteralPath $configPath
     $users = New-Object Security.Principal.SecurityIdentifier("S-1-5-32-545")

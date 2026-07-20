@@ -97,6 +97,10 @@ PowerShell transcription/script-block logging
 provisioning oturumunda kapali olmali; komut veya log secret degeri yazmaz.
 
 Yeni config ile servis baslamazsa onceki atomik backup geri alinabilir. Restore,
+onceki aktif DEK'i geri secerken mevcut additive keyring'deki daha yeni DEK'leri de
+dar ACL'li DPAPI configte korur. Boylece servis yeni DEK ile yeniden sifrelenmis retained
+outbox/ready-inbox satirlarini okuyup tek transaction'da geri secilen aktif DEK'e tasir.
+Ayni key id farkli materyal veya blind-index key ayrismasi fail-closed reddedilir. Restore,
 mevcut config'i yeni backup yaparak iki surum arasinda geri donulebilir kalir:
 
 ```powershell

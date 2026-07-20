@@ -134,7 +134,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Assert-TranscriptReadyActivationReceiptFile", script)
         self.assertIn("MAI_READY_ACTIVATION_RECEIPT_PATH", script)
         self.assertIn("targetAppEnv", script)
-        self.assertIn("outside the 900 second startup window", script)
+        self.assertIn("invalid activation time", script)
         self.assertIn("host binding does not match", script)
         self.assertIn("Invoke-MeetingAiGitCapture", script)
         self.assertIn('"status", "--porcelain", "--untracked-files=no"', script)
@@ -161,10 +161,22 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Protect-MeetingAiSecret -PlainText $plainClientKey", script)
         self.assertIn("Protect-SuppliedSecureValue", script)
         self.assertIn("ReadyPermitSourcePath", script)
-        self.assertIn("requires a fresh permit source", script)
+        self.assertIn(
+            "requires a fresh signed permit and trust root",
+            script,
+        )
         self.assertIn("was already consumed", script)
         self.assertIn("faz24.transcriptReadyPermitConsumption.v1", script)
-        self.assertIn("faz24.transcriptReadyActivationReceipt.v1", script)
+        self.assertIn("faz24.transcriptReadyActivationReceipt.v3", script)
+        self.assertIn(
+            'Enabled ready-consumer provisioning requires '
+            'TranscriptServiceClientSecret.',
+            script,
+        )
+        self.assertIn(
+            'if (-not [string]::IsNullOrWhiteSpace($transcriptSecretBlob))',
+            script,
+        )
         self.assertIn("SkipReadyArtifactExistence", script)
         self.assertIn("transcript-ready-pre-enable-{0}.json", script)
         self.assertIn("Get-ReadyConfiguredValue", script)

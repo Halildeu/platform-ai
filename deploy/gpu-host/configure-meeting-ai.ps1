@@ -169,6 +169,59 @@ function ConvertTo-MeetingAiConfigContent {
     return ($lines -join "`r`n") + "`r`n"
 }
 
+function Merge-MeetingAiRestoreKeyring {
+    param(
+        [Parameter(Mandatory = $true)]$BackupValues,
+        [Parameter(Mandatory = $true)]$CurrentValues
+    )
+
+    $lookupName = "MAI_INGESTION_LOOKUP_KEY_ID"
+    $keyringName = "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
+    if (-not $BackupValues.ContainsKey($lookupName) -or
+        -not $BackupValues.ContainsKey($keyringName) -or
+        -not $CurrentValues.ContainsKey($lookupName) -or
+        -not $CurrentValues.ContainsKey($keyringName)) {
+        throw "Runtime config restore requires complete ingestion keyring metadata."
+    }
+    if ($BackupValues[$lookupName] -ne $CurrentValues[$lookupName]) {
+        throw "Runtime config restore cannot cross an unversioned blind-index key change."
+    }
+
+    $backupJson = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $BackupValues[$keyringName] -KeyName $keyringName
+    $currentJson = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $CurrentValues[$keyringName] -KeyName $keyringName
+    try {
+        $backupKeyring = $backupJson | ConvertFrom-Json -ErrorAction Stop
+        $currentKeyring = $currentJson | ConvertFrom-Json -ErrorAction Stop
+        $merged = [ordered]@{}
+        foreach ($property in $backupKeyring.PSObject.Properties) {
+            $merged[$property.Name] = [string]$property.Value
+        }
+        foreach ($property in $currentKeyring.PSObject.Properties) {
+            $keyId = $property.Name
+            $keyMaterial = [string]$property.Value
+            if ($merged.Contains($keyId) -and $merged[$keyId] -ne $keyMaterial) {
+                throw "Runtime config restore found conflicting material for key id '$keyId'."
+            }
+            $merged[$keyId] = $keyMaterial
+        }
+        $mergedJson = $merged | ConvertTo-Json -Compress
+        Assert-MeetingAiKeyring -KeyringJson $mergedJson `
+            -ActiveKeyId $BackupValues["MAI_INGESTION_ACTIVE_KEY_ID"] `
+            -LookupKeyId $BackupValues[$lookupName]
+        $BackupValues[$keyringName] = Protect-MeetingAiSecret -PlainText $mergedJson
+    } finally {
+        $backupJson = $null
+        $currentJson = $null
+        $backupKeyring = $null
+        $currentKeyring = $null
+        $merged = $null
+        $mergedJson = $null
+        $keyMaterial = $null
+    }
+}
+
 function Write-MeetingAiExclusiveRuntimeFile {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -396,6 +449,10 @@ try {
         }
         $backupValues = Read-MeetingAiConfigFile -Path $backupPath
         Assert-MeetingAiConfigValues -Values $backupValues -SkipReadyArtifactExistence
+        if ($null -ne $currentValues) {
+            Merge-MeetingAiRestoreKeyring `
+                -BackupValues $backupValues -CurrentValues $currentValues
+        }
         if ($backupValues.ContainsKey("MAI_READY_CONSUMER_ENABLED") -and
             $backupValues["MAI_READY_CONSUMER_ENABLED"].ToLowerInvariant() -eq "true") {
             if ([string]::IsNullOrWhiteSpace($ReadyPermitSourcePath) -or
@@ -595,11 +652,15 @@ try {
     } elseif ($null -ne $existing -and
         $existing.ContainsKey("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI")) {
         $existing["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"]
+    } elseif ($effectiveReadyEnabled -eq "false") {
+        ""
     } else {
-        throw "Durable delivery provisioning requires TranscriptServiceClientSecret."
+        throw "Enabled ready-consumer provisioning requires TranscriptServiceClientSecret."
     }
     $readyConfig = [ordered]@{
         "MAI_READY_CONSUMER_ENABLED" = $effectiveReadyEnabled
+    }
+    $optionalTranscriptConfig = [ordered]@{
         "MAI_TRANSCRIPT_SERVICE_BASE_URL" = (
             Get-SuppliedOrExistingValue -Existing $existing `
                 -Name "MAI_TRANSCRIPT_SERVICE_BASE_URL" `
@@ -618,11 +679,19 @@ try {
         "MAI_TRANSCRIPT_SERVICE_CLIENT_ID" = (Get-ReadyConfiguredValue `
             -Existing $existing -Name "MAI_TRANSCRIPT_SERVICE_CLIENT_ID" `
             -Supplied $TranscriptServiceClientId -InitialDefault "meeting-ai")
-        "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI" = $transcriptSecretBlob
         "MAI_TRANSCRIPT_SERVICE_AUDIENCE" = "transcript-service"
         "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE" = (
             "transcript:analysis-job-capability:issue"
         )
+    }
+    foreach ($name in $optionalTranscriptConfig.Keys) {
+        if (-not [string]::IsNullOrWhiteSpace($optionalTranscriptConfig[$name])) {
+            $readyConfig[$name] = $optionalTranscriptConfig[$name]
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($transcriptSecretBlob)) {
+        $readyConfig["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] = `
+            $transcriptSecretBlob
     }
     if ($effectiveReadyEnabled -eq "true") {
         if ([string]::IsNullOrWhiteSpace($effectiveAppEnv)) {
