@@ -23,6 +23,21 @@ class AnalyzeRequest(BaseModel):
         default=None,
         description="Optional STT timing; enables wall-clock start_sec on citations",
     )
+    # Faz 24 live analysis (Zeynep 2026-07-20 kapsam kararı):
+    # The `/analyze/live` endpoint reuses this shape but sets is_partial=True on
+    # the response and threads the caller's segment-sequence into version so
+    # downstream consumers can order incremental deliveries deterministically.
+    # The final call at recording end goes to `/analyze` (is_partial=False).
+    segment_seq: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Monotonically increasing segment sequence from the recorder; the "
+            "server derives `version` from this on /analyze/live so partial "
+            "deliveries stay ordered even if wall-clock timing skews. "
+            "Only meaningful on /analyze/live; ignored by /analyze (final)."
+        ),
+    )
 
 
 class ActionItem(BaseModel):
@@ -120,6 +135,29 @@ class AnalyzeResponse(BaseModel):
     backend: str = Field(description="mock / anthropic / openai / ollama")
     model: str = Field(description="Model/pipeline used")
     elapsed_ms: int = Field(description="Analysis wall-clock", ge=0)
+    # Faz 24 live analysis (Zeynep 2026-07-20 kapsam kararı):
+    # `is_partial=True` means this response came from /analyze/live over a
+    # partial transcript captured while the meeting was still in progress and
+    # a later delivery will supersede it. `is_partial=False` is the final
+    # end-of-recording call over the complete transcript. `version` is a
+    # monotonically increasing per-meeting counter (derived from segment_seq
+    # on live calls, sentinel value on the final call) so downstream consumers
+    # can order incremental deliveries deterministically and drop stale ones.
+    is_partial: bool = Field(
+        default=False,
+        description=(
+            "True for /analyze/live responses over an in-progress transcript; "
+            "False for the /analyze final call at recording end."
+        ),
+    )
+    version: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Per-meeting monotonic counter (from segment_seq for live, sentinel "
+            "for final). Consumers keep the highest version and discard older."
+        ),
+    )
 
 
 class AskRequest(BaseModel):
