@@ -274,7 +274,7 @@ async def analyze_live_endpoint(
             detail=f"Transcript {len(transcript)} chars > limit {settings.max_transcript_chars}",
         )
 
-    service: MeetingAnalysisService = get_service(settings)
+    application: AnalysisApplicationService = request.app.state.analysis_application
     corr_id = _correlation_id(request)
     live_version = body.segment_seq if body.segment_seq is not None else 0
     log_extra = {
@@ -288,11 +288,32 @@ async def analyze_live_endpoint(
     }
 
     segments = [s.model_dump() for s in body.segments] if body.segments else None
+
+    # Live analysis intentionally uses a no-op persister so the durable
+    # ingestion hop is bypassed. The scaffold rationale below still applies:
+    # partial payloads must not land in the final-only column of
+    # meeting-service. This is a live-only relay path — the final analysis
+    # goes through /analyze which owns the canonical delivery contract.
+    async def _no_persist(command: AnalysisCommand, result: AnalyzeResponse) -> str | None:
+        del command, result
+        return None
+
     try:
-        result = await asyncio.wait_for(
-            run_in_threadpool(service.analyze, transcript, segments),
-            timeout=settings.request_timeout,
+        execution = await application.execute(
+            AnalysisCommand(
+                transcript=transcript,
+                meeting_id=body.meeting_id,
+                session_id=body.session_id,
+                segments=segments,
+            ),
+            persist=_no_persist,
         )
+        result = execution.result
+    except AnalysisTranscriptTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Transcript {len(transcript)} chars > limit {settings.max_transcript_chars}",
+        ) from exc
     except (asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041
         logger.warning("Analyze/live timeout", extra=log_extra)
         mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.TIMEOUT.value).inc()

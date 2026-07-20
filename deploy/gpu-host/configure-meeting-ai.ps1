@@ -116,6 +116,54 @@ function Get-ReadyConfiguredValue {
     return $InitialDefault
 }
 
+function Test-MeetingAiExactLegacyUpgradeShape {
+    param([Parameter(Mandatory = $true)]$Values)
+
+    if (-not $Values.ContainsKey("MAI_INGESTION_ENABLED") -or
+        $Values["MAI_INGESTION_ENABLED"].ToLowerInvariant() -ne "true") {
+        return $false
+    }
+    foreach ($name in $Values.Keys) {
+        if ($name -eq "MAI_APP_ENV" -or
+            $name -eq "MAI_INGESTION_LOOKUP_KEY_ID" -or
+            $name -eq "MAI_ANALYSIS_SPEC_VERSION" -or
+            $name.StartsWith("MAI_READY_", [StringComparison]::OrdinalIgnoreCase) -or
+            $name.StartsWith("MAI_TRANSCRIPT_", [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Assert-MeetingAiExactLegacyUpgradeConfig {
+    param([Parameter(Mandatory = $true)]$Values)
+
+    if (-not (Test-MeetingAiExactLegacyUpgradeShape -Values $Values)) {
+        throw "Only an exact pre-ready-consumer runtime config may use the legacy upgrade path."
+    }
+    Assert-MeetingAiConfigValues -Values $Values -AllowLegacyUpgrade
+
+    $clientSecret = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $Values["MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI"] `
+        -KeyName "MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI"
+    $keyringJson = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $Values["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
+        -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
+    try {
+        Assert-MeetingAiKeyring -KeyringJson $keyringJson `
+            -ActiveKeyId $Values["MAI_INGESTION_ACTIVE_KEY_ID"]
+        if ($Values["MAI_MEETING_SERVICE_TLS_MODE"].ToLowerInvariant() -eq "mutual") {
+            $clientKey = Unprotect-MeetingAiSecret `
+                -ProtectedBase64 $Values["MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"] `
+                -KeyName "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"
+        }
+    } finally {
+        $clientSecret = $null
+        $clientKey = $null
+        $keyringJson = $null
+    }
+}
+
 function Protect-SuppliedSecureValue {
     param([Parameter(Mandatory = $true)][Security.SecureString]$Value)
 
@@ -515,7 +563,11 @@ try {
     $existing = $null
     if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
         $existing = Read-MeetingAiConfigFile -Path $ConfigPath
-        Assert-MeetingAiConfigValues -Values $existing
+        if (Test-MeetingAiExactLegacyUpgradeShape -Values $existing) {
+            Assert-MeetingAiExactLegacyUpgradeConfig -Values $existing
+        } else {
+            Assert-MeetingAiConfigValues -Values $existing
+        }
     }
     $effectiveAppEnv = Get-SuppliedOrExistingValue -Existing $existing `
         -Name "MAI_APP_ENV" -Supplied $RuntimeAppEnv

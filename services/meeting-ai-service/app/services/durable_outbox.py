@@ -58,6 +58,10 @@ class OutboxIntegrityError(OutboxError):
     """AES-GCM authentication failed for a persisted payload."""
 
 
+class OutboxMigrationRequiredError(OutboxError):
+    """Retained payloads require a safe pre-upgrade drain or authoritative backfill."""
+
+
 @dataclass(frozen=True)
 class ClaimedMessage:
     analysis_run_id: str
@@ -815,6 +819,38 @@ class SqliteOutboxStore:
         if missing:
             raise OutboxKeyUnavailableError(
                 "outbox contains rows encrypted with unavailable key ids: " + ", ".join(missing)
+            )
+
+    def assert_delivery_capability_compatible(
+        self,
+        *,
+        required_payload_fields: frozenset[str],
+    ) -> None:
+        """Fail before worker activation without changing retained row state."""
+        incompatible = 0
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT analysis_run_id, meeting_id, key_id, nonce, ciphertext
+                FROM analysis_delivery_outbox
+                ORDER BY created_at, analysis_run_id
+                """
+            ).fetchall()
+            for row in rows:
+                payload = self._cipher.decrypt(
+                    key_id=str(row["key_id"]),
+                    nonce=bytes(row["nonce"]),
+                    ciphertext=bytes(row["ciphertext"]),
+                    analysis_run_id=str(row["analysis_run_id"]),
+                    meeting_id=str(row["meeting_id"]),
+                )
+                if not required_payload_fields.issubset(payload):
+                    incompatible += 1
+        if incompatible:
+            raise OutboxMigrationRequiredError(
+                "retained outbox rows predate transcript capability delivery; "
+                "drain them under the previous revision or perform an authoritative backfill "
+                "before enabling this revision"
             )
 
     def enqueue(

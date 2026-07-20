@@ -79,6 +79,27 @@ function Assert-PythonRuntimeConfigLoads {
     }
 }
 
+function Copy-ConfigValues {
+    param($Values)
+
+    $copy = @{}
+    foreach ($name in $Values.Keys) { $copy[$name] = $Values[$name] }
+    return $copy
+}
+
+function ConvertTo-TestMeetingAiConfigContent {
+    param([Parameter(Mandatory = $true)]$Values)
+
+    $lines = @(
+        "# platform-ai meeting-ai runtime config v1"
+        "# Secret fields are DPAPI LocalMachine ciphertext. Do not copy to another host."
+    )
+    foreach ($name in $Values.Keys) {
+        $lines += "{0}={1}" -f $name, $Values[$name]
+    }
+    return ($lines -join "`r`n") + "`r`n"
+}
+
 function Write-FreshPermit {
     param(
         [string]$Path = $permitSource,
@@ -166,6 +187,109 @@ try {
         "Non-secret runtime value import failed."
     Assert-True ($env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET -eq $plainTranscriptCredential) `
         "Default-off delivery capability credential round trip failed."
+    Assert-PythonRuntimeConfigLoads
+
+    $legacyUpgradeConfigPath = Join-Path $runtimeRoot "legacy-upgrade.env"
+    $legacyUpgradeStorePath = Join-Path $runtimeRoot `
+        "legacy-upgrade\analysis-delivery.sqlite3"
+    $legacyUpgradeMaterialPath = Join-Path $runtimeRoot "legacy-upgrade-material.json"
+    $legacyUpgradeProbe = Join-Path $PSScriptRoot `
+        "exercise-meeting-ai-legacy-upgrade.py"
+    $currentValues = Read-MeetingAiConfigFile -Path $configPath
+    $legacyValues = Copy-ConfigValues -Values $currentValues
+    $legacyActiveKeyId = $legacyValues["MAI_INGESTION_ACTIVE_KEY_ID"]
+    $legacyClientSecretBlob = `
+        $legacyValues["MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI"]
+    $currentKeyringJson = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $legacyValues["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
+        -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
+    $legacyKeyring = $currentKeyringJson | ConvertFrom-Json -ErrorAction Stop
+    $legacyKeyring.PSObject.Properties.Remove(
+        $legacyValues["MAI_INGESTION_LOOKUP_KEY_ID"]
+    )
+    $legacyKeyringJson = $legacyKeyring | ConvertTo-Json -Compress
+    $legacyValues["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] = `
+        Protect-MeetingAiSecret -PlainText $legacyKeyringJson
+    $legacyValues["MAI_INGESTION_STORE_PATH"] = $legacyUpgradeStorePath
+    foreach ($name in @($legacyValues.Keys)) {
+        if ($name -eq "MAI_APP_ENV" -or
+            $name -eq "MAI_INGESTION_LOOKUP_KEY_ID" -or
+            $name -eq "MAI_ANALYSIS_SPEC_VERSION" -or
+            $name.StartsWith("MAI_READY_", [StringComparison]::OrdinalIgnoreCase) -or
+            $name.StartsWith("MAI_TRANSCRIPT_", [StringComparison]::OrdinalIgnoreCase)) {
+            $legacyValues.Remove($name)
+        }
+    }
+    Write-MeetingAiSecretFileAtomic `
+        -Path $legacyUpgradeConfigPath `
+        -Content (ConvertTo-TestMeetingAiConfigContent -Values $legacyValues)
+    $legacyMaterial = [ordered]@{
+        activeKeyId = $legacyActiveKeyId
+        keys = $legacyKeyring
+    }
+    Write-MeetingAiSecretFileAtomic `
+        -Path $legacyUpgradeMaterialPath `
+        -Content (($legacyMaterial | ConvertTo-Json -Depth 4 -Compress) + "`n")
+    & $pythonExe $legacyUpgradeProbe seed `
+        --store $legacyUpgradeStorePath --material $legacyUpgradeMaterialPath
+    if ($LASTEXITCODE -ne 0) { throw "Legacy v1 outbox fixture seed failed." }
+
+    & $configureScript `
+        -ClientId "meeting-ai-ci" `
+        -TranscriptServiceBaseUrl "https://transcript.internal.example" `
+        -TranscriptServiceCapabilityPathTemplate "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability" `
+        -TranscriptServiceTokenUrl "https://auth.internal.example/oauth2/token" `
+        -TranscriptServiceClientSecret $secureTranscriptCredential `
+        -StorePath $legacyUpgradeStorePath `
+        -ConfigPath $legacyUpgradeConfigPath `
+        -Confirm:$false
+    $upgradedValues = Read-MeetingAiConfigFile -Path $legacyUpgradeConfigPath
+    Assert-MeetingAiConfigValues -Values $upgradedValues
+    Assert-True ($upgradedValues["MAI_INGESTION_ACTIVE_KEY_ID"] -eq
+        $legacyActiveKeyId) "Legacy upgrade must preserve the active payload key id."
+    Assert-True ($upgradedValues["MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI"] -eq
+        $legacyClientSecretBlob) "Legacy upgrade must preserve the meeting-service credential."
+    Assert-True ($upgradedValues.ContainsKey("MAI_INGESTION_LOOKUP_KEY_ID")) `
+        "Legacy upgrade must add a dedicated lookup key."
+    $upgradedKeyringJson = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $upgradedValues["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
+        -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
+    $upgradedKeyring = $upgradedKeyringJson | ConvertFrom-Json -ErrorAction Stop
+    Assert-True (
+        [string]$upgradedKeyring.PSObject.Properties[$legacyActiveKeyId].Value -eq
+        [string]$legacyKeyring.PSObject.Properties[$legacyActiveKeyId].Value
+    ) "Legacy upgrade must preserve retained-row decryption material."
+    $upgradedMaterial = [ordered]@{
+        activeKeyId = $upgradedValues["MAI_INGESTION_ACTIVE_KEY_ID"]
+        lookupKeyId = $upgradedValues["MAI_INGESTION_LOOKUP_KEY_ID"]
+        keys = $upgradedKeyring
+    }
+    Write-MeetingAiSecretFileAtomic `
+        -Path $legacyUpgradeMaterialPath `
+        -Content (($upgradedMaterial | ConvertTo-Json -Depth 4 -Compress) + "`n")
+    & $pythonExe $legacyUpgradeProbe verify `
+        --store $legacyUpgradeStorePath --material $legacyUpgradeMaterialPath
+    if ($LASTEXITCODE -ne 0) { throw "Legacy v1 outbox upgrade verification failed." }
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $legacyUpgradeConfigPath) `
+        "Upgraded legacy runtime config import must succeed."
+    Assert-PythonRuntimeConfigLoads
+    foreach ($path in @(
+            $legacyUpgradeConfigPath,
+            "$legacyUpgradeConfigPath.bak",
+            $legacyUpgradeMaterialPath,
+            $legacyUpgradeStorePath,
+            "$legacyUpgradeStorePath-wal",
+            "$legacyUpgradeStorePath-shm"
+        )) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+    $currentKeyringJson = $null
+    $legacyKeyringJson = $null
+    $upgradedKeyringJson = $null
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
+        "Primary runtime config must be restored after legacy upgrade proof."
     Assert-PythonRuntimeConfigLoads
     Assert-True ([string]::IsNullOrWhiteSpace(
         $env:MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI
@@ -867,27 +991,6 @@ try {
         --store $storePath --keyring $keyringMaterialPath --expected-active $beforeActive
     if ($LASTEXITCODE -ne 0) { throw "Restored retained-row keyring probe failed." }
     Remove-Item -LiteralPath $keyringMaterialPath -Force
-
-    function Copy-ConfigValues {
-        param($Values)
-
-        $copy = @{}
-        foreach ($name in $Values.Keys) { $copy[$name] = $Values[$name] }
-        return $copy
-    }
-
-    function ConvertTo-TestMeetingAiConfigContent {
-        param([Parameter(Mandatory = $true)]$Values)
-
-        $lines = @(
-            "# platform-ai meeting-ai runtime config v1"
-            "# Secret fields are DPAPI LocalMachine ciphertext. Do not copy to another host."
-        )
-        foreach ($name in $Values.Keys) {
-            $lines += "{0}={1}" -f $name, $Values[$name]
-        }
-        return ($lines -join "`r`n") + "`r`n"
-    }
 
     function Write-RestoreConflictFixture {
         param(

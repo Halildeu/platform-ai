@@ -451,7 +451,8 @@ function Unprotect-MeetingAiSecret {
 function Assert-MeetingAiConfigValues {
     param(
         [Parameter(Mandatory = $true)]$Values,
-        [switch]$SkipReadyArtifactExistence
+        [switch]$SkipReadyArtifactExistence,
+        [switch]$AllowLegacyUpgrade
     )
 
     if (-not $Values.ContainsKey("MAI_INGESTION_ENABLED")) {
@@ -512,19 +513,21 @@ function Assert-MeetingAiConfigValues {
     [void](Assert-MeetingAiRuntimePath -Path $Values["MAI_INGESTION_STORE_PATH"] `
         -Purpose "Analysis delivery store")
 
-    $deliveryCapabilityRequired = @(
-        "MAI_TRANSCRIPT_SERVICE_BASE_URL",
-        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
-        "MAI_TRANSCRIPT_SERVICE_TOKEN_URL",
-        "MAI_TRANSCRIPT_SERVICE_CLIENT_ID",
-        "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI",
-        "MAI_TRANSCRIPT_SERVICE_AUDIENCE",
-        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE"
-    )
-    foreach ($name in $deliveryCapabilityRequired) {
-        if (-not $Values.ContainsKey($name) -or
-            [string]::IsNullOrWhiteSpace($Values[$name])) {
-            throw "Durable delivery runtime config is missing required key: $name."
+    if (-not $AllowLegacyUpgrade) {
+        $deliveryCapabilityRequired = @(
+            "MAI_TRANSCRIPT_SERVICE_BASE_URL",
+            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+            "MAI_TRANSCRIPT_SERVICE_TOKEN_URL",
+            "MAI_TRANSCRIPT_SERVICE_CLIENT_ID",
+            "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI",
+            "MAI_TRANSCRIPT_SERVICE_AUDIENCE",
+            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE"
+        )
+        foreach ($name in $deliveryCapabilityRequired) {
+            if (-not $Values.ContainsKey($name) -or
+                [string]::IsNullOrWhiteSpace($Values[$name])) {
+                throw "Durable delivery runtime config is missing required key: $name."
+            }
         }
     }
 
@@ -619,7 +622,7 @@ function Assert-MeetingAiKeyring {
     param(
         [Parameter(Mandatory = $true)][string]$KeyringJson,
         [Parameter(Mandatory = $true)][string]$ActiveKeyId,
-        [Parameter(Mandatory = $true)][string]$LookupKeyId
+        [string]$LookupKeyId = ""
     )
 
     try {
@@ -635,7 +638,8 @@ function Assert-MeetingAiKeyring {
     $lookupFound = $false
     foreach ($property in $properties) {
         if ($property.Name -eq $ActiveKeyId) { $activeFound = $true }
-        if ($property.Name -eq $LookupKeyId) { $lookupFound = $true }
+        if (-not [string]::IsNullOrWhiteSpace($LookupKeyId) -and
+            $property.Name -eq $LookupKeyId) { $lookupFound = $true }
         try {
             $keyBytes = [Convert]::FromBase64String([string]$property.Value)
         } catch {
@@ -652,7 +656,8 @@ function Assert-MeetingAiKeyring {
     if (-not $activeFound) {
         throw "MAI_INGESTION_ACTIVE_KEY_ID is absent from the decrypted keyring."
     }
-    if (-not $lookupFound -or $LookupKeyId -eq $ActiveKeyId) {
+    if (-not [string]::IsNullOrWhiteSpace($LookupKeyId) -and
+        (-not $lookupFound -or $LookupKeyId -eq $ActiveKeyId)) {
         throw "MAI_INGESTION_LOOKUP_KEY_ID must select a dedicated key in the decrypted keyring."
     }
 }

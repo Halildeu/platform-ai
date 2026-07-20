@@ -21,7 +21,12 @@ from app.services.analysis_delivery import (
     AnalysisDeliveryRuntime,
     build_ingestion_payload,
 )
-from app.services.durable_outbox import ClaimedMessage, PayloadCipher, SqliteOutboxStore
+from app.services.durable_outbox import (
+    ClaimedMessage,
+    OutboxMigrationRequiredError,
+    PayloadCipher,
+    SqliteOutboxStore,
+)
 from app.services.meeting_service_client import DeliveryAttempt, DeliveryDisposition
 
 KEY = b"K" * 32
@@ -276,6 +281,60 @@ def test_enqueue_survives_restart_and_is_delivered(tmp_path: Path) -> None:
         assert store.summary().pending == 0
 
     asyncio.run(scenario())
+
+
+def test_legacy_outbox_blocks_activation_without_dead_letter_and_allows_safe_drain(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "outbox.sqlite3"
+    settings = _settings(path)
+    store = SqliteOutboxStore(
+        path,
+        PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+        max_rows=10,
+    )
+    run_id = "44444444-4444-4444-8444-444444444444"
+    store.enqueue(
+        analysis_run_id=run_id,
+        meeting_id=MEETING_ID,
+        payload={
+            "meeting_id": MEETING_ID,
+            "transcript_session_id": SESSION_ID,
+            "transcript_sha256": "a" * 64,
+            "summary": "legacy retained result",
+        },
+        now=1.0,
+    )
+
+    with pytest.raises(
+        OutboxMigrationRequiredError,
+        match="drain them under the previous revision",
+    ):
+        AnalysisDeliveryRuntime(
+            settings,
+            store=store,
+            transport=FakeTransport([]),
+        )
+
+    blocked = store.summary(now=2.0)
+    assert blocked.pending == 1
+    assert blocked.in_flight == 0
+    assert blocked.dead == 0
+
+    legacy_message = store.claim_next(owner="previous-revision", lease_sec=30.0, now=2.0)
+    assert legacy_message is not None
+    assert store.mark_delivered(
+        analysis_run_id=legacy_message.analysis_run_id,
+        owner="previous-revision",
+    )
+    assert store.summary(now=3.0).pending == 0
+
+    upgraded = AnalysisDeliveryRuntime(
+        settings,
+        store=store,
+        transport=FakeTransport([]),
+    )
+    assert upgraded.store is store
 
 
 def test_noncanonical_analysis_is_rejected_before_outbox_write(tmp_path: Path) -> None:

@@ -42,6 +42,17 @@ from app.services.meeting_service_client import (
 logger = logging.getLogger(__name__)
 
 _GROUNDING_STATUSES = {"verified", "partial_verified", "withheld", "empty"}
+_CAPABILITY_PAYLOAD_FIELDS = frozenset(
+    {
+        "_canonical_tenant_id",
+        "analysis_spec_version",
+        "finalization_version",
+        "finalized_at",
+        "meeting_id",
+        "transcript_session_id",
+        "transcript_sha256",
+    }
+)
 
 
 class AnalysisTransport(Protocol):
@@ -210,6 +221,11 @@ class AnalysisDeliveryRuntime:
                 settings.ingestion_store_path,
                 cipher,
                 max_rows=settings.ingestion_max_rows,
+            )
+        if self.enabled:
+            assert self._store is not None
+            self._store.assert_delivery_capability_compatible(
+                required_payload_fields=_CAPABILITY_PAYLOAD_FIELDS
             )
         if self.enabled and self._transport is None:
             capability_provider = HttpCanonicalTranscriptClient(settings, http_client)
