@@ -196,7 +196,42 @@ jobs:
             exit 1
           fi
 
+  # Detect which services this PR/push actually touched so `service-tests`
+  # only runs the matrix cells with real diffs. A PR that only edits
+  # `services/meeting-ai-service/**` no longer waits ~20 minutes on
+  # `live-stt-service` (Whisper model download) that has zero touched code.
+  # `main` pushes fall through with all services true so the full matrix
+  # keeps running on the trunk — path filtering only affects PR runs.
+  service-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      diarization-service: ${{ steps.filter.outputs.diarization-service }}
+      final-stt-service: ${{ steps.filter.outputs.final-stt-service }}
+      live-stt-service: ${{ steps.filter.outputs.live-stt-service }}
+      meeting-ai-service: ${{ steps.filter.outputs.meeting-ai-service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          # On `push` the action falls back to comparing against the previous
+          # SHA in the same ref; on `pull_request` it diffs the PR base.
+          filters: |
+            diarization-service:
+              - 'services/diarization-service/**'
+              - '.github/workflows/ci.yml'
+            final-stt-service:
+              - 'services/final-stt-service/**'
+              - '.github/workflows/ci.yml'
+            live-stt-service:
+              - 'services/live-stt-service/**'
+              - '.github/workflows/ci.yml'
+            meeting-ai-service:
+              - 'services/meeting-ai-service/**'
+              - '.github/workflows/ci.yml'
+
   service-tests:
+    needs: service-changes
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -206,6 +241,17 @@ jobs:
           - final-stt-service
           - live-stt-service
           - meeting-ai-service
+    # A matrix cell whose service was NOT changed by this PR is skipped
+    # entirely (GitHub shows it as "skipped" — not a failure). On `main`
+    # pushes and any non-PR event we still run all four cells so the trunk
+    # baseline stays complete. GitHub Actions does not support dynamic-key
+    # `needs.X.outputs[matrix.service]`, so each matrix value is enumerated.
+    if: |
+      github.event_name != 'pull_request' ||
+      (matrix.service == 'diarization-service' && needs.service-changes.outputs.diarization-service == 'true') ||
+      (matrix.service == 'final-stt-service'   && needs.service-changes.outputs.final-stt-service   == 'true') ||
+      (matrix.service == 'live-stt-service'    && needs.service-changes.outputs.live-stt-service    == 'true') ||
+      (matrix.service == 'meeting-ai-service'  && needs.service-changes.outputs.meeting-ai-service  == 'true')
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
@@ -232,6 +278,7 @@ jobs:
         run: python -m mypy app
 
       - name: Pytest (unit)
+        timeout-minutes: 15
         run: python -m pytest tests/unit -q
 
   gpu-host-windows-contract:
