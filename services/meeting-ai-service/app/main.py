@@ -20,6 +20,7 @@ from app import __version__
 from app.api import analyze, ask, health, metrics
 from app.core.config import get_settings
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
+from app.services.live_stream_hub import LiveStreamHub
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     analysis_delivery = AnalysisDeliveryRuntime(settings)
     app.state.analysis_delivery = analysis_delivery
+    # Faz 24 live-stream SSE relay — a single in-memory hub per process.
+    # /analyze/live publishes; /analyze/live/stream/{meeting_id} subscribes.
+    app.state.live_stream_hub = LiveStreamHub(max_queue_size=settings.live_stream_max_queue)
     logging.basicConfig(
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s [%(correlation_id)s] %(message)s",

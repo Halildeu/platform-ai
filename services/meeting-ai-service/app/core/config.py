@@ -115,6 +115,28 @@ class Settings(BaseSettings):
     ingestion_stale_after_sec: float = Field(default=300.0, ge=1.0, le=604_800.0)
     prompt_version: str | None = Field(default=None, max_length=64)
 
+    # Faz 24 live-stream SSE relay (Zeynep 2026-07-20 kapsam kararı):
+    # `/analyze/live/stream/{meeting_id}` — clients subscribe to per-meeting
+    # events, `/analyze/live` publishes each new analysis into the hub.
+    live_stream_max_queue: int = Field(
+        default=100,
+        ge=1,
+        le=10_000,
+        description=(
+            "Per-subscriber bounded queue size (drop-oldest on overflow). "
+            "100 covers ~50 minutes at one publish/30s with headroom."
+        ),
+    )
+    live_stream_heartbeat_sec: float = Field(
+        default=15.0,
+        ge=1.0,
+        le=300.0,
+        description=(
+            "SSE ping frame interval. Keeps proxies + client disconnect "
+            "detection responsive. 15s balances chattiness vs staleness."
+        ),
+    )
+
     def ollama_options(self) -> dict[str, object]:
         """Decoding options for Ollama `/api/generate` (deterministic extraction).
 
