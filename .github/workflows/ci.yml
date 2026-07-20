@@ -307,9 +307,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install signed-permit verifier dependency
+      - name: Install meeting-ai runtime dependencies
         shell: powershell
-        run: python -m pip install --disable-pip-version-check cryptography==46.0.7
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r services/meeting-ai-service/requirements.txt
 
       - name: Windows PowerShell 5.1 parse contract
         shell: powershell
