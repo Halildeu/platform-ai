@@ -721,16 +721,18 @@ function Import-MeetingAiRuntimeEnvironment {
             Clear-MeetingAiRuntimeTlsKey
         }
 
+        if ($values.ContainsKey("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI")) {
+            $resolvedSecrets["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET"] =
+                Unprotect-MeetingAiSecret `
+                    -ProtectedBase64 $values["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] `
+                    -KeyName "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"
+        }
         if ($values.ContainsKey("MAI_READY_CONSUMER_ENABLED") -and
             $values["MAI_READY_CONSUMER_ENABLED"].ToLowerInvariant() -eq "true") {
             $resolvedSecrets["MAI_READY_REDIS_URL"] =
                 Unprotect-MeetingAiSecret `
                     -ProtectedBase64 $values["MAI_READY_REDIS_URL_DPAPI"] `
                     -KeyName "MAI_READY_REDIS_URL_DPAPI"
-            $resolvedSecrets["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET"] =
-                Unprotect-MeetingAiSecret `
-                    -ProtectedBase64 $values["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] `
-                    -KeyName "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"
         }
     }
 
