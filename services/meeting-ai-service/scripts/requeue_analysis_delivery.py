@@ -28,8 +28,9 @@ def main() -> int:
     store = SqliteOutboxStore(
         settings.ingestion_store_path,
         PayloadCipher(
-            settings.ingestion_encryption_keys(),
+            settings.ingestion_payload_encryption_keys(),
             settings.ingestion_active_key_id,
+            lookup_key=settings.ingestion_lookup_key(),
         ),
         max_rows=settings.ingestion_max_rows,
     )

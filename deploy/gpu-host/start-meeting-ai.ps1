@@ -63,7 +63,8 @@ try {
     try {
         Assert-TranscriptReadyPreEnablePermit `
             -RepoRoot $RepoRoot `
-            -StartupScriptPath $PSCommandPath
+            -StartupScriptPath $PSCommandPath `
+            -PythonExe $PythonExe
     } catch {
         Add-Content $log "[startup] Transcript-ready pre-enable permit rejected"
         throw "Transcript-ready consumer startup permit was rejected."

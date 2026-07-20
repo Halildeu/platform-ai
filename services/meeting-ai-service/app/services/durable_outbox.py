@@ -89,7 +89,13 @@ class DeadLetterMetadata:
 class PayloadCipher:
     """Versioned AES-GCM keyring with per-message authenticated context."""
 
-    def __init__(self, keys: dict[str, bytes], active_key_id: str) -> None:
+    def __init__(
+        self,
+        keys: dict[str, bytes],
+        active_key_id: str,
+        *,
+        lookup_key: bytes,
+    ) -> None:
         invalid_key_ids = sorted(key_id for key_id, key in keys.items() if len(key) != 32)
         if invalid_key_ids:
             raise OutboxKeyUnavailableError(
@@ -97,12 +103,20 @@ class PayloadCipher:
             )
         if active_key_id not in keys:
             raise OutboxKeyUnavailableError("active key id is missing from the keyring")
+        if len(lookup_key) != 32:
+            raise OutboxKeyUnavailableError("blind-index key must be exactly 32 bytes")
         self._keys = dict(keys)
         self.active_key_id = active_key_id
+        self._lookup_key = bytes(lookup_key)
 
     @property
     def key_ids(self) -> frozenset[str]:
         return frozenset(self._keys)
+
+    @property
+    def lookup_key_fingerprint(self) -> str:
+        """Non-secret binding used to reject unversioned blind-index key changes."""
+        return hashlib.sha256(b"meeting-ai-lookup-key:v1\x00" + self._lookup_key).hexdigest()
 
     @staticmethod
     def _aad(analysis_run_id: str, meeting_id: str) -> bytes:
@@ -159,12 +173,9 @@ class PayloadCipher:
         return parsed
 
     def lookup_digests(self, *, purpose: str, value: str) -> tuple[str, ...]:
-        """Return keyed deterministic digests for rotation-safe encrypted lookups."""
-        key_ids = (self.active_key_id, *sorted(self._keys.keys() - {self.active_key_id}))
-        message = f"meeting-ai-lookup:v1:{purpose}:{value}".encode()
-        return tuple(
-            hmac.new(self._keys[key_id], message, hashlib.sha256).hexdigest() for key_id in key_ids
-        )
+        """Return a stable blind index independent from rotating encryption DEKs."""
+        message = f"meeting-ai-lookup:v2:{purpose}:{value}".encode()
+        return (hmac.new(self._lookup_key, message, hashlib.sha256).hexdigest(),)
 
     def encrypt_metadata(
         self,
@@ -173,7 +184,7 @@ class PayloadCipher:
         lookup_value: str,
         payload: dict[str, object],
     ) -> tuple[str, str, bytes, bytes]:
-        """Encrypt a metadata envelope and return its keyed lookup digest."""
+        """Encrypt a metadata envelope and return its stable lookup digest."""
         lookup_digest = self.lookup_digests(purpose=purpose, value=lookup_value)[0]
         plaintext = json.dumps(
             payload,
@@ -223,15 +234,17 @@ class PayloadCipher:
 class SqliteOutboxStore:
     """Process-safe local durable queue with lease-based delivery ownership."""
 
-    _SCHEMA_VERSION = 5
+    _SCHEMA_VERSION = 6
     _MIGRATIONS: ClassVar[dict[int, str]] = {
         1: "0001_analysis_delivery_outbox.sql",
         2: "0002_ready_event_inbox.sql",
         3: "0003_ready_event_redrive.sql",
         4: "0004_ready_event_inbox_encryption.sql",
         5: "0005_ready_event_lease_fencing.sql",
+        6: "0006_ready_event_stable_lookup.sql",
     }
     _INBOX_SCRUB_MARKER = "ready-inbox-v3-plaintext-scrub"
+    _LOOKUP_KEY_BINDING_MARKER = "ready-inbox-lookup-key-sha256-v1"
 
     def __init__(
         self,
@@ -270,8 +283,11 @@ class SqliteOutboxStore:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version < 0 or version > self._SCHEMA_VERSION:
                 raise OutboxError(f"unsupported outbox schema version {version}")
+            self._assert_existing_keyring_complete(connection)
             self._apply_migrations(connection, version)
+            self._rekey_encrypted_rows(connection)
             self._ensure_store_metadata(connection)
+            self._verify_or_record_lookup_key_binding(connection)
             if not self._inbox_plaintext_scrub_complete(connection):
                 self._complete_inbox_plaintext_scrub(connection)
         self._restrict_database_files()
@@ -289,6 +305,9 @@ class SqliteOutboxStore:
                 continue
             if version == 5:
                 self._lease_fence_ready_inbox_migration(connection, sql)
+                continue
+            if version == 6:
+                self._stable_lookup_ready_inbox_migration(connection)
                 continue
             try:
                 connection.executescript(
@@ -455,6 +474,228 @@ class SqliteOutboxStore:
             connection.rollback()
             raise
 
+    def _stable_lookup_ready_inbox_migration(self, connection: sqlite3.Connection) -> None:
+        """Rebind v5 identities to the dedicated-key HMAC blind index."""
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = connection.execute(
+                """
+                SELECT event_key_digest, identity_key_id, identity_nonce,
+                       identity_ciphertext
+                FROM meeting_transcript_ready_inbox
+                ORDER BY created_at, event_key_digest
+                """
+            ).fetchall()
+            replacements: list[tuple[str, str, bytes, bytes, str]] = []
+            seen_digests: set[str] = set()
+            for row in rows:
+                old_digest = str(row["event_key_digest"])
+                try:
+                    envelope = self._cipher.decrypt_metadata(
+                        purpose="ready-event-inbox",
+                        lookup_digest=old_digest,
+                        key_id=str(row["identity_key_id"]),
+                        nonce=bytes(row["identity_nonce"]),
+                        ciphertext=bytes(row["identity_ciphertext"]),
+                    )
+                    event_key = envelope["eventKey"]
+                    tenant_id = envelope.get("tenantId")
+                except (KeyError, TypeError, ValueError, OutboxIntegrityError) as exc:
+                    raise OutboxIntegrityError(
+                        "ready-event identity cannot be rebound during stable lookup migration"
+                    ) from exc
+                if not isinstance(event_key, str) or (
+                    tenant_id is not None and not isinstance(tenant_id, str)
+                ):
+                    raise OutboxIntegrityError(
+                        "ready-event identity has invalid stable lookup binding"
+                    )
+                lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+                key_id, new_digest, nonce, ciphertext = self._cipher.encrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_value=lookup_value,
+                    payload=envelope,
+                )
+                if new_digest in seen_digests:
+                    raise OutboxIntegrityError(
+                        "duplicate semantic ready-event identities require reconciliation"
+                    )
+                seen_digests.add(new_digest)
+                replacements.append((new_digest, key_id, nonce, ciphertext, old_digest))
+
+            for new_digest, key_id, nonce, ciphertext, old_digest in replacements:
+                cursor = connection.execute(
+                    """
+                    UPDATE meeting_transcript_ready_inbox
+                    SET event_key_digest = ?, identity_key_id = ?,
+                        identity_nonce = ?, identity_ciphertext = ?
+                    WHERE event_key_digest = ?
+                    """,
+                    (new_digest, key_id, nonce, ciphertext, old_digest),
+                )
+                if cursor.rowcount != 1:
+                    raise OutboxIntegrityError(
+                        "ready-event row changed during blind-index migration"
+                    )
+            connection.execute("PRAGMA user_version=6")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _assert_existing_keyring_complete(self, connection: sqlite3.Connection) -> None:
+        """Reject a partial keyring before any migration or scrub mutates the store."""
+        key_ids: set[str] = set()
+        table_names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for table_name, key_column, table_info_sql, key_ids_sql in (
+            (
+                "analysis_delivery_outbox",
+                "key_id",
+                "PRAGMA table_info(analysis_delivery_outbox)",
+                "SELECT DISTINCT key_id FROM analysis_delivery_outbox",
+            ),
+            (
+                "meeting_transcript_ready_inbox",
+                "identity_key_id",
+                "PRAGMA table_info(meeting_transcript_ready_inbox)",
+                "SELECT DISTINCT identity_key_id FROM meeting_transcript_ready_inbox",
+            ),
+        ):
+            if table_name not in table_names:
+                continue
+            columns = {
+                str(row[1])
+                for row in connection.execute(table_info_sql).fetchall()
+            }
+            if key_column not in columns:
+                continue
+            key_ids.update(
+                str(row[0])
+                for row in connection.execute(key_ids_sql).fetchall()
+            )
+        missing = sorted(key_ids - self._cipher.key_ids)
+        if missing:
+            raise OutboxKeyUnavailableError(
+                "outbox contains rows encrypted with unavailable key ids: " + ", ".join(missing)
+            )
+
+    def _rekey_encrypted_rows(self, connection: sqlite3.Connection) -> None:
+        """Eagerly re-encrypt every retained row with the active encryption DEK."""
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            outbox_rows = connection.execute(
+                """
+                SELECT analysis_run_id, meeting_id, key_id, nonce, ciphertext,
+                       payload_sha256
+                FROM analysis_delivery_outbox
+                WHERE key_id != ?
+                ORDER BY created_at, analysis_run_id
+                """,
+                (self._cipher.active_key_id,),
+            ).fetchall()
+            for row in outbox_rows:
+                analysis_run_id = str(row["analysis_run_id"])
+                meeting_id = str(row["meeting_id"])
+                payload = self._cipher.decrypt(
+                    key_id=str(row["key_id"]),
+                    nonce=bytes(row["nonce"]),
+                    ciphertext=bytes(row["ciphertext"]),
+                    analysis_run_id=analysis_run_id,
+                    meeting_id=meeting_id,
+                )
+                key_id, nonce, ciphertext, payload_sha256 = self._cipher.encrypt(
+                    analysis_run_id,
+                    meeting_id,
+                    payload,
+                )
+                if not hmac.compare_digest(payload_sha256, str(row["payload_sha256"])):
+                    raise OutboxIntegrityError(
+                        "outbox payload hash changed during encryption-key rotation"
+                    )
+                cursor = connection.execute(
+                    """
+                    UPDATE analysis_delivery_outbox
+                    SET key_id = ?, nonce = ?, ciphertext = ?
+                    WHERE analysis_run_id = ? AND key_id != ?
+                    """,
+                    (
+                        key_id,
+                        nonce,
+                        ciphertext,
+                        analysis_run_id,
+                        self._cipher.active_key_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise OutboxIntegrityError(
+                        "outbox row changed during encryption-key rotation"
+                    )
+
+            inbox_rows = connection.execute(
+                """
+                SELECT event_key_digest, identity_key_id, identity_nonce,
+                       identity_ciphertext
+                FROM meeting_transcript_ready_inbox
+                WHERE identity_key_id != ?
+                ORDER BY created_at, event_key_digest
+                """,
+                (self._cipher.active_key_id,),
+            ).fetchall()
+            for row in inbox_rows:
+                digest = str(row["event_key_digest"])
+                envelope = self._cipher.decrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_digest=digest,
+                    key_id=str(row["identity_key_id"]),
+                    nonce=bytes(row["identity_nonce"]),
+                    ciphertext=bytes(row["identity_ciphertext"]),
+                )
+                event_key = envelope.get("eventKey")
+                tenant_id = envelope.get("tenantId")
+                if not isinstance(event_key, str) or (
+                    tenant_id is not None and not isinstance(tenant_id, str)
+                ):
+                    raise OutboxIntegrityError(
+                        "ready-event identity is invalid during encryption-key rotation"
+                    )
+                lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+                key_id, rebound_digest, nonce, ciphertext = self._cipher.encrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_value=lookup_value,
+                    payload=envelope,
+                )
+                if not hmac.compare_digest(rebound_digest, digest):
+                    raise OutboxIntegrityError(
+                        "ready-event blind index changed during encryption-key rotation"
+                    )
+                cursor = connection.execute(
+                    """
+                    UPDATE meeting_transcript_ready_inbox
+                    SET identity_key_id = ?, identity_nonce = ?, identity_ciphertext = ?
+                    WHERE event_key_digest = ? AND identity_key_id != ?
+                    """,
+                    (
+                        key_id,
+                        nonce,
+                        ciphertext,
+                        digest,
+                        self._cipher.active_key_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise OutboxIntegrityError(
+                        "ready-event row changed during encryption-key rotation"
+                    )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
     @staticmethod
     def _ensure_store_metadata(connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -464,6 +705,60 @@ class SqliteOutboxStore:
                 value TEXT NOT NULL
             )
             """
+        )
+
+    def _verify_or_record_lookup_key_binding(self, connection: sqlite3.Connection) -> None:
+        """Bind the durable store to one blind-index key until a versioned migration exists."""
+        row = connection.execute(
+            "SELECT value FROM meeting_ai_store_metadata WHERE name = ?",
+            (self._LOOKUP_KEY_BINDING_MARKER,),
+        ).fetchone()
+        expected = self._cipher.lookup_key_fingerprint
+        if row is not None:
+            if not hmac.compare_digest(str(row[0]), expected):
+                raise OutboxIntegrityError(
+                    "blind-index key changed without a versioned lookup migration"
+                )
+            return
+
+        inbox_rows = connection.execute(
+            """
+            SELECT event_key_digest, identity_key_id, identity_nonce,
+                   identity_ciphertext
+            FROM meeting_transcript_ready_inbox
+            ORDER BY created_at, event_key_digest
+            """
+        ).fetchall()
+        for inbox_row in inbox_rows:
+            digest = str(inbox_row["event_key_digest"])
+            envelope = self._cipher.decrypt_metadata(
+                purpose="ready-event-inbox",
+                lookup_digest=digest,
+                key_id=str(inbox_row["identity_key_id"]),
+                nonce=bytes(inbox_row["identity_nonce"]),
+                ciphertext=bytes(inbox_row["identity_ciphertext"]),
+            )
+            event_key = envelope.get("eventKey")
+            tenant_id = envelope.get("tenantId")
+            if not isinstance(event_key, str) or (
+                tenant_id is not None and not isinstance(tenant_id, str)
+            ):
+                raise OutboxIntegrityError(
+                    "ready-event identity is invalid during blind-index key binding"
+                )
+            lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+            rebound_digest = self._cipher.lookup_digests(
+                purpose="ready-event-inbox",
+                value=lookup_value,
+            )[0]
+            if not hmac.compare_digest(rebound_digest, digest):
+                raise OutboxIntegrityError(
+                    "blind-index key does not match retained ready-event identities"
+                )
+
+        connection.execute(
+            "INSERT INTO meeting_ai_store_metadata(name, value) VALUES (?, ?)",
+            (self._LOOKUP_KEY_BINDING_MARKER, expected),
         )
 
     def _inbox_plaintext_scrub_complete(self, connection: sqlite3.Connection) -> bool:

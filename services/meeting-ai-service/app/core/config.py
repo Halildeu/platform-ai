@@ -142,6 +142,7 @@ class Settings(BaseSettings):
 
     ingestion_store_path: Path = Field(default=Path("data/analysis-delivery.sqlite3"))
     ingestion_active_key_id: str = Field(default="")
+    ingestion_lookup_key_id: str = Field(default="")
     ingestion_encryption_keys_json: SecretStr = Field(default=SecretStr(""))
     ingestion_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
     ingestion_max_attempts: int = Field(default=8, ge=1, le=100)
@@ -317,6 +318,23 @@ class Settings(BaseSettings):
             decoded[key_id] = key
         return decoded
 
+    def ingestion_lookup_key(self) -> bytes:
+        """Return the dedicated blind-index key from the protected keyring."""
+        key = self.ingestion_encryption_keys().get(self.ingestion_lookup_key_id)
+        if key is None:
+            raise ValueError(
+                "MAI_INGESTION_LOOKUP_KEY_ID must select a key from the encrypted keyring"
+            )
+        return key
+
+    def ingestion_payload_encryption_keys(self) -> dict[str, bytes]:
+        """Return only payload DEKs, excluding the dedicated blind-index key."""
+        return {
+            key_id: key
+            for key_id, key in self.ingestion_encryption_keys().items()
+            if key_id != self.ingestion_lookup_key_id
+        }
+
     @model_validator(mode="after")
     def _enforce_ingestion_boundary(self) -> Settings:
         """Fail at startup when durable delivery cannot meet its security contract."""
@@ -366,6 +384,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "MAI_INGESTION_ACTIVE_KEY_ID must select a key from the encrypted keyring"
             )
+        if (
+            not self.ingestion_lookup_key_id
+            or self.ingestion_lookup_key_id not in keys
+            or self.ingestion_lookup_key_id == self.ingestion_active_key_id
+        ):
+            raise ValueError(
+                "MAI_INGESTION_LOOKUP_KEY_ID must select a dedicated non-active key from "
+                "the encrypted keyring"
+            )
         if self.ingestion_max_backoff_sec < self.ingestion_base_backoff_sec:
             raise ValueError("ingestion max backoff must be >= base backoff")
         # A cold delivery can spend one timeout acquiring a token and a second
@@ -373,6 +400,31 @@ class Settings(BaseSettings):
         # another worker cannot reclaim and duplicate it mid-flight.
         if self.ingestion_lease_sec <= 2 * self.ingestion_timeout_sec:
             raise ValueError("ingestion lease must be greater than two HTTP timeout windows")
+        for name, value in (
+            ("MAI_TRANSCRIPT_SERVICE_BASE_URL", self.transcript_service_base_url),
+            ("MAI_TRANSCRIPT_SERVICE_TOKEN_URL", self.transcript_service_token_url),
+        ):
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+                raise ValueError(
+                    f"{name} must be an absolute HTTPS URL without embedded credentials"
+                )
+        if not (
+            self.transcript_service_client_id
+            and self.transcript_service_client_secret.get_secret_value()
+        ):
+            raise ValueError("durable delivery requires transcript-service client credentials")
+        if self.transcript_service_capability_permissions != [
+            "transcript:analysis-job-capability:issue"
+        ]:
+            raise ValueError(
+                "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE must request only "
+                "transcript:analysis-job-capability:issue"
+            )
+        _validate_transcript_path_template(
+            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+            self.transcript_service_capability_path_template,
+        )
         return self
 
     @model_validator(mode="after")
@@ -389,39 +441,13 @@ class Settings(BaseSettings):
         if self.app_env in {"stage", "prod"} and parsed_redis.scheme != "rediss":
             raise ValueError("stage/prod ready consumer requires a rediss:// Redis URL")
 
-        required = {
-            "MAI_TRANSCRIPT_SERVICE_BASE_URL": self.transcript_service_base_url,
-            "MAI_TRANSCRIPT_SERVICE_TOKEN_URL": self.transcript_service_token_url,
-        }
-        for name, value in required.items():
-            parsed = urlsplit(value)
-            if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
-                raise ValueError(
-                    f"{name} must be an absolute HTTPS URL without embedded credentials"
-                )
-        if not (
-            self.transcript_service_client_id
-            and self.transcript_service_client_secret.get_secret_value()
-        ):
-            raise ValueError("ready consumer requires transcript-service client credentials")
         if self.transcript_service_permissions != ["transcript:canonical:read"]:
             raise ValueError(
                 "MAI_TRANSCRIPT_SERVICE_SCOPE must request only transcript:canonical:read"
             )
-        if self.transcript_service_capability_permissions != [
-            "transcript:analysis-job-capability:issue"
-        ]:
-            raise ValueError(
-                "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE must request only "
-                "transcript:analysis-job-capability:issue"
-            )
         _validate_transcript_path_template(
             "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE",
             self.transcript_service_snapshot_path_template,
-        )
-        _validate_transcript_path_template(
-            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
-            self.transcript_service_capability_path_template,
         )
         if self.ready_consumer_max_backoff_sec < self.ready_consumer_base_backoff_sec:
             raise ValueError("ready consumer max backoff must be >= base backoff")

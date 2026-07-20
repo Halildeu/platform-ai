@@ -25,6 +25,7 @@ from app.services.durable_outbox import ClaimedMessage, PayloadCipher, SqliteOut
 from app.services.meeting_service_client import DeliveryAttempt, DeliveryDisposition
 
 KEY = b"K" * 32
+LOOKUP_KEY = b"L" * 32
 MEETING_ID = "11111111-1111-4111-8111-111111111111"
 TENANT_ID = "33333333-3333-4333-8333-333333333333"
 SESSION_ID = "22222222-2222-4222-8222-222222222222"
@@ -59,10 +60,25 @@ def _settings(path: Path, **overrides: object) -> Settings:
         "meeting_service_token_url": "https://auth.invalid/token",
         "meeting_service_client_id": "meeting-ai",
         "meeting_service_client_secret": SecretStr("secret"),
+        "transcript_service_base_url": "https://transcript.invalid",
+        "transcript_service_capability_path_template": (
+            "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+            "/sessions/{session_id}/finalizations/{finalization_version}"
+            "/analysis-capability"
+        ),
+        "transcript_service_token_url": "https://auth.invalid/token",
+        "transcript_service_client_id": "meeting-ai",
+        "transcript_service_client_secret": SecretStr("transcript-secret"),
         "ingestion_store_path": path,
         "ingestion_active_key_id": "v1",
+        "ingestion_lookup_key_id": "lookup-v1",
         "ingestion_encryption_keys_json": SecretStr(
-            json.dumps({"v1": base64.b64encode(KEY).decode()})
+            json.dumps(
+                {
+                    "v1": base64.b64encode(KEY).decode(),
+                    "lookup-v1": base64.b64encode(LOOKUP_KEY).decode(),
+                }
+            )
         ),
         "ingestion_timeout_sec": 0.1,
         "ingestion_lease_sec": 1.0,
@@ -226,7 +242,11 @@ def test_enqueue_survives_restart_and_is_delivered(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         first = AnalysisDeliveryRuntime(
             settings,
             store=store,
@@ -261,7 +281,11 @@ def test_enqueue_survives_restart_and_is_delivered(tmp_path: Path) -> None:
 def test_noncanonical_analysis_is_rejected_before_outbox_write(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         runtime = AnalysisDeliveryRuntime(
             _settings(path),
             store=store,
@@ -308,7 +332,11 @@ def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
             transcript_service_client_id="meeting-ai",
             transcript_service_client_secret=SecretStr("transcript-secret"),
         )
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transcript = "Bütçe onaylandı."
         finalized_at = datetime(2026, 7, 18, 1, 0, tzinfo=UTC)
         run_id = "44444444-4444-4444-8444-444444444444"
@@ -414,7 +442,11 @@ def test_retry_then_success_reuses_same_analysis_run_id(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transport = FakeTransport(
             [
                 DeliveryAttempt(DeliveryDisposition.RETRY, "http_503"),
@@ -445,7 +477,11 @@ def test_enqueue_does_not_wait_for_blocked_network_delivery(tmp_path: Path) -> N
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transport = BlockingTransport()
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         await runtime.start()
@@ -475,7 +511,11 @@ def test_shutdown_cancellation_preserves_leased_payload_for_recovery(tmp_path: P
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path, ingestion_shutdown_grace_sec=0.1)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transport = BlockingTransport()
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         await runtime.enqueue_analysis(
@@ -509,7 +549,11 @@ def test_retry_limit_moves_payload_to_dead_letter(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path, ingestion_max_attempts=2)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transport = FakeTransport(
             [
                 DeliveryAttempt(DeliveryDisposition.RETRY, "ingestion_http_503"),
@@ -563,7 +607,11 @@ def test_terminal_failure_enters_dead_letter_and_degrades_health(tmp_path: Path)
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         runtime = AnalysisDeliveryRuntime(
             settings,
             store=store,

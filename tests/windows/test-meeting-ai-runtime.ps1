@@ -27,7 +27,14 @@ $secureReadyRedisUrl = ConvertTo-SecureString $plainReadyRedisUrl -AsPlainText -
 $plainTranscriptCredential = "ci-transcript-credential"
 $secureTranscriptCredential = ConvertTo-SecureString `
     $plainTranscriptCredential -AsPlainText -Force
-$permitSource = Join-Path $env:RUNNER_TEMP "transcript-ready-pre-enable.json"
+$permitSource = Join-Path $env:RUNNER_TEMP "transcript-ready-pre-enable.dsse.json"
+$permitTrustRootSource = Join-Path $env:RUNNER_TEMP "transcript-ready-trust-root.json"
+$permitPrivateKeyPath = Join-Path $env:RUNNER_TEMP "transcript-ready-test-key.raw"
+$permitFixtureScript = Join-Path $PSScriptRoot `
+    "create-transcript-ready-permit-fixture.py"
+$pythonExe = (Get-Command python -CommandType Application -ErrorAction Stop | `
+    Select-Object -First 1).Source
+$expectedPermitTrustRootSha256 = ""
 $expectedGitopsCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 $expectedPolicySha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 $expectedProducerDigest = "sha256:" + (("c" * 64) -join "")
@@ -60,13 +67,31 @@ function Assert-ThrowsLike {
 }
 
 function Write-FreshPermit {
-    param($Permit, [string]$Path)
-    $Permit["generatedAt"] = [DateTimeOffset]::UtcNow.ToString("o")
-    [IO.File]::WriteAllText(
-        $Path,
-        (($Permit | ConvertTo-Json -Depth 8) + "`n"),
-        (New-Object Text.UTF8Encoding($false))
+    param(
+        [string]$Path = $permitSource,
+        [ValidateSet("test", "stage")][string]$AppEnv = "test",
+        [int]$GeneratedAtOffsetSeconds = 0
     )
+    $fixtureArgs = @(
+        $permitFixtureScript,
+        "--envelope", $Path,
+        "--trust-root", $permitTrustRootSource,
+        "--private-key", $permitPrivateKeyPath,
+        "--app-env", $AppEnv,
+        "--gitops-commit", $expectedGitopsCommit,
+        "--policy-sha256", $expectedPolicySha256,
+        "--producer-digest", $expectedProducerDigest,
+        "--backend-commit", (("f" * 40) -join ""),
+        "--platform-ai-commit", $repoCommit,
+        "--startup-sha256", $startupSha256,
+        "--generated-at-offset-seconds", "$GeneratedAtOffsetSeconds"
+    )
+    $trustSha = @(& $pythonExe @fixtureArgs)
+    if ($LASTEXITCODE -ne 0 -or $trustSha.Count -ne 1 -or
+        "$($trustSha[0])" -notmatch '^[0-9a-f]{64}$') {
+        throw "Test transcript-ready permit fixture generation failed."
+    }
+    $script:expectedPermitTrustRootSha256 = "$($trustSha[0])"
 }
 
 try {
@@ -186,29 +211,7 @@ try {
     Assert-True ($LASTEXITCODE -eq 0) "Test repository commit could not be read."
     $startupSha256 = Get-MeetingAiFileSha256 `
         -Path $startScript -Purpose "Meeting-ai startup script"
-    $permit = [ordered]@{
-        schemaVersion = "faz24.transcriptReadyPreEnableVerdict.v1"
-        generatedAt = [DateTimeOffset]::UtcNow.ToString("o")
-        issue = "platform-k8s-gitops#2610"
-        status = "accepted-candidate"
-        enableAuthorized = $true
-        checks = @([ordered]@{ name = "ci-contract"; passed = $true; message = "ok" })
-        requiredRemediationEvidence = @()
-        binding = [ordered]@{
-            targetAppEnv = "test"
-            expectedGitopsCommit = $expectedGitopsCommit
-            policySha256 = $expectedPolicySha256
-            producerCapability = [ordered]@{
-                transcriptImageDigest = $expectedProducerDigest
-            }
-            hostStartupGuard = [ordered]@{
-                platformAiCommit = $repoCommit
-                startupScriptSha256 = $startupSha256
-                permitRequired = $true
-            }
-        }
-    }
-    Write-FreshPermit -Permit $permit -Path $permitSource
+    Write-FreshPermit -Path $permitSource
 
     & $configureScript `
         -ReadyConsumerEnabled "true" `
@@ -225,9 +228,12 @@ try {
         -TranscriptServiceClientId $customTranscriptClientId `
         -TranscriptServiceClientSecret $secureTranscriptCredential `
         -ReadyPermitSourcePath $permitSource `
+        -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
         -ExpectedGitopsCommit $expectedGitopsCommit `
         -ExpectedPolicySha256 $expectedPolicySha256 `
         -ExpectedProducerImageDigest $expectedProducerDigest `
+        -ExpectedPermitTrustRootSha256 $expectedPermitTrustRootSha256 `
+        -PythonExe $pythonExe `
         -StorePath $storePath `
         -ConfigPath $configPath `
         -Confirm:$false
@@ -254,33 +260,93 @@ try {
         "Ready Redis DPAPI blob must not be exported."
     Assert-TranscriptReadyPreEnablePermit `
         -RepoRoot $repoRoot `
-        -StartupScriptPath $startScript
+        -StartupScriptPath $startScript `
+        -PythonExe $pythonExe
 
     $installedPermit = $env:MAI_READY_PRE_ENABLE_PERMIT_PATH
+    $installedPermitTrustRoot = $env:MAI_READY_PERMIT_TRUST_ROOT_PATH
     $installedReceipt = $env:MAI_READY_ACTIVATION_RECEIPT_PATH
     Assert-True (-not (Test-Path -LiteralPath $permitSource)) `
         "A successful activation must consume the permit source."
+    Assert-True (Test-Path -LiteralPath $permitTrustRootSource -PathType Leaf) `
+        "Activation must preserve the out-of-band public trust-root source."
+    Assert-True (Test-Path -LiteralPath $installedPermitTrustRoot -PathType Leaf) `
+        "A successful activation must install the pinned permit trust root."
     Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
         "A successful activation must write a durable activation receipt."
     Assert-TranscriptReadyActivationReceiptFile `
         -ReceiptPath $installedReceipt `
         -PermitPath $installedPermit `
+        -TrustRootPath $installedPermitTrustRoot `
+        -ExpectedTrustRootSha256 $expectedPermitTrustRootSha256 `
         -ExpectedGitopsCommit $expectedGitopsCommit `
         -ExpectedPolicySha256 $expectedPolicySha256 `
         -ExpectedProducerImageDigest $expectedProducerDigest `
         -RepoRoot $repoRoot `
         -StartupScriptPath $startScript `
+        -PythonExe $pythonExe `
         -AppEnv "test"
+
+    $trustedPermitContent = [IO.File]::ReadAllText($installedPermit)
+    $tamperedEnvelope = $trustedPermitContent | ConvertFrom-Json
+    $trustedSignature = [string]$tamperedEnvelope.signatures[0].sig
+    $tamperedEnvelope.signatures[0].sig = if ($trustedSignature[0] -eq "A") {
+        "B" + $trustedSignature.Substring(1)
+    } else {
+        "A" + $trustedSignature.Substring(1)
+    }
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedPermit `
+        -Content (($tamperedEnvelope | ConvertTo-Json -Depth 8 -Compress) + "`n")
+    Assert-ThrowsLike {
+        Assert-TranscriptReadyPreEnablePermit `
+            -RepoRoot $repoRoot `
+            -StartupScriptPath $startScript `
+            -PythonExe $pythonExe
+    } "signed permit verification failed"
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedPermit -Content $trustedPermitContent
+
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedPermit `
+        -Content ($trustedPermitContent + " ")
+    Assert-ThrowsLike {
+        Assert-TranscriptReadyPreEnablePermit `
+            -RepoRoot $repoRoot `
+            -StartupScriptPath $startScript `
+            -PythonExe $pythonExe
+    } "activation receipt binding does not match"
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedPermit `
+        -Content $trustedPermitContent
+
     Assert-ThrowsLike {
         Assert-TranscriptReadyPermitFile `
             -PermitPath $installedPermit `
+            -TrustRootPath $installedPermitTrustRoot `
+            -ExpectedTrustRootSha256 (("e" * 64) -join "") `
             -ExpectedGitopsCommit $expectedGitopsCommit `
             -ExpectedPolicySha256 $expectedPolicySha256 `
             -ExpectedProducerImageDigest $expectedProducerDigest `
             -RepoRoot $repoRoot `
             -StartupScriptPath $startScript `
+            -PythonExe $pythonExe `
+            -AppEnv "test"
+    } "signed permit verification failed"
+
+    Assert-ThrowsLike {
+        Assert-TranscriptReadyPermitFile `
+            -PermitPath $installedPermit `
+            -TrustRootPath $installedPermitTrustRoot `
+            -ExpectedTrustRootSha256 $expectedPermitTrustRootSha256 `
+            -ExpectedGitopsCommit $expectedGitopsCommit `
+            -ExpectedPolicySha256 $expectedPolicySha256 `
+            -ExpectedProducerImageDigest $expectedProducerDigest `
+            -RepoRoot $repoRoot `
+            -StartupScriptPath $startScript `
+            -PythonExe $pythonExe `
             -AppEnv "stage"
-    } "environment or GitOps binding does not match"
+    } "signed permit verification failed"
 
     $configBeforeReplay = [IO.File]::ReadAllBytes($configPath)
     [IO.File]::WriteAllBytes($permitSource, [IO.File]::ReadAllBytes($installedPermit))
@@ -288,6 +354,9 @@ try {
         & $configureScript `
             -RotateEncryptionKey `
             -ReadyPermitSourcePath $permitSource `
+            -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+            -ExpectedPermitTrustRootSha256 $expectedPermitTrustRootSha256 `
+            -PythonExe $pythonExe `
             -StorePath $storePath `
             -ConfigPath $configPath `
             -Confirm:$false
@@ -311,7 +380,7 @@ try {
         -Backend "mock" `
         -AppEnv "test" `
         -RuntimeConfigPath $configPath `
-        -PythonExe "not-invoked.exe" `
+        -PythonExe $pythonExe `
         -ValidateConfigurationOnly
 
     $configPyPath = Join-Path $repoRoot `
@@ -326,7 +395,8 @@ try {
         Assert-ThrowsLike {
             Assert-TranscriptReadyPreEnablePermit `
                 -RepoRoot $repoRoot `
-                -StartupScriptPath $startScript
+                -StartupScriptPath $startScript `
+                -PythonExe $pythonExe
         } "worktree is not clean"
     } finally {
         [IO.File]::WriteAllBytes($configPyPath, $configPyBytes)
@@ -343,7 +413,8 @@ try {
         Assert-ThrowsLike {
             Assert-TranscriptReadyPreEnablePermit `
                 -RepoRoot $repoRoot `
-                -StartupScriptPath $startScript
+                -StartupScriptPath $startScript `
+                -PythonExe $pythonExe
         } "untracked deployed content"
     } finally {
         if (Test-Path -LiteralPath $untrackedProbe) {
@@ -353,11 +424,7 @@ try {
 
     $dotenvProbe = Join-Path $repoRoot "services\meeting-ai-service\.env"
     $permitBeforeDotenvProbe = [IO.File]::ReadAllText($installedPermit)
-    $stagePermit = ($permitBeforeDotenvProbe | ConvertFrom-Json)
-    $stagePermit.binding.targetAppEnv = "stage"
-    Write-MeetingAiSecretFileAtomic `
-        -Path $installedPermit `
-        -Content (($stagePermit | ConvertTo-Json -Depth 8) + "`n")
+    Write-FreshPermit -Path $installedPermit -AppEnv "stage"
     try {
         [IO.File]::WriteAllText(
             $dotenvProbe,
@@ -367,11 +434,14 @@ try {
         Assert-ThrowsLike {
             Assert-TranscriptReadyPermitFile `
                 -PermitPath $installedPermit `
+                -TrustRootPath $installedPermitTrustRoot `
+                -ExpectedTrustRootSha256 $expectedPermitTrustRootSha256 `
                 -ExpectedGitopsCommit $expectedGitopsCommit `
                 -ExpectedPolicySha256 $expectedPolicySha256 `
                 -ExpectedProducerImageDigest $expectedProducerDigest `
                 -RepoRoot $repoRoot `
                 -StartupScriptPath $startScript `
+                -PythonExe $pythonExe `
                 -AppEnv "stage"
         } "forbidden dotenv source"
     } finally {
@@ -384,16 +454,39 @@ try {
     }
 
     $freshInstalledPermitContent = [IO.File]::ReadAllText($installedPermit)
-    $stalePermit = (($permit | ConvertTo-Json -Depth 8) | ConvertFrom-Json)
-    $stalePermit.generatedAt = [DateTimeOffset]::UtcNow.AddMinutes(-20).ToString("o")
-    Write-MeetingAiSecretFileAtomic `
+    $freshInstalledReceiptContent = [IO.File]::ReadAllText($installedReceipt)
+    Write-FreshPermit -Path $installedPermit -GeneratedAtOffsetSeconds -1200
+    $staleEnvelope = [IO.File]::ReadAllText($installedPermit) | ConvertFrom-Json
+    $stalePayloadJson = [Text.Encoding]::UTF8.GetString(
+        [Convert]::FromBase64String([string]$staleEnvelope.payload)
+    )
+    $stalePayload = $stalePayloadJson | ConvertFrom-Json
+    $staleReceipt = ($freshInstalledReceiptContent | ConvertFrom-Json)
+    $staleReceipt.permitEnvelopeSha256 = Get-MeetingAiFileSha256 `
         -Path $installedPermit `
-        -Content (($stalePermit | ConvertTo-Json -Depth 8) + "`n")
+        -Purpose "Stale activated permit test fixture"
+    $staleReceipt.liveTranscriptObservedAt = `
+        $stalePayload.binding.liveTranscriptPod.observedAt
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedReceipt `
+        -Content (($staleReceipt | ConvertTo-Json -Depth 8) + "`n")
     Assert-ThrowsLike {
-        Assert-TranscriptReadyPreEnablePermit `
+        Assert-TranscriptReadyPermitFile `
+            -PermitPath $installedPermit `
+            -TrustRootPath $installedPermitTrustRoot `
+            -ExpectedTrustRootSha256 $expectedPermitTrustRootSha256 `
+            -ExpectedGitopsCommit $expectedGitopsCommit `
+            -ExpectedPolicySha256 $expectedPolicySha256 `
+            -ExpectedProducerImageDigest $expectedProducerDigest `
             -RepoRoot $repoRoot `
-            -StartupScriptPath $startScript
-    } "outside the 900 second startup window"
+            -StartupScriptPath $startScript `
+            -PythonExe $pythonExe `
+            -AppEnv "test"
+    } "signed permit verification failed"
+    Assert-TranscriptReadyPreEnablePermit `
+        -RepoRoot $repoRoot `
+        -StartupScriptPath $startScript `
+        -PythonExe $pythonExe
     $configBeforeRejectedMaintenance = [IO.File]::ReadAllBytes($configPath)
     Assert-ThrowsLike {
         & $configureScript `
@@ -401,15 +494,18 @@ try {
             -StorePath $storePath `
             -ConfigPath $configPath `
             -Confirm:$false
-    } "requires a fresh permit source"
+    } "requires a fresh signed permit and trust root"
     Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq
         [Convert]::ToBase64String($configBeforeRejectedMaintenance)) `
         "Rejected enabled maintenance must not mutate the config."
     Write-MeetingAiSecretFileAtomic `
         -Path $installedPermit `
         -Content $freshInstalledPermitContent
+    Write-MeetingAiSecretFileAtomic `
+        -Path $installedReceipt `
+        -Content $freshInstalledReceiptContent
 
-    Write-FreshPermit -Permit $permit -Path $permitSource
+    Write-FreshPermit -Path $permitSource
     $activePermitRoot = Split-Path -Parent $installedPermit
     $activationReceiptRoot = Split-Path -Parent $installedReceipt
     $consumptionRoot = Join-Path $runtimeRoot "permits\consumed"
@@ -423,6 +519,9 @@ try {
             & $configureScript `
                 -RotateEncryptionKey `
                 -ReadyPermitSourcePath $permitSource `
+                -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+                -ExpectedPermitTrustRootSha256 $expectedPermitTrustRootSha256 `
+                -PythonExe $pythonExe `
                 -StorePath $storePath `
                 -ConfigPath $configPath `
                 -Confirm:$false
@@ -452,12 +551,16 @@ try {
         "Injected write failure must retain the one-use consumption record."
 
     Start-Sleep -Milliseconds 20
-    Write-FreshPermit -Permit $permit -Path $permitSource
+    Write-FreshPermit -Path $permitSource
     $oldPermit = $installedPermit
+    $oldPermitTrustRoot = $installedPermitTrustRoot
     $oldReceipt = $installedReceipt
     & $configureScript `
         -RotateEncryptionKey `
         -ReadyPermitSourcePath $permitSource `
+        -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+        -ExpectedPermitTrustRootSha256 $expectedPermitTrustRootSha256 `
+        -PythonExe $pythonExe `
         -StorePath $storePath `
         -ConfigPath $configPath `
         -Confirm:$false
@@ -472,11 +575,15 @@ try {
         $customTranscriptClientId) `
         "Transcript client identity must survive enabled maintenance."
     $installedPermit = $rotatedReadyValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+    $installedPermitTrustRoot = `
+        $rotatedReadyValues["MAI_READY_PERMIT_TRUST_ROOT_PATH"]
     $installedReceipt = $rotatedReadyValues["MAI_READY_ACTIVATION_RECEIPT_PATH"]
     Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
         "Successful enabled maintenance must activate the new permit."
     Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
         "Successful enabled maintenance must activate a new receipt."
+    Assert-True (Test-Path -LiteralPath $installedPermitTrustRoot -PathType Leaf) `
+        "Successful enabled maintenance must retain the pinned trust root."
     if ($oldPermit -ne $installedPermit) {
         Assert-True (-not (Test-Path -LiteralPath $oldPermit -PathType Leaf)) `
             "Successful enabled maintenance must revoke the previous permit."
@@ -485,14 +592,19 @@ try {
         Assert-True (-not (Test-Path -LiteralPath $oldReceipt -PathType Leaf)) `
             "Successful enabled maintenance must revoke the previous receipt."
     }
+    Assert-True ($oldPermitTrustRoot -eq $installedPermitTrustRoot) `
+        "Permit rotation must keep the content-addressed trust root stable."
 
     Start-Sleep -Milliseconds 20
-    Write-FreshPermit -Permit $permit -Path $permitSource
+    Write-FreshPermit -Path $permitSource
     $preRestorePermit = $installedPermit
+    $preRestorePermitTrustRoot = $installedPermitTrustRoot
     $preRestoreReceipt = $installedReceipt
     & $configureScript `
         -RestoreBackup `
         -ReadyPermitSourcePath $permitSource `
+        -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+        -PythonExe $pythonExe `
         -StorePath $storePath `
         -ConfigPath $configPath `
         -Confirm:$false
@@ -500,15 +612,21 @@ try {
     Assert-True ($enabledRestoreValues["MAI_READY_CONSUMER_ENABLED"] -eq "true") `
         "Enabled-to-enabled restore must keep the ready consumer enabled."
     $installedPermit = $enabledRestoreValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+    $installedPermitTrustRoot = `
+        $enabledRestoreValues["MAI_READY_PERMIT_TRUST_ROOT_PATH"]
     $installedReceipt = $enabledRestoreValues["MAI_READY_ACTIVATION_RECEIPT_PATH"]
     Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
         "Enabled restore must activate a fresh permit."
     Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
         "Enabled restore must activate a fresh receipt."
+    Assert-True (Test-Path -LiteralPath $installedPermitTrustRoot -PathType Leaf) `
+        "Enabled restore must retain the pinned trust root."
     Assert-True (-not (Test-Path -LiteralPath $preRestorePermit -PathType Leaf)) `
         "Enabled restore must revoke the superseded permit."
     Assert-True (-not (Test-Path -LiteralPath $preRestoreReceipt -PathType Leaf)) `
         "Enabled restore must revoke the superseded receipt."
+    Assert-True ($preRestorePermitTrustRoot -eq $installedPermitTrustRoot) `
+        "Enabled restore must preserve the content-addressed trust root."
 
     & $configureScript `
         -ReadyConsumerEnabled "false" `
@@ -520,23 +638,33 @@ try {
         "Ready consumer rollback must be explicitly disabled."
     Assert-True (-not $disabledConfigText.Contains("MAI_READY_REDIS_URL_DPAPI=")) `
         "Ready Redis DPAPI blob must be removed by rollback."
-    Assert-True (-not $disabledConfigText.Contains(
+    Assert-True ($disabledConfigText.Contains(
         "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI="
-    )) "Transcript-service DPAPI blob must be removed by rollback."
+    )) "Rollback must retain the delivery-only transcript capability credential."
+    Assert-True (-not $disabledConfigText.Contains(
+        "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE="
+    )) "Rollback must remove the canonical transcript read path."
+    Assert-True (-not $disabledConfigText.Contains(
+        "MAI_TRANSCRIPT_SERVICE_SCOPE="
+    )) "Rollback must remove the canonical transcript read scope."
     Assert-True (-not (Test-Path -LiteralPath $installedPermit -PathType Leaf)) `
         "Ready consumer rollback must revoke the installed permit."
     Assert-True (-not (Test-Path -LiteralPath $installedReceipt -PathType Leaf)) `
         "Ready consumer rollback must revoke the activation receipt."
+    Assert-True (Test-Path -LiteralPath $installedPermitTrustRoot -PathType Leaf) `
+        "Ready consumer rollback may retain the pinned public trust root."
 
     $disabledBeforeFailedRestore = [IO.File]::ReadAllBytes($configPath)
     Start-Sleep -Milliseconds 20
-    Write-FreshPermit -Permit $permit -Path $permitSource
+    Write-FreshPermit -Path $permitSource
     $env:PLATFORM_AI_TEST_INJECT_MEETING_AI_CONFIG_WRITE_FAILURE = "1"
     try {
         Assert-ThrowsLike {
             & $configureScript `
                 -RestoreBackup `
                 -ReadyPermitSourcePath $permitSource `
+                -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+                -PythonExe $pythonExe `
                 -StorePath $storePath `
                 -ConfigPath $configPath `
                 -Confirm:$false
@@ -550,10 +678,12 @@ try {
         "Failed disabled-to-enabled restore must preserve the disabled config."
 
     Start-Sleep -Milliseconds 20
-    Write-FreshPermit -Permit $permit -Path $permitSource
+    Write-FreshPermit -Path $permitSource
     & $configureScript `
         -RestoreBackup `
         -ReadyPermitSourcePath $permitSource `
+        -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+        -PythonExe $pythonExe `
         -StorePath $storePath `
         -ConfigPath $configPath `
         -Confirm:$false
@@ -561,11 +691,15 @@ try {
     Assert-True ($restoredEnabledValues["MAI_READY_CONSUMER_ENABLED"] -eq "true") `
         "Disabled-to-enabled restore must activate the ready consumer."
     $installedPermit = $restoredEnabledValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+    $installedPermitTrustRoot = `
+        $restoredEnabledValues["MAI_READY_PERMIT_TRUST_ROOT_PATH"]
     $installedReceipt = $restoredEnabledValues["MAI_READY_ACTIVATION_RECEIPT_PATH"]
     Assert-True (Test-Path -LiteralPath $installedPermit -PathType Leaf) `
         "Disabled-to-enabled restore must install a fresh permit."
     Assert-True (Test-Path -LiteralPath $installedReceipt -PathType Leaf) `
         "Disabled-to-enabled restore must install a fresh receipt."
+    Assert-True (Test-Path -LiteralPath $installedPermitTrustRoot -PathType Leaf) `
+        "Disabled-to-enabled restore must install the pinned trust root."
 
     & $configureScript `
         -RestoreBackup `
@@ -579,16 +713,26 @@ try {
         "Enabled-to-disabled restore must revoke the permit."
     Assert-True (-not (Test-Path -LiteralPath $installedReceipt -PathType Leaf)) `
         "Enabled-to-disabled restore must revoke the receipt."
+    Assert-True (Test-Path -LiteralPath $installedPermitTrustRoot -PathType Leaf) `
+        "Enabled-to-disabled restore may retain the pinned public trust root."
     Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
         "Disabled ready consumer runtime config import must succeed."
     Assert-True ([string]::IsNullOrWhiteSpace($env:MAI_READY_REDIS_URL)) `
         "Ready Redis credential must be cleared from process memory on rollback."
+    Assert-True ($env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET -eq $plainTranscriptCredential) `
+        "Rollback must retain the delivery-only transcript capability credential."
     Assert-True ([string]::IsNullOrWhiteSpace(
-        $env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET
-    )) "Transcript-service credential must be cleared from process memory on rollback."
+        $env:MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE
+    )) "Canonical transcript read path must be cleared on rollback."
+    Assert-True ([string]::IsNullOrWhiteSpace(
+        $env:MAI_TRANSCRIPT_SERVICE_SCOPE
+    )) "Canonical transcript read scope must be cleared on rollback."
     Assert-True ([string]::IsNullOrWhiteSpace(
         $env:MAI_READY_PRE_ENABLE_PERMIT_PATH
     )) "Ready permit binding must be cleared from process memory on rollback."
+    Assert-True ([string]::IsNullOrWhiteSpace(
+        $env:MAI_READY_PERMIT_TRUST_ROOT_PATH
+    )) "Ready permit trust-root binding must be cleared from process memory on rollback."
 
     & $configureScript `
         -RuntimeAppEnv "stage" `
@@ -610,10 +754,13 @@ try {
 
     $beforeValues = Read-MeetingAiConfigFile -Path $configPath
     $beforeActive = $beforeValues["MAI_INGESTION_ACTIVE_KEY_ID"]
+    $beforeLookup = $beforeValues["MAI_INGESTION_LOOKUP_KEY_ID"]
     $beforeJson = Unprotect-MeetingAiSecret `
         -ProtectedBase64 $beforeValues["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
         -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
-    $beforeCount = @(($beforeJson | ConvertFrom-Json).PSObject.Properties).Count
+    $beforeKeyring = $beforeJson | ConvertFrom-Json
+    $beforeCount = @($beforeKeyring.PSObject.Properties).Count
+    $beforeLookupValue = [string]$beforeKeyring.PSObject.Properties[$beforeLookup].Value
 
     & $configureScript `
         -RotateEncryptionKey `
@@ -629,6 +776,12 @@ try {
         "Rotation must append exactly one key."
     Assert-True ($rotatedValues["MAI_INGESTION_ACTIVE_KEY_ID"] -ne $beforeActive) `
         "Rotation must select a new active key."
+    Assert-True ($rotatedValues["MAI_INGESTION_LOOKUP_KEY_ID"] -eq $beforeLookup) `
+        "Payload DEK rotation must preserve the blind-index key id."
+    $rotatedKeyring = $rotatedJson | ConvertFrom-Json
+    Assert-True (
+        [string]$rotatedKeyring.PSObject.Properties[$beforeLookup].Value -eq $beforeLookupValue
+    ) "Payload DEK rotation must preserve the blind-index key material."
     Assert-True (Test-Path -LiteralPath "$configPath.bak") `
         "Atomic rotation backup is missing."
     Assert-MeetingAiAcl -Path "$configPath.bak"
@@ -641,6 +794,8 @@ try {
     $restoredValues = Read-MeetingAiConfigFile -Path $configPath
     Assert-True ($restoredValues["MAI_INGESTION_ACTIVE_KEY_ID"] -eq $beforeActive) `
         "Backup restore did not restore the previous active key."
+    Assert-True ($restoredValues["MAI_INGESTION_LOOKUP_KEY_ID"] -eq $beforeLookup) `
+        "Backup restore did not preserve the blind-index key id."
 
     $acl = Get-Acl -LiteralPath $configPath
     $users = New-Object Security.Principal.SecurityIdentifier("S-1-5-32-545")
@@ -674,11 +829,7 @@ try {
 
     Write-Host "meeting-ai Windows runtime contract: PASS"
 } finally {
-    Clear-MeetingAiRuntimeTlsKey
-    $env:MAI_MEETING_SERVICE_CLIENT_SECRET = $null
-    $env:MAI_INGESTION_ENCRYPTION_KEYS_JSON = $null
-    $env:MAI_READY_REDIS_URL = $null
-    $env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET = $null
+    Clear-MeetingAiManagedProcessEnvironment
     $env:CI = $previousCi
     $secureCredential.Dispose()
     $secureReadyRedisUrl.Dispose()
@@ -694,5 +845,10 @@ try {
     }
     if (Test-Path -LiteralPath $permitSource) {
         Remove-Item -LiteralPath $permitSource -Force
+    }
+    foreach ($artifact in @($permitTrustRootSource, $permitPrivateKeyPath)) {
+        if (Test-Path -LiteralPath $artifact) {
+            Remove-Item -LiteralPath $artifact -Force
+        }
     }
 }

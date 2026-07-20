@@ -202,8 +202,9 @@ class AnalysisDeliveryRuntime:
 
         if self.enabled and self._store is None:
             cipher = PayloadCipher(
-                settings.ingestion_encryption_keys(),
+                settings.ingestion_payload_encryption_keys(),
                 settings.ingestion_active_key_id,
+                lookup_key=settings.ingestion_lookup_key(),
             )
             self._store = SqliteOutboxStore(
                 settings.ingestion_store_path,

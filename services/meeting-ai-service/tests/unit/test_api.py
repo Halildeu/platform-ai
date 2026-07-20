@@ -200,14 +200,42 @@ def test_analyze_nonmock_residual_pii_blocked_422(monkeypatch) -> None:  # type:
 
 
 def _configure_ingestion(monkeypatch, tmp_path: Path, *, max_rows: int = 10) -> None:  # type: ignore[no-untyped-def]
-    keyring = json.dumps({"v1": base64.b64encode(b"K" * 32).decode()})
+    keyring = json.dumps(
+        {
+            "v1": base64.b64encode(b"K" * 32).decode(),
+            "lookup-v1": base64.b64encode(b"L" * 32).decode(),
+        }
+    )
     monkeypatch.setenv("MAI_INGESTION_ENABLED", "true")
     monkeypatch.setenv("MAI_MEETING_SERVICE_BASE_URL", "https://127.0.0.1:9")
     monkeypatch.setenv("MAI_MEETING_SERVICE_TOKEN_URL", "https://127.0.0.1:9/token")
     monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_ID", "meeting-ai")
     monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_BASE_URL", "https://127.0.0.1:9")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_TOKEN_URL", "https://127.0.0.1:9/token")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_CLIENT_ID", "meeting-ai")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv(
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+        "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/"
+        "{session_id}/finalizations/{finalization_version}/analysis-capability",
+    )
+    monkeypatch.setenv(
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE",
+        "transcript:analysis-job-capability:issue",
+    )
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_BASE_URL", "https://127.0.0.1:9")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_TOKEN_URL", "https://127.0.0.1:9/token")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_CLIENT_ID", "meeting-ai")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv(
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+        "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+        "/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability",
+    )
     monkeypatch.setenv("MAI_INGESTION_STORE_PATH", str(tmp_path / "outbox.sqlite3"))
     monkeypatch.setenv("MAI_INGESTION_ACTIVE_KEY_ID", "v1")
+    monkeypatch.setenv("MAI_INGESTION_LOOKUP_KEY_ID", "lookup-v1")
     monkeypatch.setenv("MAI_INGESTION_ENCRYPTION_KEYS_JSON", keyring)
     monkeypatch.setenv("MAI_INGESTION_TIMEOUT_SEC", "0.1")
     monkeypatch.setenv("MAI_INGESTION_LEASE_SEC", "1")

@@ -28,9 +28,12 @@ param(
     [string]$TranscriptServiceClientId = "",
     [Security.SecureString]$TranscriptServiceClientSecret,
     [string]$ReadyPermitSourcePath = "",
+    [string]$ReadyPermitTrustRootSourcePath = "",
     [string]$ExpectedGitopsCommit = "",
     [string]$ExpectedPolicySha256 = "",
     [string]$ExpectedProducerImageDigest = "",
+    [string]$ExpectedPermitTrustRootSha256 = "",
+    [string]$PythonExe = "python",
     [string]$StorePath = "",
     [string]$ConfigPath = "",
     [switch]$RotateEncryptionKey,
@@ -69,6 +72,7 @@ if (-not $PSCmdlet.ShouldProcess($ConfigPath, $operation)) {
 $mutex = New-Object Threading.Mutex($false, "Global\platform-ai-meeting-ai-config-v1")
 $lockTaken = $false
 $stagedPermitPath = ""
+$stagedPermitTrustRootPath = ""
 $stagedActivationReceiptPath = ""
 $previousPermitPath = ""
 $previousActivationReceiptPath = ""
@@ -200,12 +204,15 @@ function Write-MeetingAiExclusiveRuntimeFile {
 function New-TranscriptReadyActivation {
     param(
         [Parameter(Mandatory = $true)][string]$PermitSourcePath,
+        [Parameter(Mandatory = $true)][string]$PermitTrustRootSourcePath,
         [ValidateSet("test", "stage", "prod")][string]$TargetAppEnv,
         [Parameter(Mandatory = $true)][string]$ExpectedGitopsCommit,
         [Parameter(Mandatory = $true)][string]$ExpectedPolicySha256,
         [Parameter(Mandatory = $true)][string]$ExpectedProducerImageDigest,
+        [Parameter(Mandatory = $true)][string]$ExpectedTrustRootSha256,
         [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [Parameter(Mandatory = $true)][string]$StartupScriptPath
+        [Parameter(Mandatory = $true)][string]$StartupScriptPath,
+        [Parameter(Mandatory = $true)][string]$PythonExe
     )
 
     $source = Resolve-FixedLocalPath `
@@ -214,6 +221,39 @@ function New-TranscriptReadyActivation {
         (Get-Item -LiteralPath $source -Force).Length -gt 1048576) {
         throw "Transcript-ready pre-enable permit source is missing or too large."
     }
+    $trustRootSource = Resolve-FixedLocalPath `
+        -Path $PermitTrustRootSourcePath `
+        -Purpose "Transcript-ready permit trust-root source"
+    if (-not (Test-Path -LiteralPath $trustRootSource -PathType Leaf) -or
+        (Get-Item -LiteralPath $trustRootSource -Force).Length -lt 2 -or
+        (Get-Item -LiteralPath $trustRootSource -Force).Length -gt 1048576) {
+        throw "Transcript-ready permit trust-root source is missing or too large."
+    }
+    if ($ExpectedTrustRootSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Transcript-ready expected trust-root fingerprint is invalid."
+    }
+    $trustRootSha256 = Get-MeetingAiFileSha256 `
+        -Path $trustRootSource -Purpose "Transcript-ready permit trust root"
+    if ($trustRootSha256 -ne $ExpectedTrustRootSha256) {
+        throw "Transcript-ready permit trust-root fingerprint does not match."
+    }
+    $trustRootContent = [IO.File]::ReadAllText(
+        $trustRootSource,
+        (New-Object Text.UTF8Encoding($false, $true))
+    )
+    $trustRootPath = Join-Path (Get-MeetingAiRuntimeRoot) `
+        ("permits\trust\transcript-ready-trust-root-{0}.json" -f $trustRootSha256)
+    $trustRootCreated = -not (Test-Path -LiteralPath $trustRootPath -PathType Leaf)
+    if ($trustRootCreated) {
+        Write-MeetingAiSecretFileAtomic `
+            -Path $trustRootPath -Content $trustRootContent `
+            -Purpose "Transcript-ready permit trust root"
+    } elseif ((Get-MeetingAiFileSha256 `
+            -Path $trustRootPath -Purpose "Installed transcript-ready permit trust root") -ne
+        $trustRootSha256) {
+        throw "Installed transcript-ready permit trust root does not match its content address."
+    }
+    Assert-MeetingAiAcl -Path $trustRootPath
     $consumingPath = Join-Path (Split-Path -Parent $source) `
         (".{0}.consuming-{1}" -f (Split-Path -Leaf $source), [Guid]::NewGuid().ToString("N"))
     [IO.File]::Move($source, $consumingPath)
@@ -252,15 +292,20 @@ function New-TranscriptReadyActivation {
 
         $permitPath = Join-Path (Get-MeetingAiRuntimeRoot) `
             ("permits\active\transcript-ready-pre-enable-{0}.json" -f $permitSha256)
-        Write-MeetingAiSecretFileAtomic -Path $permitPath -Content $permitContent
-        [void](Assert-TranscriptReadyPermitFile `
+        Write-MeetingAiSecretFileAtomic `
+            -Path $permitPath -Content $permitContent `
+            -Purpose "Transcript-ready pre-enable permit"
+        $verifiedPermit = Assert-TranscriptReadyPermitFile `
             -PermitPath $permitPath `
+            -TrustRootPath $trustRootPath `
+            -ExpectedTrustRootSha256 $ExpectedTrustRootSha256 `
             -ExpectedGitopsCommit $ExpectedGitopsCommit `
             -ExpectedPolicySha256 $ExpectedPolicySha256 `
             -ExpectedProducerImageDigest $ExpectedProducerImageDigest `
             -RepoRoot $RepoRoot `
             -StartupScriptPath $StartupScriptPath `
-            -AppEnv $TargetAppEnv)
+            -PythonExe $PythonExe `
+            -AppEnv $TargetAppEnv
 
         $headResult = Invoke-MeetingAiGitCapture -GitArgs @(
             "-C", $RepoRoot, "rev-parse", "HEAD"
@@ -272,14 +317,21 @@ function New-TranscriptReadyActivation {
         $startupSha256 = Get-MeetingAiFileSha256 `
             -Path $StartupScriptPath -Purpose "Meeting-ai startup script"
         $receipt = [ordered]@{
-            schemaVersion = "faz24.transcriptReadyActivationReceipt.v1"
-            permitSha256 = $permitSha256
+            schemaVersion = "faz24.transcriptReadyActivationReceipt.v3"
+            authorityBoundary = "local-non-authoritative"
+            permitEnvelopeSha256 = $verifiedPermit.PermitEnvelopeSha256
+            trustRootSha256 = $verifiedPermit.TrustRootSha256
+            signingKeyId = $verifiedPermit.SigningKeyId
             targetAppEnv = $TargetAppEnv
             expectedGitopsCommit = $ExpectedGitopsCommit
             policySha256 = $ExpectedPolicySha256
             producerImageDigest = $ExpectedProducerImageDigest
             platformAiCommit = $platformAiCommit
             startupScriptSha256 = $startupSha256
+            liveTranscriptPodUid = $verifiedPermit.LiveTranscriptPodUid
+            liveTranscriptImageDigest = $verifiedPermit.LiveTranscriptImageDigest
+            liveTranscriptObservedAt = $verifiedPermit.LiveTranscriptObservedAt
+            liveEvidenceSha256 = $verifiedPermit.LiveEvidenceSha256
             activatedAt = [DateTimeOffset]::UtcNow.ToString("o")
         }
         $receiptPath = Join-Path (Get-MeetingAiRuntimeRoot) `
@@ -289,15 +341,19 @@ function New-TranscriptReadyActivation {
         [void](Assert-TranscriptReadyActivationReceiptFile `
             -ReceiptPath $receiptPath `
             -PermitPath $permitPath `
+            -TrustRootPath $trustRootPath `
+            -ExpectedTrustRootSha256 $ExpectedTrustRootSha256 `
             -ExpectedGitopsCommit $ExpectedGitopsCommit `
             -ExpectedPolicySha256 $ExpectedPolicySha256 `
             -ExpectedProducerImageDigest $ExpectedProducerImageDigest `
             -RepoRoot $RepoRoot `
             -StartupScriptPath $StartupScriptPath `
+            -PythonExe $PythonExe `
             -AppEnv $TargetAppEnv)
 
         return [pscustomobject]@{
             PermitPath = $permitPath
+            TrustRootPath = $trustRootPath
             ReceiptPath = $receiptPath
             PermitSha256 = $permitSha256
         }
@@ -308,9 +364,14 @@ function New-TranscriptReadyActivation {
                 Remove-Item -LiteralPath $path -Force
             }
         }
+        if ($trustRootCreated -and
+            (Test-Path -LiteralPath $trustRootPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $trustRootPath -Force
+        }
         throw
     } finally {
         $permitContent = $null
+        $trustRootContent = $null
         if (Test-Path -LiteralPath $consumingPath -PathType Leaf) {
             Remove-Item -LiteralPath $consumingPath -Force
         }
@@ -337,22 +398,30 @@ try {
         Assert-MeetingAiConfigValues -Values $backupValues -SkipReadyArtifactExistence
         if ($backupValues.ContainsKey("MAI_READY_CONSUMER_ENABLED") -and
             $backupValues["MAI_READY_CONSUMER_ENABLED"].ToLowerInvariant() -eq "true") {
-            if ([string]::IsNullOrWhiteSpace($ReadyPermitSourcePath)) {
-                throw "Restoring an enabled ready-consumer backup requires a fresh permit source."
+            if ([string]::IsNullOrWhiteSpace($ReadyPermitSourcePath) -or
+                [string]::IsNullOrWhiteSpace($ReadyPermitTrustRootSourcePath)) {
+                throw "Restoring an enabled ready-consumer backup requires a fresh signed permit and trust root."
             }
             $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
             $startupScript = Join-Path $scriptDir "start-meeting-ai.ps1"
             $activation = New-TranscriptReadyActivation `
                 -PermitSourcePath $ReadyPermitSourcePath `
+                -PermitTrustRootSourcePath $ReadyPermitTrustRootSourcePath `
                 -TargetAppEnv $backupValues["MAI_APP_ENV"].ToLowerInvariant() `
                 -ExpectedGitopsCommit $backupValues["MAI_READY_EXPECTED_GITOPS_COMMIT"] `
                 -ExpectedPolicySha256 $backupValues["MAI_READY_EXPECTED_POLICY_SHA256"] `
                 -ExpectedProducerImageDigest `
                     $backupValues["MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"] `
-                -RepoRoot $repoRoot -StartupScriptPath $startupScript
+                -ExpectedTrustRootSha256 `
+                    $backupValues["MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256"] `
+                -RepoRoot $repoRoot -StartupScriptPath $startupScript `
+                -PythonExe $PythonExe
             $stagedPermitPath = $activation.PermitPath
+            $stagedPermitTrustRootPath = $activation.TrustRootPath
             $stagedActivationReceiptPath = $activation.ReceiptPath
             $backupValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"] = $stagedPermitPath
+            $backupValues["MAI_READY_PERMIT_TRUST_ROOT_PATH"] = `
+                $stagedPermitTrustRootPath
             $backupValues["MAI_READY_ACTIVATION_RECEIPT_PATH"] = `
                 $stagedActivationReceiptPath
         }
@@ -521,8 +590,39 @@ try {
                 -Purpose "Transcript-ready activation receipt"
         }
     }
+    $transcriptSecretBlob = if ($null -ne $TranscriptServiceClientSecret) {
+        Protect-SuppliedSecureValue -Value $TranscriptServiceClientSecret
+    } elseif ($null -ne $existing -and
+        $existing.ContainsKey("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI")) {
+        $existing["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"]
+    } else {
+        throw "Durable delivery provisioning requires TranscriptServiceClientSecret."
+    }
     $readyConfig = [ordered]@{
         "MAI_READY_CONSUMER_ENABLED" = $effectiveReadyEnabled
+        "MAI_TRANSCRIPT_SERVICE_BASE_URL" = (
+            Get-SuppliedOrExistingValue -Existing $existing `
+                -Name "MAI_TRANSCRIPT_SERVICE_BASE_URL" `
+                -Supplied $TranscriptServiceBaseUrl
+        )
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" = (
+            Get-SuppliedOrExistingValue -Existing $existing `
+                -Name "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" `
+                -Supplied $TranscriptServiceCapabilityPathTemplate
+        )
+        "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" = (
+            Get-SuppliedOrExistingValue -Existing $existing `
+                -Name "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" `
+                -Supplied $TranscriptServiceTokenUrl
+        )
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_ID" = (Get-ReadyConfiguredValue `
+            -Existing $existing -Name "MAI_TRANSCRIPT_SERVICE_CLIENT_ID" `
+            -Supplied $TranscriptServiceClientId -InitialDefault "meeting-ai")
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI" = $transcriptSecretBlob
+        "MAI_TRANSCRIPT_SERVICE_AUDIENCE" = "transcript-service"
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE" = (
+            "transcript:analysis-job-capability:issue"
+        )
     }
     if ($effectiveReadyEnabled -eq "true") {
         if ([string]::IsNullOrWhiteSpace($effectiveAppEnv)) {
@@ -536,17 +636,9 @@ try {
         } else {
             throw "Ready consumer provisioning requires ReadyRedisUrl."
         }
-        $transcriptSecretBlob = if ($null -ne $TranscriptServiceClientSecret) {
-            Protect-SuppliedSecureValue -Value $TranscriptServiceClientSecret
-        } elseif ($null -ne $existing -and
-            $existing.ContainsKey("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI")) {
-            $existing["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"]
-        } else {
-            throw "Ready consumer provisioning requires TranscriptServiceClientSecret."
-        }
-
-        if ([string]::IsNullOrWhiteSpace($ReadyPermitSourcePath)) {
-            throw "Every enabled ready-consumer config write requires a fresh permit source."
+        if ([string]::IsNullOrWhiteSpace($ReadyPermitSourcePath) -or
+            [string]::IsNullOrWhiteSpace($ReadyPermitTrustRootSourcePath)) {
+            throw "Every enabled ready-consumer config write requires a fresh signed permit and trust root."
         }
         if ($null -ne $existing -and
             $existing.ContainsKey("MAI_READY_PRE_ENABLE_PERMIT_PATH")) {
@@ -568,17 +660,25 @@ try {
         $effectiveExpectedProducerDigest = Get-SuppliedOrExistingValue `
             -Existing $existing -Name "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST" `
             -Supplied $ExpectedProducerImageDigest
+        $effectiveExpectedTrustRootSha256 = Get-SuppliedOrExistingValue `
+            -Existing $existing `
+            -Name "MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256" `
+            -Supplied $ExpectedPermitTrustRootSha256
         $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
         $startupScript = Join-Path $scriptDir "start-meeting-ai.ps1"
         $activation = New-TranscriptReadyActivation `
             -PermitSourcePath $ReadyPermitSourcePath `
+            -PermitTrustRootSourcePath $ReadyPermitTrustRootSourcePath `
             -TargetAppEnv $effectiveAppEnv.ToLowerInvariant() `
             -ExpectedGitopsCommit $effectiveExpectedGitopsCommit `
             -ExpectedPolicySha256 $effectiveExpectedPolicySha256 `
             -ExpectedProducerImageDigest $effectiveExpectedProducerDigest `
+            -ExpectedTrustRootSha256 $effectiveExpectedTrustRootSha256 `
             -RepoRoot $repoRoot `
-            -StartupScriptPath $startupScript
+            -StartupScriptPath $startupScript `
+            -PythonExe $PythonExe
         $stagedPermitPath = $activation.PermitPath
+        $stagedPermitTrustRootPath = $activation.TrustRootPath
         $stagedActivationReceiptPath = $activation.ReceiptPath
 
         $replayHorizon = if ($ReadyProducerReplayHorizonSec -gt 0) {
@@ -590,61 +690,39 @@ try {
             Get-SuppliedOrExistingValue -Existing $existing `
                 -Name "MAI_READY_PRODUCER_REPLAY_HORIZON_SEC"
         }
-        $readyConfig = [ordered]@{
-            "MAI_READY_CONSUMER_ENABLED" = "true"
-            "MAI_ANALYSIS_SPEC_VERSION" = (Get-ReadyConfiguredValue `
+        $readyConfig["MAI_ANALYSIS_SPEC_VERSION"] = (Get-ReadyConfiguredValue `
                 -Existing $existing -Name "MAI_ANALYSIS_SPEC_VERSION" `
-                -Supplied $AnalysisSpecVersion `
-                -InitialDefault "meeting-intelligence-v1")
-            "MAI_READY_REDIS_URL_DPAPI" = $readyRedisBlob
-            "MAI_READY_REDIS_STREAM" = (Get-ReadyConfiguredValue `
+                -Supplied $AnalysisSpecVersion -InitialDefault "meeting-intelligence-v1")
+        $readyConfig["MAI_READY_REDIS_URL_DPAPI"] = $readyRedisBlob
+        $readyConfig["MAI_READY_REDIS_STREAM"] = (Get-ReadyConfiguredValue `
                 -Existing $existing -Name "MAI_READY_REDIS_STREAM" `
                 -Supplied $ReadyRedisStream -InitialDefault "meeting:events")
-            "MAI_READY_REDIS_GROUP" = (Get-ReadyConfiguredValue `
+        $readyConfig["MAI_READY_REDIS_GROUP"] = (Get-ReadyConfiguredValue `
                 -Existing $existing -Name "MAI_READY_REDIS_GROUP" `
                 -Supplied $ReadyRedisGroup `
                 -InitialDefault "meeting-ai-transcript-ready-v1")
-            "MAI_READY_PRODUCER_REPLAY_HORIZON_SEC" = $replayHorizon
-            "MAI_TRANSCRIPT_SERVICE_BASE_URL" = (
-                Get-SuppliedOrExistingValue -Existing $existing `
-                    -Name "MAI_TRANSCRIPT_SERVICE_BASE_URL" `
-                    -Supplied $TranscriptServiceBaseUrl
-            )
-            "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE" = (
+        $readyConfig["MAI_READY_PRODUCER_REPLAY_HORIZON_SEC"] = $replayHorizon
+        $readyConfig["MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE"] = (
                 Get-SuppliedOrExistingValue -Existing $existing `
                     -Name "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE" `
                     -Supplied $TranscriptServiceSnapshotPathTemplate
             )
-            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" = (
-                Get-SuppliedOrExistingValue -Existing $existing `
-                    -Name "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" `
-                    -Supplied $TranscriptServiceCapabilityPathTemplate
-            )
-            "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" = (
-                Get-SuppliedOrExistingValue -Existing $existing `
-                    -Name "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" `
-                    -Supplied $TranscriptServiceTokenUrl
-            )
-            "MAI_TRANSCRIPT_SERVICE_CLIENT_ID" = (Get-ReadyConfiguredValue `
-                -Existing $existing -Name "MAI_TRANSCRIPT_SERVICE_CLIENT_ID" `
-                -Supplied $TranscriptServiceClientId -InitialDefault "meeting-ai")
-            "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI" = $transcriptSecretBlob
-            "MAI_TRANSCRIPT_SERVICE_AUDIENCE" = "transcript-service"
-            "MAI_TRANSCRIPT_SERVICE_SCOPE" = "transcript:canonical:read"
-            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE" = (
-                "transcript:analysis-job-capability:issue"
-            )
-            "MAI_READY_PRE_ENABLE_PERMIT_PATH" = $stagedPermitPath
-            "MAI_READY_ACTIVATION_RECEIPT_PATH" = $stagedActivationReceiptPath
-            "MAI_READY_EXPECTED_GITOPS_COMMIT" = $effectiveExpectedGitopsCommit
-            "MAI_READY_EXPECTED_POLICY_SHA256" = $effectiveExpectedPolicySha256
-            "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST" = `
-                $effectiveExpectedProducerDigest
-        }
+        $readyConfig["MAI_TRANSCRIPT_SERVICE_SCOPE"] = "transcript:canonical:read"
+        $readyConfig["MAI_READY_PRE_ENABLE_PERMIT_PATH"] = $stagedPermitPath
+        $readyConfig["MAI_READY_PERMIT_TRUST_ROOT_PATH"] = `
+            $stagedPermitTrustRootPath
+        $readyConfig["MAI_READY_ACTIVATION_RECEIPT_PATH"] = $stagedActivationReceiptPath
+        $readyConfig["MAI_READY_EXPECTED_GITOPS_COMMIT"] = $effectiveExpectedGitopsCommit
+        $readyConfig["MAI_READY_EXPECTED_POLICY_SHA256"] = $effectiveExpectedPolicySha256
+        $readyConfig["MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"] = `
+            $effectiveExpectedProducerDigest
+        $readyConfig["MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256"] = `
+            $effectiveExpectedTrustRootSha256
     }
 
     $keyring = [ordered]@{}
     $activeKeyId = ""
+    $lookupKeyId = ""
     if ($null -ne $existing -and
         $existing.ContainsKey("MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI")) {
         $oldKeyringJson = Unprotect-MeetingAiSecret `
@@ -655,10 +733,28 @@ try {
             $keyring[$property.Name] = [string]$property.Value
         }
         $activeKeyId = $existing["MAI_INGESTION_ACTIVE_KEY_ID"]
-        Assert-MeetingAiKeyring -KeyringJson $oldKeyringJson -ActiveKeyId $activeKeyId
+        if ($existing.ContainsKey("MAI_INGESTION_LOOKUP_KEY_ID")) {
+            $lookupKeyId = $existing["MAI_INGESTION_LOOKUP_KEY_ID"]
+        }
     }
 
-    if ($keyring.Count -eq 0 -or $RotateEncryptionKey) {
+    if ([string]::IsNullOrWhiteSpace($lookupKeyId)) {
+        $lookupBytes = New-Object byte[] 32
+        $lookupRng = [Security.Cryptography.RandomNumberGenerator]::Create()
+        try {
+            $lookupRng.GetBytes($lookupBytes)
+            $lookupKeyId = "lookup-{0}" -f [Guid]::NewGuid().ToString("N")
+            if ($keyring.Contains($lookupKeyId)) {
+                throw "Generated blind-index key identifier already exists."
+            }
+            $keyring[$lookupKeyId] = [Convert]::ToBase64String($lookupBytes)
+        } finally {
+            $lookupRng.Dispose()
+            [Array]::Clear($lookupBytes, 0, $lookupBytes.Length)
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($activeKeyId) -or $RotateEncryptionKey) {
         $keyBytes = New-Object byte[] 32
         $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
         try {
@@ -677,7 +773,8 @@ try {
     }
 
     $keyringJson = $keyring | ConvertTo-Json -Compress
-    Assert-MeetingAiKeyring -KeyringJson $keyringJson -ActiveKeyId $activeKeyId
+    Assert-MeetingAiKeyring -KeyringJson $keyringJson `
+        -ActiveKeyId $activeKeyId -LookupKeyId $lookupKeyId
     $keyringBlob = Protect-MeetingAiSecret -PlainText $keyringJson
 
     $config = [ordered]@{
@@ -691,6 +788,7 @@ try {
         "MAI_MEETING_SERVICE_TLS_MODE" = $effectiveTlsMode
         "MAI_INGESTION_STORE_PATH" = $StorePath
         "MAI_INGESTION_ACTIVE_KEY_ID" = $activeKeyId
+        "MAI_INGESTION_LOOKUP_KEY_ID" = $lookupKeyId
         "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI" = $keyringBlob
     }
     if (-not [string]::IsNullOrWhiteSpace($effectiveAppEnv)) {
@@ -741,7 +839,10 @@ try {
     Write-Host "Restart task with schtasks.exe /End and /Run for platform-ai-meeting-ai."
 } finally {
     if (-not $activationCommitted) {
-        foreach ($artifact in @($stagedPermitPath, $stagedActivationReceiptPath)) {
+        foreach ($artifact in @(
+                $stagedPermitPath,
+                $stagedActivationReceiptPath
+            )) {
             if (-not [string]::IsNullOrWhiteSpace($artifact) -and
                 $artifact -ne $previousPermitPath -and
                 $artifact -ne $previousActivationReceiptPath -and

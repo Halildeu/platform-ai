@@ -86,9 +86,14 @@ AES key rotation eski key'leri silmeden additive yapilir:
 ```
 
 Her guncelleme ayni dizinde atomic replace yapar ve onceki DPAPI-protected config'i
-tek `meeting-ai.env.bak` dosyasinda, ayni dar ACL ile tutar. Eski key, encrypted
-outbox'ta o key ile yazilmis satir kalmadigi metadata-only DLQ/queue denetimiyle
-kanitlanmadan keyring'den kaldirilmaz. PowerShell transcription/script-block logging
+tek `meeting-ai.env.bak` dosyasinda, ayni dar ACL ile tutar. Komut yalniz aktif
+payload DEK'ini degistirir; `MAI_INGESTION_LOOKUP_KEY_ID` ile secilen ayri HMAC
+blind-index key'i sabit kalir. Servis restart'i retained outbox ve ready-inbox
+satirlarini tek SQLite transaction'inda yeni aktif DEK ile yeniden sifreler. Eski
+DEK, bu restart dogrulanip encrypted satirlarda eski key id kalmadigi metadata-only
+denetimle kanitlanmadan keyring'den kaldirilmaz. Blind-index key rotation'i bu komutun
+kapsaminda degildir; ayri versioned dual-read/backfill migration gerektirir.
+PowerShell transcription/script-block logging
 provisioning oturumunda kapali olmali; komut veya log secret degeri yazmaz.
 
 Yeni config ile servis baslamazsa onceki atomik backup geri alinabilir. Restore,
@@ -99,17 +104,24 @@ mevcut config'i yeni backup yaparak iki surum arasinda geri donulebilir kalir:
 ```
 
 Backup transcript-ready consumer'i acik duruma getiriyorsa eski aktivasyon izni
-yeniden kullanilmaz. Hedef ortama bagli yeni, tek-kullanimlik permit verilmelidir:
+yeniden kullanilmaz. Hedef ortama bagli yeni, tek-kullanimlik DSSE permit; out-of-band
+dogrulanmis public trust root; ve ayni trust root'un beklenen SHA-256 degeri verilmelidir:
 
 ```powershell
 .\deploy\gpu-host\configure-meeting-ai.ps1 `
   -RestoreBackup `
-  -ReadyPermitSourcePath C:\secure-transfer\transcript-ready-permit.json
+  -ReadyPermitSourcePath C:\secure-transfer\transcript-ready-permit.dsse.json `
+  -ReadyPermitTrustRootSourcePath C:\secure-transfer\transcript-ready-trust-root.json `
+  -ExpectedPermitTrustRootSha256 <64-hex-trust-root-digest> `
+  -PythonExe C:\platform-ai\services\meeting-ai-service\.venv\Scripts\python.exe
 ```
 
 Kaynak permit atomik olarak tuketilir; hash tabanli consumption kaydi replay'i
-reddeder. Yeni permit ve activation receipt once dar ACL'li runtime kokunde
-hazirlanir, config ancak ikisi de dogrulandiktan sonra atomik olarak degistirilir.
+reddeder. Public trust root tuketilmez; icerik adresli runtime kopyasi out-of-band
+SHA-256 ile pinlenir. Yeni permit ve activation receipt once dar ACL'li runtime kokunde
+hazirlanir, DSSE Ed25519 imzasi ve tum immutable/live binding'ler dogrulandiktan sonra
+config atomik olarak degistirilir. Production private signing key hosta konmaz; Vault
+Transit sinirinda kalir.
 
 `/health` sadece senkron `/transcribe` modelinin lazy-load durumunu gosterir.
 Canli urun yuzeyi icin asil readiness `/ws/stream` handshake'idir:

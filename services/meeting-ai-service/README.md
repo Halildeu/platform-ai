@@ -164,12 +164,20 @@ Required configuration when enabled:
   `MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH`
 - `MAI_INGESTION_STORE_PATH` (absolute, local persistent disk; not NFS/SMB)
 - `MAI_INGESTION_ACTIVE_KEY_ID`
+- `MAI_INGESTION_LOOKUP_KEY_ID` — a dedicated 32-byte HMAC blind-index key;
+  it must not be the active payload-encryption key
 - `MAI_INGESTION_ENCRYPTION_KEYS_JSON` — secret JSON keyring, values are base64
-  encoded 32-byte AES keys, for example `{"2026-q3":"<base64>"}`
+  encoded 32-byte keys, for example
+  `{"2026-q3":"<base64>","lookup-v1":"<base64>"}`
 
-Key rotation is additive: inject old + new keys, switch `ACTIVE_KEY_ID` to the new
-key, drain/requeue old rows, then remove the old key. Startup fails closed while any
-row references a missing key. The current SQLite adapter supports multiple worker
+Payload-DEK rotation is additive: inject old + new DEKs, switch `ACTIVE_KEY_ID` to
+the new DEK, and restart with the complete keyring. Startup transactionally
+decrypts and re-encrypts every retained outbox and ready-inbox row under the active
+DEK before serving work. Only after that restart is verified may the retired DEK be
+removed. Startup fails closed while any row references a missing key. The dedicated
+blind-index key is unchanged by normal DEK rotation; changing it requires a separate
+versioned dual-read/backfill migration and is not supported by the ordinary rotation
+command. The current SQLite adapter supports multiple worker
 processes on one local filesystem via `BEGIN IMMEDIATE` + leases; horizontal
 multi-host execution requires replacing the store adapter with shared PostgreSQL,
 Kafka, or durable Redis rather than putting SQLite on network storage.
@@ -217,10 +225,14 @@ remain fail-closed poison records.
 
 The consumer persists only event identity, exact payload SHA-256, state, lease, retry,
 and DLQ metadata. Event identity and the payload digest are held in an AES-256-GCM
-envelope; SQLite exposes only a keyed deterministic event-key lookup digest plus
-operational state. Before flipping the active key, every worker must receive the same
-old+new key union; rotation lookups cover every injected key until old inbox rows have
-drained, and startup fails while any row references an unavailable key. A v3-to-v4
+envelope; SQLite exposes only an HMAC-SHA-256 blind index derived with a dedicated,
+non-DEK lookup key plus operational state. SQLite, Redis DLQ metadata, and the operator
+CLI use that same opaque fingerprint. Before flipping the active DEK, every worker must
+receive the same old+new DEK union and the unchanged lookup key; startup fails while any
+encrypted row references an unavailable DEK. The v6 migration decrypts each authorized
+identity with the complete old keyring, re-encrypts it under the active DEK, and rebinds
+it to the blind index. If legacy rows collapse to one semantic identity, migration fails
+closed for explicit operator reconciliation rather than merging state silently. A v3-to-v4
 migration encrypts existing identity rows, enables SQLite secure
 deletion, vacuums the old pages, and truncates WAL frames. A durable `pending` marker
 makes that scrub resume after process/power loss; startup stays failed while a WAL
@@ -306,22 +318,35 @@ exact original event:
 ```bash
 python scripts/requeue_ready_event.py --list-dead --limit 100
 python scripts/requeue_ready_event.py \
-  --lookup-key <tenant-id>|<event-key> \
+  --lookup-fingerprint <opaque-64-hex-value-from-list> \
   --audit-reference <issue-or-change-reference>
 ```
 
+The operator surface never prints or accepts the raw tenant, source-message, or
+event identity. The fingerprint is the stable opaque handle emitted by
+`--list-dead`; it is sufficient to select the encrypted row but cannot replace
+the producer's exact original event replay.
+
+Redis DLQ publication is at-least-once across the SQLite/Redis boundary. Every retry
+reuses the same deterministic `dlqKey` and authenticated `lookupFingerprint`; DLQ
+consumers must upsert/deduplicate on `dlqKey`. No cross-store exactly-once claim is made.
+
 The Windows host channel is non-executable and fail-closed. Use elevated
 `deploy/gpu-host/configure-meeting-ai.ps1`; it prompts with `SecureString`, stores
-the client secret and AES keyring as DPAPI LocalMachine ciphertext under a
+the client secret and payload-DEK/blind-index keyring as DPAPI LocalMachine ciphertext under a
 SYSTEM/Administrators-only ACL, writes by same-volume atomic replace, and keeps old
-encryption keys during additive rotation. Plaintext `.ps1` secret overrides are not
+payload DEKs during additive rotation while preserving the blind-index key. Plaintext `.ps1` secret overrides are not
 supported for meeting-ai ingestion.
 
-The test-host enable path additionally requires the fresh
-`faz24.transcriptReadyPreEnableVerdict.v1` artifact produced by the GitOps #2610
-collector/verifier. The provisioner copies that metadata-only artifact into the
-hardened runtime root and stores the Redis URL and transcript-service credential only
-as DPAPI blobs. Obtain both secrets interactively so they do not enter shell history:
+The test-host enable path additionally requires a fresh DSSE envelope containing a
+`faz24.transcriptReadyPreEnableVerdict.v2` payload produced for GitOps #2610 and an
+out-of-band `faz24.transcriptReadyPermitTrustRoot.v1` public trust root. Production
+signing is a Vault Transit Ed25519 responsibility; the host accepts no private signing
+key and pins the public trust-root file by SHA-256. The provisioner consumes the
+metadata-only permit exactly once, installs the content-addressed trust root and
+activation receipt under the hardened runtime root, and stores the Redis URL and
+transcript-service credential only as DPAPI blobs. Obtain both secrets interactively so
+they do not enter shell history:
 
 ```powershell
 $redisUrl = Read-Host "ready Redis URL" -AsSecureString
@@ -336,20 +361,29 @@ $transcriptSecret = Read-Host "transcript-service OAuth secret" -AsSecureString
   -TranscriptServiceCapabilityPathTemplate '/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability' `
   -TranscriptServiceTokenUrl https://auth-service.internal.test/oauth2/token `
   -TranscriptServiceClientSecret $transcriptSecret `
-  -ReadyPermitSourcePath C:\operator-staging\transcript-ready-pre-enable.json `
+  -ReadyPermitSourcePath C:\operator-staging\transcript-ready-pre-enable.dsse.json `
+  -ReadyPermitTrustRootSourcePath C:\operator-staging\transcript-ready-trust-root.json `
   -ExpectedGitopsCommit <full-40-hex-gitops-commit> `
   -ExpectedPolicySha256 <64-hex-policy-digest> `
   -ExpectedProducerImageDigest sha256:<64-hex-transcript-image-digest> `
+  -ExpectedPermitTrustRootSha256 <64-hex-out-of-band-trust-root-digest> `
+  -PythonExe C:\platform-ai\services\meeting-ai-service\.venv\Scripts\python.exe `
   -Confirm:$false
 ```
 
-At every process start, `Assert-TranscriptReadyPreEnablePermit` rejects an artifact
-that is older than 900 seconds, has any failed/pending check, or does not match the
-exact GitOps commit, policy digest, transcript image digest, platform-ai commit, and
-startup-script SHA-256. The scheduled task therefore cannot be enabled by writing
-`MAI_READY_CONSUMER_ENABLED=true` alone. Rollback is an explicit provisioner call with
-`-ReadyConsumerEnabled false`, followed by a task restart; disabling removes the ready
-consumer credentials and permit binding from the next runtime config.
+Activation rejects a permit older than 900 seconds, any failed/pending check, an
+invalid Ed25519 signature, an unpinned/expired trust root, or a mismatch in the exact
+GitOps commit, policy digest, transcript image digest, live-pod evidence,
+platform-ai commit, and startup-script SHA-256. Every later process start re-verifies
+the signature, trust-root validity, immutable bindings, clean deployed worktree, and
+local activation receipt, but intentionally does not reapply the one-time 900-second
+activation freshness window. The scheduled task therefore cannot be enabled by writing
+`MAI_READY_CONSUMER_ENABLED=true` alone, while a valid activation can survive a normal
+restart. Rollback is an explicit provisioner call with `-ReadyConsumerEnabled false`,
+followed by a task restart; disabling removes the ready consumer credentials and active
+permit/trust-root bindings from the next runtime config. The content-addressed public
+trust-root artifact may remain for audit and rollback; its path is not exported to the
+disabled child process.
 
 ## Run (skeleton)
 

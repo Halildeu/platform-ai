@@ -61,6 +61,9 @@ function Get-MeetingAiConfigSchema {
         }
         "MAI_INGESTION_STORE_PATH" = @{ Required = $true; SecretTarget = "" }
         "MAI_INGESTION_ACTIVE_KEY_ID" = @{ Required = $true; SecretTarget = "" }
+        # Optional only for reading a pre-blind-index config during one-time upgrade.
+        # Import and candidate validation still fail closed until configure writes it.
+        "MAI_INGESTION_LOOKUP_KEY_ID" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI" = @{
             Required = $true
             SecretTarget = "MAI_INGESTION_ENCRYPTION_KEYS_JSON"
@@ -107,10 +110,15 @@ function Get-MeetingAiConfigSchema {
             SecretTarget = ""
         }
         "MAI_READY_PRE_ENABLE_PERMIT_PATH" = @{ Required = $false; SecretTarget = "" }
+        "MAI_READY_PERMIT_TRUST_ROOT_PATH" = @{ Required = $false; SecretTarget = "" }
         "MAI_READY_ACTIVATION_RECEIPT_PATH" = @{ Required = $false; SecretTarget = "" }
         "MAI_READY_EXPECTED_GITOPS_COMMIT" = @{ Required = $false; SecretTarget = "" }
         "MAI_READY_EXPECTED_POLICY_SHA256" = @{ Required = $false; SecretTarget = "" }
         "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST" = @{
+            Required = $false
+            SecretTarget = ""
+        }
+        "MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256" = @{
             Required = $false
             SecretTarget = ""
         }
@@ -528,10 +536,12 @@ function Assert-MeetingAiConfigValues {
         "MAI_TRANSCRIPT_SERVICE_SCOPE",
         "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE",
         "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+        "MAI_READY_PERMIT_TRUST_ROOT_PATH",
         "MAI_READY_ACTIVATION_RECEIPT_PATH",
         "MAI_READY_EXPECTED_GITOPS_COMMIT",
         "MAI_READY_EXPECTED_POLICY_SHA256",
-        "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"
+        "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST",
+        "MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256"
     )
     foreach ($name in $readyRequired) {
         if (-not $Values.ContainsKey($name) -or
@@ -566,11 +576,19 @@ function Assert-MeetingAiConfigValues {
         '^sha256:[0-9a-f]{64}$') {
         throw "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST must be an immutable image digest."
     }
+    if ($Values["MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256"] -notmatch
+        '^[0-9a-f]{64}$') {
+        throw "MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256 must be a lowercase SHA-256 digest."
+    }
     if (-not $SkipReadyArtifactExistence) {
         $readyArtifacts = @(
             [pscustomobject]@{
                 Name = "MAI_READY_PRE_ENABLE_PERMIT_PATH"
                 Purpose = "Transcript-ready pre-enable permit"
+            }
+            [pscustomobject]@{
+                Name = "MAI_READY_PERMIT_TRUST_ROOT_PATH"
+                Purpose = "Transcript-ready permit trust root"
             }
             [pscustomobject]@{
                 Name = "MAI_READY_ACTIVATION_RECEIPT_PATH"
@@ -591,7 +609,8 @@ function Assert-MeetingAiConfigValues {
 function Assert-MeetingAiKeyring {
     param(
         [Parameter(Mandatory = $true)][string]$KeyringJson,
-        [Parameter(Mandatory = $true)][string]$ActiveKeyId
+        [Parameter(Mandatory = $true)][string]$ActiveKeyId,
+        [Parameter(Mandatory = $true)][string]$LookupKeyId
     )
 
     try {
@@ -604,8 +623,10 @@ function Assert-MeetingAiKeyring {
         throw "The decrypted ingestion keyring is empty."
     }
     $activeFound = $false
+    $lookupFound = $false
     foreach ($property in $properties) {
         if ($property.Name -eq $ActiveKeyId) { $activeFound = $true }
+        if ($property.Name -eq $LookupKeyId) { $lookupFound = $true }
         try {
             $keyBytes = [Convert]::FromBase64String([string]$property.Value)
         } catch {
@@ -621,6 +642,9 @@ function Assert-MeetingAiKeyring {
     }
     if (-not $activeFound) {
         throw "MAI_INGESTION_ACTIVE_KEY_ID is absent from the decrypted keyring."
+    }
+    if (-not $lookupFound -or $LookupKeyId -eq $ActiveKeyId) {
+        throw "MAI_INGESTION_LOOKUP_KEY_ID must select a dedicated key in the decrypted keyring."
     }
 }
 
@@ -658,6 +682,9 @@ function Import-MeetingAiRuntimeEnvironment {
 
     $resolvedSecrets = @{}
     if ($values["MAI_INGESTION_ENABLED"].ToLowerInvariant() -eq "true") {
+        if (-not $values.ContainsKey("MAI_INGESTION_LOOKUP_KEY_ID")) {
+            throw "Runtime config requires MAI_INGESTION_LOOKUP_KEY_ID; run configure-meeting-ai.ps1."
+        }
         $resolvedSecrets["MAI_MEETING_SERVICE_CLIENT_SECRET"] =
             Unprotect-MeetingAiSecret `
                 -ProtectedBase64 $values["MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI"] `
@@ -668,7 +695,8 @@ function Import-MeetingAiRuntimeEnvironment {
                 -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
         Assert-MeetingAiKeyring `
             -KeyringJson $resolvedSecrets["MAI_INGESTION_ENCRYPTION_KEYS_JSON"] `
-            -ActiveKeyId $values["MAI_INGESTION_ACTIVE_KEY_ID"]
+            -ActiveKeyId $values["MAI_INGESTION_ACTIVE_KEY_ID"] `
+            -LookupKeyId $values["MAI_INGESTION_LOOKUP_KEY_ID"]
 
         $storeParent = Split-Path -Parent $values["MAI_INGESTION_STORE_PATH"]
         Assert-MeetingAiAcl -Path $storeParent -Directory
@@ -757,86 +785,70 @@ function Invoke-MeetingAiGitCapture {
 function Assert-TranscriptReadyPermitFile {
     param(
         [Parameter(Mandatory = $true)][string]$PermitPath,
+        [Parameter(Mandatory = $true)][string]$TrustRootPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedTrustRootSha256,
         [Parameter(Mandatory = $true)][string]$ExpectedGitopsCommit,
         [Parameter(Mandatory = $true)][string]$ExpectedPolicySha256,
         [Parameter(Mandatory = $true)][string]$ExpectedProducerImageDigest,
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$StartupScriptPath,
-        [ValidateSet("test", "stage", "prod")][string]$AppEnv
+        [Parameter(Mandatory = $true)][string]$PythonExe,
+        [ValidateSet("test", "stage", "prod")][string]$AppEnv,
+        [switch]$SkipFreshness
     )
 
-    $permitPath = Assert-MeetingAiRuntimePath `
+    $permitFull = Assert-MeetingAiRuntimePath `
         -Path $PermitPath `
         -Purpose "Transcript-ready pre-enable permit"
-    Assert-MeetingAiAcl -Path $permitPath
-    $bytes = [IO.File]::ReadAllBytes($permitPath)
-    if ($bytes.Length -lt 2 -or $bytes.Length -gt 1048576) {
-        throw "Transcript-ready pre-enable permit has an invalid size."
+    $trustRootFull = Assert-MeetingAiRuntimePath `
+        -Path $TrustRootPath -Purpose "Transcript-ready permit trust root"
+    Assert-MeetingAiAcl -Path $permitFull
+    Assert-MeetingAiAcl -Path $trustRootFull
+    if ($ExpectedTrustRootSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Transcript-ready expected trust-root fingerprint is invalid."
     }
-    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and
-        $bytes[2] -eq 0xBF) {
-        throw "Transcript-ready pre-enable permit must be UTF-8 without BOM."
-    }
-    try {
-        $utf8 = New-Object Text.UTF8Encoding($false, $true)
-        $json = $utf8.GetString($bytes)
-    } finally {
-        [Array]::Clear($bytes, 0, $bytes.Length)
-    }
-    if ($json.IndexOf([char]0) -ge 0) {
-        throw "Transcript-ready pre-enable permit contains a NUL character."
-    }
-    try {
-        $permit = $json | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-        throw "Transcript-ready pre-enable permit is not valid JSON."
-    } finally {
-        $json = $null
-    }
-
-    if ($permit.schemaVersion -ne "faz24.transcriptReadyPreEnableVerdict.v1" -or
-        $permit.issue -ne "platform-k8s-gitops#2610" -or
-        $permit.status -ne "accepted-candidate" -or
-        $permit.enableAuthorized -ne $true) {
-        throw "Transcript-ready pre-enable permit verdict is not accepted."
-    }
-    if (@($permit.requiredRemediationEvidence).Count -ne 0 -or
-        @($permit.checks).Count -lt 1 -or
-        @($permit.checks | Where-Object { $_.passed -ne $true }).Count -ne 0) {
-        throw "Transcript-ready pre-enable permit contains a failed or pending check."
-    }
-
-    $generatedAt = [DateTimeOffset]::MinValue
-    $dateStyles = [Globalization.DateTimeStyles]::AssumeUniversal -bor
-        [Globalization.DateTimeStyles]::AdjustToUniversal
-    if (-not [DateTimeOffset]::TryParse(
-            [string]$permit.generatedAt,
-            [Globalization.CultureInfo]::InvariantCulture,
-            $dateStyles,
-            [ref]$generatedAt
-        )) {
-        throw "Transcript-ready pre-enable permit has an invalid generation time."
-    }
-    $now = [DateTimeOffset]::UtcNow
-    $ageSeconds = ($now - $generatedAt).TotalSeconds
-    if ($ageSeconds -lt -30 -or $ageSeconds -gt 900) {
-        throw "Transcript-ready pre-enable permit is outside the 900 second startup window."
-    }
-
-    $binding = $permit.binding
-    if ($null -eq $binding -or
-        $binding.targetAppEnv -ne $AppEnv -or
-        $binding.expectedGitopsCommit -ne $ExpectedGitopsCommit -or
-        $binding.policySha256 -ne $ExpectedPolicySha256) {
-        throw "Transcript-ready pre-enable permit environment or GitOps binding does not match."
-    }
-    $producer = $binding.producerCapability
-    if ($null -eq $producer -or
-        $producer.transcriptImageDigest -ne $ExpectedProducerImageDigest) {
-        throw "Transcript-ready pre-enable permit producer binding does not match."
-    }
-
     $repoFull = Resolve-FixedLocalPath -Path $RepoRoot -Purpose "Platform-ai repository"
+    $verifierPath = Resolve-FixedLocalPath `
+        -Path (Join-Path $repoFull "deploy\gpu-host\verify-transcript-ready-permit.py") `
+        -Purpose "Transcript-ready permit verifier"
+    if (-not (Test-Path -LiteralPath $verifierPath -PathType Leaf)) {
+        throw "Transcript-ready permit verifier is unavailable."
+    }
+    $pythonCommand = Get-Command -Name $PythonExe -CommandType Application `
+        -ErrorAction Stop | Select-Object -First 1
+    $pythonFull = Resolve-FixedLocalPath `
+        -Path $pythonCommand.Source -Purpose "Meeting-ai Python executable"
+
+    $verifyArgs = @(
+        $verifierPath,
+        "--envelope", $permitFull,
+        "--trust-root", $trustRootFull,
+        "--expected-trust-root-sha256", $ExpectedTrustRootSha256,
+        "--app-env", $AppEnv,
+        "--expected-gitops-commit", $ExpectedGitopsCommit,
+        "--expected-policy-sha256", $ExpectedPolicySha256,
+        "--expected-producer-image-digest", $ExpectedProducerImageDigest
+    )
+    if ($SkipFreshness) { $verifyArgs += "--skip-freshness" }
+    $oldEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $verifiedOutput = @(& $pythonFull @verifyArgs 2> $null)
+        $verifyExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
+    if ($verifyExitCode -ne 0 -or $verifiedOutput.Count -ne 1) {
+        throw "Transcript-ready signed permit verification failed."
+    }
+    try {
+        $permit = "$($verifiedOutput[0])" | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Transcript-ready permit verifier returned an invalid result."
+    }
+    $binding = $permit.binding
+    $livePod = $binding.liveTranscriptPod
+
     $headResult = Invoke-MeetingAiGitCapture -GitArgs @(
         "-C", $repoFull, "rev-parse", "HEAD"
     )
@@ -882,17 +894,40 @@ function Assert-TranscriptReadyPermitFile {
         $hostGuard.startupScriptSha256 -ne $startupSha256) {
         throw "Transcript-ready pre-enable permit host binding does not match."
     }
+    try {
+        $envelope = [IO.File]::ReadAllText(
+            $permitFull,
+            (New-Object Text.UTF8Encoding($false, $true))
+        ) | ConvertFrom-Json -ErrorAction Stop
+        $signingKeyId = [string]$envelope.signatures[0].keyid
+    } catch {
+        throw "Transcript-ready permit envelope metadata is invalid."
+    }
+    return [pscustomobject]@{
+        PermitEnvelopeSha256 = Get-MeetingAiFileSha256 `
+            -Path $permitFull -Purpose "Transcript-ready pre-enable permit"
+        TrustRootSha256 = Get-MeetingAiFileSha256 `
+            -Path $trustRootFull -Purpose "Transcript-ready permit trust root"
+        SigningKeyId = $signingKeyId
+        LiveTranscriptPodUid = [string]$livePod.podUid
+        LiveTranscriptImageDigest = [string]$livePod.imageDigest
+        LiveTranscriptObservedAt = [string]$livePod.observedAt
+        LiveEvidenceSha256 = [string]$livePod.evidenceSha256
+    }
 }
 
 function Assert-TranscriptReadyActivationReceiptFile {
     param(
         [Parameter(Mandatory = $true)][string]$ReceiptPath,
         [Parameter(Mandatory = $true)][string]$PermitPath,
+        [Parameter(Mandatory = $true)][string]$TrustRootPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedTrustRootSha256,
         [Parameter(Mandatory = $true)][string]$ExpectedGitopsCommit,
         [Parameter(Mandatory = $true)][string]$ExpectedPolicySha256,
         [Parameter(Mandatory = $true)][string]$ExpectedProducerImageDigest,
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$StartupScriptPath,
+        [Parameter(Mandatory = $true)][string]$PythonExe,
         [ValidateSet("test", "stage", "prod")][string]$AppEnv
     )
 
@@ -930,10 +965,18 @@ function Assert-TranscriptReadyActivationReceiptFile {
         throw "Transcript-ready activation receipt has an invalid activation time."
     }
 
-    $permitFull = Assert-MeetingAiRuntimePath `
-        -Path $PermitPath -Purpose "Transcript-ready pre-enable permit"
-    $permitSha256 = Get-MeetingAiFileSha256 `
-        -Path $permitFull -Purpose "Transcript-ready pre-enable permit"
+    $verified = Assert-TranscriptReadyPermitFile `
+        -PermitPath $PermitPath `
+        -TrustRootPath $TrustRootPath `
+        -ExpectedTrustRootSha256 $ExpectedTrustRootSha256 `
+        -ExpectedGitopsCommit $ExpectedGitopsCommit `
+        -ExpectedPolicySha256 $ExpectedPolicySha256 `
+        -ExpectedProducerImageDigest $ExpectedProducerImageDigest `
+        -RepoRoot $RepoRoot `
+        -StartupScriptPath $StartupScriptPath `
+        -PythonExe $PythonExe `
+        -AppEnv $AppEnv `
+        -SkipFreshness
     $repoFull = Resolve-FixedLocalPath -Path $RepoRoot -Purpose "Platform-ai repository"
     $headResult = Invoke-MeetingAiGitCapture -GitArgs @("-C", $repoFull, "rev-parse", "HEAD")
     if ($headResult.ExitCode -ne 0 -or $headResult.Output.Count -ne 1) {
@@ -945,14 +988,21 @@ function Assert-TranscriptReadyActivationReceiptFile {
     $startupSha256 = Get-MeetingAiFileSha256 `
         -Path $startupFull -Purpose "Meeting-ai startup script"
 
-    if ($receipt.schemaVersion -ne "faz24.transcriptReadyActivationReceipt.v1" -or
-        $receipt.permitSha256 -ne $permitSha256 -or
+    if ($receipt.schemaVersion -ne "faz24.transcriptReadyActivationReceipt.v3" -or
+        $receipt.authorityBoundary -ne "local-non-authoritative" -or
+        $receipt.permitEnvelopeSha256 -ne $verified.PermitEnvelopeSha256 -or
+        $receipt.trustRootSha256 -ne $verified.TrustRootSha256 -or
+        $receipt.signingKeyId -ne $verified.SigningKeyId -or
         $receipt.targetAppEnv -ne $AppEnv -or
         $receipt.expectedGitopsCommit -ne $ExpectedGitopsCommit -or
         $receipt.policySha256 -ne $ExpectedPolicySha256 -or
         $receipt.producerImageDigest -ne $ExpectedProducerImageDigest -or
         $receipt.platformAiCommit -ne $repoCommit -or
-        $receipt.startupScriptSha256 -ne $startupSha256) {
+        $receipt.startupScriptSha256 -ne $startupSha256 -or
+        $receipt.liveTranscriptPodUid -ne $verified.LiveTranscriptPodUid -or
+        $receipt.liveTranscriptImageDigest -ne $verified.LiveTranscriptImageDigest -or
+        $receipt.liveTranscriptObservedAt -ne $verified.LiveTranscriptObservedAt -or
+        $receipt.liveEvidenceSha256 -ne $verified.LiveEvidenceSha256) {
         throw "Transcript-ready activation receipt binding does not match."
     }
 }
@@ -960,17 +1010,20 @@ function Assert-TranscriptReadyActivationReceiptFile {
 function Assert-TranscriptReadyPreEnablePermit {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [Parameter(Mandatory = $true)][string]$StartupScriptPath
+        [Parameter(Mandatory = $true)][string]$StartupScriptPath,
+        [Parameter(Mandatory = $true)][string]$PythonExe
     )
 
     if ($env:MAI_READY_CONSUMER_ENABLED -ne "true") { return }
 
     foreach ($name in @(
             "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+            "MAI_READY_PERMIT_TRUST_ROOT_PATH",
             "MAI_READY_ACTIVATION_RECEIPT_PATH",
             "MAI_READY_EXPECTED_GITOPS_COMMIT",
             "MAI_READY_EXPECTED_POLICY_SHA256",
             "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST",
+            "MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256",
             "MAI_APP_ENV"
         )) {
         if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
@@ -980,20 +1033,29 @@ function Assert-TranscriptReadyPreEnablePermit {
 
     [void](Assert-TranscriptReadyPermitFile `
         -PermitPath $env:MAI_READY_PRE_ENABLE_PERMIT_PATH `
+        -TrustRootPath $env:MAI_READY_PERMIT_TRUST_ROOT_PATH `
+        -ExpectedTrustRootSha256 `
+            $env:MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256 `
         -ExpectedGitopsCommit $env:MAI_READY_EXPECTED_GITOPS_COMMIT `
         -ExpectedPolicySha256 $env:MAI_READY_EXPECTED_POLICY_SHA256 `
         -ExpectedProducerImageDigest $env:MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST `
         -RepoRoot $RepoRoot `
         -StartupScriptPath $StartupScriptPath `
-        -AppEnv $env:MAI_APP_ENV)
+        -PythonExe $PythonExe `
+        -AppEnv $env:MAI_APP_ENV `
+        -SkipFreshness)
     [void](Assert-TranscriptReadyActivationReceiptFile `
         -ReceiptPath $env:MAI_READY_ACTIVATION_RECEIPT_PATH `
         -PermitPath $env:MAI_READY_PRE_ENABLE_PERMIT_PATH `
+        -TrustRootPath $env:MAI_READY_PERMIT_TRUST_ROOT_PATH `
+        -ExpectedTrustRootSha256 `
+            $env:MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256 `
         -ExpectedGitopsCommit $env:MAI_READY_EXPECTED_GITOPS_COMMIT `
         -ExpectedPolicySha256 $env:MAI_READY_EXPECTED_POLICY_SHA256 `
         -ExpectedProducerImageDigest $env:MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST `
         -RepoRoot $RepoRoot `
         -StartupScriptPath $StartupScriptPath `
+        -PythonExe $PythonExe `
         -AppEnv $env:MAI_APP_ENV)
 }
 
@@ -1013,22 +1075,23 @@ function Clear-MeetingAiRuntimeTlsKey {
     )
 }
 
-function Write-MeetingAiSecretFileAtomic {
+function Write-MeetingAiSecretBytesAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Content
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [string]$Purpose = "Runtime protected artifact"
     )
 
-    if ([string]::IsNullOrWhiteSpace($Content)) {
-        throw "Runtime secret material must not be empty."
+    if ($Bytes.Length -lt 1) {
+        throw "Runtime protected artifact must not be empty."
     }
-    $full = Assert-MeetingAiRuntimePath -Path $Path -Purpose "Runtime TLS key"
+    $full = Assert-MeetingAiRuntimePath -Path $Path -Purpose $Purpose
     $directory = Initialize-MeetingAiDirectory -Path (Split-Path -Parent $full)
     $temp = Join-Path $directory (".meeting-ai-key-{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
     try {
         [IO.File]::WriteAllBytes($temp, @())
         Set-Acl -LiteralPath $temp -AclObject (New-MeetingAiAcl)
-        [IO.File]::WriteAllText($temp, $Content, (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllBytes($temp, $Bytes)
         Assert-MeetingAiAcl -Path $temp
         if (Test-Path -LiteralPath $full -PathType Leaf) {
             # .NET Framework File.Replace rejects a null backup path on PS 5.1.
@@ -1055,6 +1118,25 @@ function Write-MeetingAiSecretFileAtomic {
     }
 }
 
+function Write-MeetingAiSecretFileAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content,
+        [string]$Purpose = "Runtime protected artifact"
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Content)) {
+        throw "Runtime secret material must not be empty."
+    }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Content)
+    try {
+        Write-MeetingAiSecretBytesAtomic `
+            -Path $Path -Bytes $bytes -Purpose $Purpose
+    } finally {
+        [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+}
+
 function Write-MeetingAiConfigAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1075,6 +1157,9 @@ function Write-MeetingAiConfigAtomic {
         $candidate = Read-MeetingAiConfigFile -Path $temp
         Assert-MeetingAiConfigValues -Values $candidate
         if ($candidate["MAI_INGESTION_ENABLED"].ToLowerInvariant() -eq "true") {
+            if (-not $candidate.ContainsKey("MAI_INGESTION_LOOKUP_KEY_ID")) {
+                throw "Candidate runtime config is missing MAI_INGESTION_LOOKUP_KEY_ID."
+            }
             $candidateClientSecret = Unprotect-MeetingAiSecret `
                 -ProtectedBase64 $candidate["MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI"] `
                 -KeyName "MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI"
@@ -1082,7 +1167,8 @@ function Write-MeetingAiConfigAtomic {
                 -ProtectedBase64 $candidate["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
                 -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
             Assert-MeetingAiKeyring -KeyringJson $candidateKeyring `
-                -ActiveKeyId $candidate["MAI_INGESTION_ACTIVE_KEY_ID"]
+                -ActiveKeyId $candidate["MAI_INGESTION_ACTIVE_KEY_ID"] `
+                -LookupKeyId $candidate["MAI_INGESTION_LOOKUP_KEY_ID"]
             if ($candidate["MAI_MEETING_SERVICE_TLS_MODE"].ToLowerInvariant() -eq
                 "mutual") {
                 $candidateClientKey = Unprotect-MeetingAiSecret `

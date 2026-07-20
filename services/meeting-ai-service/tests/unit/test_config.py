@@ -122,10 +122,25 @@ def _ingestion_values(tmp_path: Path) -> dict[str, object]:
         "meeting_service_token_url": "https://auth.test/token",
         "meeting_service_client_id": "meeting-ai",
         "meeting_service_client_secret": SecretStr("meeting-service-secret-value"),
+        "transcript_service_base_url": "https://transcript.test",
+        "transcript_service_capability_path_template": (
+            "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+            "/sessions/{session_id}/finalizations/{finalization_version}"
+            "/analysis-capability"
+        ),
+        "transcript_service_token_url": "https://auth.test/token",
+        "transcript_service_client_id": "meeting-ai",
+        "transcript_service_client_secret": SecretStr("transcript-secret-value"),
         "ingestion_store_path": tmp_path / "outbox.sqlite3",
         "ingestion_active_key_id": "v1",
+        "ingestion_lookup_key_id": "lookup-v1",
         "ingestion_encryption_keys_json": SecretStr(
-            json.dumps({"v1": base64.b64encode(b"K" * 32).decode()})
+            json.dumps(
+                {
+                    "v1": base64.b64encode(b"K" * 32).decode(),
+                    "lookup-v1": base64.b64encode(b"L" * 32).decode(),
+                }
+            )
         ),
         "ingestion_timeout_sec": 1.0,
         "ingestion_lease_sec": 3.0,
@@ -150,12 +165,22 @@ def test_ingestion_enabled_requires_credentials_absolute_path_and_keyring(tmp_pa
 def test_ingestion_keyring_is_aes256_and_secret_repr_is_redacted(tmp_path: Path) -> None:
     values = _ingestion_values(tmp_path)
     settings = Settings(**values)
-    assert settings.ingestion_encryption_keys() == {"v1": b"K" * 32}
+    assert settings.ingestion_encryption_keys() == {
+        "v1": b"K" * 32,
+        "lookup-v1": b"L" * 32,
+    }
+    assert settings.ingestion_lookup_key() == b"L" * 32
+    assert settings.ingestion_payload_encryption_keys() == {"v1": b"K" * 32}
     assert "meeting-service-secret-value" not in repr(settings)
     assert base64.b64encode(b"K" * 32).decode() not in repr(settings)
 
     values["ingestion_encryption_keys_json"] = SecretStr(
-        json.dumps({"v1": base64.b64encode(b"short").decode()})
+        json.dumps(
+            {
+                "v1": base64.b64encode(b"short").decode(),
+                "lookup-v1": base64.b64encode(b"L" * 32).decode(),
+            }
+        )
     )
     with pytest.raises(ValidationError):
         Settings(**values)

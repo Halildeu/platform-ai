@@ -35,12 +35,28 @@ SESSION = "22222222-2222-4222-8222-222222222222"
 TENANT = "33333333-3333-4333-8333-333333333333"
 EVENT_KEY = f"meeting.transcript|{SESSION}|meeting.transcript.ready|1"
 RAW_TRANSCRIPT = "RAW-CANONICAL-TRANSCRIPT-SECRET Bütçe kararlaştırıldı."
+LOOKUP_KEY = b"L" * 32
 
 
 def _event_lookup_digest() -> str:
-    return PayloadCipher({"v1": b"K" * 32}, "v1").lookup_digests(
+    return PayloadCipher(
+        {"v1": b"K" * 32},
+        "v1",
+        lookup_key=LOOKUP_KEY,
+    ).lookup_digests(
         purpose="ready-event-inbox",
         value=f"{TENANT}|{EVENT_KEY}",
+    )[0]
+
+
+def _invalid_lookup_digest(message_id: str) -> str:
+    return PayloadCipher(
+        {"v1": b"K" * 32},
+        "v1",
+        lookup_key=LOOKUP_KEY,
+    ).lookup_digests(
+        purpose="ready-event-inbox",
+        value=f"invalid|{message_id}",
     )[0]
 
 
@@ -121,6 +137,7 @@ class BlockingTranscriptClient(FakeTranscriptClient):
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
     key = base64.b64encode(b"K" * 32).decode()
+    lookup_key = base64.b64encode(LOOKUP_KEY).decode()
     values: dict[str, object] = {
         "ingestion_enabled": True,
         "meeting_service_base_url": "https://meeting.test",
@@ -129,7 +146,10 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         "meeting_service_client_secret": SecretStr("meeting-secret"),
         "ingestion_store_path": tmp_path / "delivery.sqlite3",
         "ingestion_active_key_id": "v1",
-        "ingestion_encryption_keys_json": SecretStr(json.dumps({"v1": key})),
+        "ingestion_lookup_key_id": "lookup-v1",
+        "ingestion_encryption_keys_json": SecretStr(
+            json.dumps({"v1": key, "lookup-v1": lookup_key})
+        ),
         "ready_consumer_enabled": True,
         "ready_producer_replay_horizon_sec": 604_800.0,
         "ready_redis_url": SecretStr("redis://redis.test:6379/0"),
@@ -457,9 +477,52 @@ def test_invalid_event_is_durably_recorded_then_dlqed_and_acked(tmp_path: Path) 
     assert len(redis.acked) == 1
     fields = redis.added[0]["fields"]
     assert isinstance(fields, dict)
-    assert fields["eventKey"] == "invalid|9-0"
+    assert fields["sourceFingerprint"] == hashlib.sha256(b"9-0").hexdigest()
+    assert fields["lookupFingerprint"] == _invalid_lookup_digest("9-0")
+    assert fields["dlqKey"] == hashlib.sha256(b"9-0|event_contract_invalid").hexdigest()
     assert fields["errorCode"] == "event_contract_invalid"
     assert "payload" not in fields
+    assert "eventKey" not in fields
+    assert "sourceMessageId" not in fields
+
+
+def test_dlq_retry_after_marker_crash_reuses_idempotency_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> FakeRedis:
+        runtime, _, redis, _ = _runtime(tmp_path)
+        assert runtime._inbox is not None
+        original_marker = runtime._inbox.mark_dlq_published
+
+        def fail_marker(_lookup_key: str) -> None:
+            raise RuntimeError("simulated crash after atomic Redis DLQ append")
+
+        monkeypatch.setattr(runtime._inbox, "mark_dlq_published", fail_marker)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            await runtime.process_message(
+                "9-0",
+                {b"eventType": b"meeting.transcript.ready", b"payload": b"not-json"},
+            )
+        assert len(redis.added) == 1
+        assert redis.acked == []
+
+        monkeypatch.setattr(runtime._inbox, "mark_dlq_published", original_marker)
+        await runtime.process_message(
+            "9-0",
+            {b"eventType": b"meeting.transcript.ready", b"payload": b"not-json"},
+        )
+        return redis
+
+    redis = asyncio.run(scenario())
+    assert len(redis.added) == 2
+    assert len(redis.acked) == 1
+    first_fields = redis.added[0]["fields"]
+    replay_fields = redis.added[1]["fields"]
+    assert isinstance(first_fields, dict)
+    assert isinstance(replay_fields, dict)
+    assert first_fields["dlqKey"] == replay_fields["dlqKey"]
+    assert first_fields["lookupFingerprint"] == replay_fields["lookupFingerprint"]
 
 
 def test_unrelated_shared_stream_event_is_acked_without_poison_or_inbox_row(tmp_path: Path) -> None:

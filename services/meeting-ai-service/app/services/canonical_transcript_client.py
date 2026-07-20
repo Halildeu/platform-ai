@@ -226,6 +226,18 @@ class HttpCanonicalTranscriptClient:
                 },
                 timeout=self._settings.transcript_service_timeout_sec,
             ) as response:
+                if response.status_code == 401:
+                    self._snapshot_tokens.invalidate()
+                    raise CanonicalTranscriptRetryableError("transcript_http_401")
+                if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
+                    raise CanonicalTranscriptRetryableError(
+                        f"transcript_http_{response.status_code}",
+                        _retry_after_seconds(response),
+                    )
+                if response.status_code != 200:
+                    raise CanonicalTranscriptTerminalError(
+                        f"transcript_http_{response.status_code}"
+                    )
                 body = await _bounded_response_body(
                     response,
                     self._settings.transcript_service_max_response_bytes,
@@ -235,16 +247,6 @@ class HttpCanonicalTranscriptClient:
                 f"transcript_network_{type(exc).__name__}"
             ) from exc
 
-        if response.status_code == 401:
-            self._snapshot_tokens.invalidate()
-            raise CanonicalTranscriptRetryableError("transcript_http_401")
-        if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
-            raise CanonicalTranscriptRetryableError(
-                f"transcript_http_{response.status_code}",
-                _retry_after_seconds(response),
-            )
-        if response.status_code != 200:
-            raise CanonicalTranscriptTerminalError(f"transcript_http_{response.status_code}")
         try:
             snapshot = CanonicalTranscriptSnapshot.model_validate_json(body)
         except (ValidationError, ValueError):
@@ -288,7 +290,8 @@ class HttpCanonicalTranscriptClient:
         )
         url = self._settings.transcript_service_base_url.rstrip("/") + path
         try:
-            response = await self._client.post(
+            async with self._client.stream(
+                "POST",
                 url,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -300,27 +303,36 @@ class HttpCanonicalTranscriptClient:
                     "X-Analysis-Spec-Version": query.analysis_spec_version,
                 },
                 timeout=self._settings.transcript_service_timeout_sec,
-            )
+            ) as response:
+                if response.status_code == 401:
+                    self._capability_tokens.invalidate()
+                    raise CanonicalTranscriptRetryableError(
+                        "transcript_capability_http_401"
+                    )
+                if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
+                    raise CanonicalTranscriptRetryableError(
+                        f"transcript_capability_http_{response.status_code}",
+                        _retry_after_seconds(response),
+                    )
+                if response.status_code != 204:
+                    raise CanonicalTranscriptTerminalError(
+                        f"transcript_capability_http_{response.status_code}"
+                    )
+                try:
+                    capability = response.headers["X-Analysis-Job-Capability"].strip()
+                    expires_at_header = response.headers[
+                        "X-Analysis-Job-Capability-Expires-At"
+                    ].strip()
+                except KeyError:
+                    raise CanonicalTranscriptTerminalError(
+                        "transcript_capability_invalid_response"
+                    ) from None
         except (httpx.HTTPError, MeetingServiceTlsError) as exc:
             raise CanonicalTranscriptRetryableError(
                 f"transcript_capability_network_{type(exc).__name__}"
             ) from exc
 
-        if response.status_code == 401:
-            self._capability_tokens.invalidate()
-            raise CanonicalTranscriptRetryableError("transcript_capability_http_401")
-        if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
-            raise CanonicalTranscriptRetryableError(
-                f"transcript_capability_http_{response.status_code}",
-                _retry_after_seconds(response),
-            )
-        if response.status_code != 204:
-            raise CanonicalTranscriptTerminalError(
-                f"transcript_capability_http_{response.status_code}"
-            )
         try:
-            capability = response.headers["X-Analysis-Job-Capability"].strip()
-            expires_at_header = response.headers["X-Analysis-Job-Capability-Expires-At"].strip()
             if not capability or len(capability) > 8192 or len(expires_at_header) > 128:
                 raise ValueError("invalid capability headers")
             capability_expires_at = _aware_datetime(expires_at_header)

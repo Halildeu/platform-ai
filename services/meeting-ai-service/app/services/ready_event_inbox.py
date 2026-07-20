@@ -13,7 +13,7 @@ import secrets
 import sqlite3
 import time
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 from app.services.durable_outbox import OutboxError, OutboxIntegrityError, SqliteOutboxStore
@@ -108,8 +108,7 @@ class ReadyInboxSummary:
 class ReadyDeadLetterMetadata:
     """Transcript-free operator view of a ready-event dead-letter row."""
 
-    event_key: str
-    lookup_key: str = field(repr=False)
+    lookup_fingerprint: str
     failure_count: int
     dead_reason: ReadyDeadReason | None
     last_error_code: str | None
@@ -329,7 +328,17 @@ class SqliteReadyEventInbox:
                 stored_identity = self._decrypt_identity(row)
                 if stored_identity.event_key != identity.event_key:
                     raise ReadyInboxIntegrityError("ready-event lookup returned another identity")
-                if stored_identity.payload_sha256 != identity.payload_sha256:
+                identity_binding_conflict = (
+                    stored_identity.tenant_id != identity.tenant_id
+                    or stored_identity.meeting_id != identity.meeting_id
+                    or stored_identity.session_id != identity.session_id
+                    or stored_identity.finalization_version != identity.finalization_version
+                    or stored_identity.analysis_run_id != identity.analysis_run_id
+                )
+                if (
+                    stored_identity.payload_sha256 != identity.payload_sha256
+                    or identity_binding_conflict
+                ):
                     conflict_already_published = (
                         str(row["state"]) == ReadyInboxState.DEAD.value
                         and row["dead_reason"] == ReadyDeadReason.CONFLICT.value
@@ -346,7 +355,11 @@ class SqliteReadyEventInbox:
                         """,
                         (
                             timestamp,
-                            "event_payload_hash_conflict",
+                            (
+                                "event_identity_binding_conflict"
+                                if identity_binding_conflict
+                                else "event_payload_hash_conflict"
+                            ),
                             row["dlq_published_at"] if conflict_already_published else None,
                             row["event_key_digest"],
                         ),
@@ -471,6 +484,11 @@ class SqliteReadyEventInbox:
         if (
             stored_identity.event_key != identity.event_key
             or stored_identity.payload_sha256 != identity.payload_sha256
+            or stored_identity.tenant_id != identity.tenant_id
+            or stored_identity.meeting_id != identity.meeting_id
+            or stored_identity.session_id != identity.session_id
+            or stored_identity.finalization_version != identity.finalization_version
+            or stored_identity.analysis_run_id != identity.analysis_run_id
         ):
             return None
         state = ReadyInboxState(str(row["state"]))
@@ -731,11 +749,10 @@ class SqliteReadyEventInbox:
             ).fetchall()
         dead_letters: list[ReadyDeadLetterMetadata] = []
         for row in rows:
-            event_key, _, _, lookup_key = self._decrypt_event_metadata(row)
+            self._decrypt_event_metadata(row)
             dead_letters.append(
                 ReadyDeadLetterMetadata(
-                    event_key=event_key,
-                    lookup_key=lookup_key,
+                    lookup_fingerprint=str(row["event_key_digest"]),
                     failure_count=int(row["failure_count"]),
                     dead_reason=(
                         None
@@ -759,19 +776,33 @@ class SqliteReadyEventInbox:
             )
         return dead_letters
 
-    def rearm_retry_exhausted(
+    def lookup_fingerprint(self, lookup_key: str) -> str:
+        """Return the authenticated blind index used by SQLite, Redis, and operators."""
+        with closing(self._connect()) as connection:
+            row = self._select_by_lookup_key(connection, lookup_key)
+        if row is None:
+            raise ReadyInboxIntegrityError("ready-event identity is unavailable")
+        self._decrypt_event_metadata(row)
+        return str(row["event_key_digest"])
+
+    def rearm_retry_exhausted_by_fingerprint(
         self,
-        lookup_key: str,
+        lookup_fingerprint: str,
         *,
         audit_reference: str,
         now: float | None = None,
     ) -> bool:
-        """Rearm an operator-reviewed retry exhaustion before exact producer replay.
+        """Rearm an operator-reviewed retry exhaustion by opaque row fingerprint.
 
         Poison, contract-terminal, and payload-conflict rows can never be rearmed.
         The event body is intentionally absent, so the producer must replay the
         exact original event after this transition.
         """
+        fingerprint = lookup_fingerprint.strip().lower()
+        if len(fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in fingerprint
+        ):
+            raise ValueError("lookup_fingerprint must be a 64-character lowercase hex digest")
         reference = audit_reference.strip()
         if not reference or len(reference) > 128:
             raise ValueError("audit_reference must contain 1 to 128 characters")
@@ -779,7 +810,14 @@ class SqliteReadyEventInbox:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = self._select_by_lookup_key(connection, lookup_key)
+                row = connection.execute(
+                    """
+                    SELECT *
+                    FROM meeting_transcript_ready_inbox
+                    WHERE event_key_digest = ?
+                    """,
+                    (fingerprint,),
+                ).fetchone()
                 if (
                     row is None
                     or str(row["state"]) != ReadyInboxState.DEAD.value
@@ -788,8 +826,8 @@ class SqliteReadyEventInbox:
                 ):
                     connection.commit()
                     return False
-                _, _, analysis_run_id, stored_lookup_key = self._decrypt_event_metadata(row)
-                if stored_lookup_key != lookup_key or analysis_run_id is None:
+                _, _, analysis_run_id, _ = self._decrypt_event_metadata(row)
+                if analysis_run_id is None:
                     raise ReadyInboxIntegrityError("retry-exhausted identity is invalid")
                 result_exists = connection.execute(
                     "SELECT 1 FROM analysis_delivery_outbox WHERE analysis_run_id = ?",

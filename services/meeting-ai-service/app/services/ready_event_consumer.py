@@ -69,7 +69,6 @@ from app.services.redact import RedactionError
 
 logger = logging.getLogger(__name__)
 
-
 class AsyncRedisClient(Protocol):
     async def xgroup_create(self, **kwargs: object) -> object: ...
 
@@ -85,7 +84,7 @@ class AsyncRedisClient(Protocol):
 
 
 class ReadyEventConsumerRuntime:
-    """Own Redis PEL processing while SQLite owns exactly-once effect state."""
+    """Own Redis PEL processing while SQLite owns idempotent effect state."""
 
     def __init__(
         self,
@@ -252,7 +251,6 @@ class ReadyEventConsumerRuntime:
             )
             await self._dead_letter_and_ack(
                 message_id=message_id,
-                event_key=synthetic_key,
                 lookup_key=synthetic_key,
                 error_code="event_contract_invalid",
                 failure_count=0,
@@ -292,7 +290,6 @@ class ReadyEventConsumerRuntime:
             )
             await self._dead_letter_and_ack(
                 message_id=message_id,
-                event_key=event.event_key,
                 lookup_key=event.lookup_key,
                 error_code=error_code,
                 failure_count=claim.failure_count,
@@ -474,7 +471,6 @@ class ReadyEventConsumerRuntime:
         if outcome.state is ReadyInboxState.DEAD:
             await self._dead_letter_and_ack(
                 message_id=message_id,
-                event_key=event.event_key,
                 lookup_key=event.lookup_key,
                 error_code=error_code,
                 failure_count=outcome.failure_count,
@@ -511,7 +507,6 @@ class ReadyEventConsumerRuntime:
             return
         await self._dead_letter_and_ack(
             message_id=message_id,
-            event_key=event.event_key,
             lookup_key=event.lookup_key,
             error_code=error_code,
             failure_count=failure_count,
@@ -552,7 +547,6 @@ class ReadyEventConsumerRuntime:
         self,
         *,
         message_id: str,
-        event_key: str,
         lookup_key: str,
         error_code: str,
         failure_count: int,
@@ -561,14 +555,17 @@ class ReadyEventConsumerRuntime:
         assert self._redis is not None
         assert self._inbox is not None
         if not already_published:
+            dlq_key = hashlib.sha256(f"{message_id}|{error_code[:128]}".encode()).hexdigest()
+            lookup_fingerprint = await asyncio.to_thread(
+                self._inbox.lookup_fingerprint,
+                lookup_key,
+            )
             await self._redis.xadd(
                 name=self.settings.ready_redis_dead_letter_stream,
                 fields={
-                    "dlqKey": hashlib.sha256(
-                        f"{message_id}|{error_code[:128]}".encode()
-                    ).hexdigest(),
-                    "sourceMessageId": message_id,
-                    "eventKey": event_key,
+                    "dlqKey": dlq_key,
+                    "sourceFingerprint": hashlib.sha256(message_id.encode()).hexdigest(),
+                    "lookupFingerprint": lookup_fingerprint,
                     "errorCode": error_code[:128],
                     "failureCount": str(failure_count),
                 },
@@ -679,7 +676,6 @@ class ReadyEventConsumerRuntime:
             )
             await self._dead_letter_and_ack(
                 message_id=source_message_id,
-                event_key=synthetic_key,
                 lookup_key=synthetic_key,
                 error_code="redis_pending_source_deleted",
                 failure_count=0,

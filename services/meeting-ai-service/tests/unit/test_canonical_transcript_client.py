@@ -22,7 +22,7 @@ from app.services.canonical_transcript_client import (
     HttpCanonicalTranscriptClient,
 )
 from app.services.durable_outbox import ClaimedMessage
-from app.services.meeting_service_client import DeliveryDisposition
+from app.services.meeting_service_client import DeliveryAttempt, DeliveryDisposition
 
 MEETING = "11111111-1111-4111-8111-111111111111"
 SESSION = "22222222-2222-4222-8222-222222222222"
@@ -32,6 +32,7 @@ RUN_ID = "44444444-4444-4444-8444-444444444444"
 
 def _settings(tmp_path: Path) -> Settings:
     key = base64.b64encode(b"K" * 32).decode()
+    lookup_key = base64.b64encode(b"L" * 32).decode()
     return Settings(
         ingestion_enabled=True,
         meeting_service_base_url="https://meeting.test",
@@ -40,7 +41,10 @@ def _settings(tmp_path: Path) -> Settings:
         meeting_service_client_secret=SecretStr("meeting-secret"),
         ingestion_store_path=tmp_path / "delivery.sqlite3",
         ingestion_active_key_id="v1",
-        ingestion_encryption_keys_json=SecretStr(json.dumps({"v1": key})),
+        ingestion_lookup_key_id="lookup-v1",
+        ingestion_encryption_keys_json=SecretStr(
+            json.dumps({"v1": key, "lookup-v1": lookup_key})
+        ),
         ready_consumer_enabled=True,
         ready_producer_replay_horizon_sec=604_800.0,
         ready_redis_url=SecretStr("redis://redis.test:6379/0"),
@@ -599,6 +603,54 @@ def test_snapshot_stream_without_content_length_stops_at_response_byte_limit(
     error = asyncio.run(scenario())
     assert error.error_code == "transcript_response_too_large"
     assert stream.chunks_yielded == 3
+
+
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_retryable_snapshot_status_does_not_read_response_body(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    stream = _OversizedStream(chunk_size=700, chunk_count=10)
+
+    async def scenario() -> CanonicalTranscriptRetryableError:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token"})
+            return httpx.Response(status_code, stream=stream)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(CanonicalTranscriptRetryableError) as captured:
+                await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(_event())
+        return captured.value
+
+    error = asyncio.run(scenario())
+    assert error.error_code == f"transcript_http_{status_code}"
+    assert stream.chunks_yielded == 0
+
+
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_retryable_capability_status_does_not_read_response_body(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    stream = _OversizedStream(chunk_size=700, chunk_count=10)
+
+    async def scenario() -> DeliveryAttempt:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token"})
+            return httpx.Response(status_code, stream=stream)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            _, error = await HttpCanonicalTranscriptClient(
+                _settings(tmp_path), client
+            ).capability_for(_message())
+        assert error is not None
+        return error
+
+    error = asyncio.run(scenario())
+    assert error.error_code == f"transcript_capability_http_{status_code}"
+    assert stream.chunks_yielded == 0
 
 
 @pytest.mark.parametrize("content_length", ["invalid", "-1"])

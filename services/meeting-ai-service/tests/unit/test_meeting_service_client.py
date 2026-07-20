@@ -29,6 +29,7 @@ from app.services.meeting_service_client import (
 )
 
 KEY = base64.b64encode(b"K" * 32).decode()
+LOOKUP_KEY = base64.b64encode(b"L" * 32).decode()
 
 
 class FakeCapabilityProvider:
@@ -50,9 +51,21 @@ def _settings(tmp_path: Path) -> Settings:
         meeting_service_token_url="https://auth.test/token",
         meeting_service_client_id="meeting-ai",
         meeting_service_client_secret=SecretStr("secret"),
+        transcript_service_base_url="https://transcript.test",
+        transcript_service_capability_path_template=(
+            "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+            "/sessions/{session_id}/finalizations/{finalization_version}"
+            "/analysis-capability"
+        ),
+        transcript_service_token_url="https://auth.test/token",
+        transcript_service_client_id="meeting-ai",
+        transcript_service_client_secret=SecretStr("transcript-secret"),
         ingestion_store_path=tmp_path / "outbox.sqlite3",
         ingestion_active_key_id="v1",
-        ingestion_encryption_keys_json=SecretStr(json.dumps({"v1": KEY})),
+        ingestion_lookup_key_id="lookup-v1",
+        ingestion_encryption_keys_json=SecretStr(
+            json.dumps({"v1": KEY, "lookup-v1": LOOKUP_KEY})
+        ),
         ingestion_timeout_sec=1.0,
         ingestion_lease_sec=3.0,
     )
