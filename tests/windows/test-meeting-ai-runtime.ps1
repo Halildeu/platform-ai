@@ -38,6 +38,7 @@ $expectedPermitTrustRootSha256 = ""
 $expectedGitopsCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 $expectedPolicySha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 $expectedProducerDigest = "sha256:" + (("c" * 64) -join "")
+$permitSequenceOffsetSeconds = 0
 $customReadyStream = "meeting:events:ci-custom"
 $customReadyGroup = "meeting-ai-ready-ci-custom"
 $customAnalysisSpec = "meeting-intelligence-ci-custom"
@@ -72,6 +73,11 @@ function Write-FreshPermit {
         [ValidateSet("test", "stage")][string]$AppEnv = "test",
         [int]$GeneratedAtOffsetSeconds = 0
     )
+    $effectiveGeneratedAtOffsetSeconds = $GeneratedAtOffsetSeconds
+    if (-not $PSBoundParameters.ContainsKey("GeneratedAtOffsetSeconds")) {
+        $effectiveGeneratedAtOffsetSeconds = $script:permitSequenceOffsetSeconds
+        $script:permitSequenceOffsetSeconds += 1
+    }
     $fixtureArgs = @(
         $permitFixtureScript,
         "--envelope", $Path,
@@ -84,7 +90,7 @@ function Write-FreshPermit {
         "--backend-commit", (("f" * 40) -join ""),
         "--platform-ai-commit", $repoCommit,
         "--startup-sha256", $startupSha256,
-        "--generated-at-offset-seconds", "$GeneratedAtOffsetSeconds"
+        "--generated-at-offset-seconds", "$effectiveGeneratedAtOffsetSeconds"
     )
     $trustSha = @(& $pythonExe @fixtureArgs)
     if ($LASTEXITCODE -ne 0 -or $trustSha.Count -ne 1 -or
