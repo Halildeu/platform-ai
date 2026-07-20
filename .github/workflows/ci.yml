@@ -196,16 +196,79 @@ jobs:
             exit 1
           fi
 
+  # Detect which services this PR/push actually touched, then emit a JSON
+  # array so the `service-tests` matrix can be BUILT from that array
+  # (dynamic matrix). A PR that only edits `services/meeting-ai-service/**`
+  # no longer waits ~20 minutes on `live-stt-service` (Whisper model
+  # download) that has zero touched code. On non-PR events (e.g. `push` to
+  # main) all four services are always emitted so trunk baseline is complete.
+  #
+  # We use dynamic matrix (not a static matrix + `if:` guard) because
+  # GitHub Actions forbids the `matrix` context inside a job-level `if:` —
+  # the matrix expansion happens before the job's `if:` is evaluated.
+  service-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.list.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          # On `push` the action falls back to comparing against the previous
+          # SHA in the same ref; on `pull_request` it diffs the PR base.
+          filters: |
+            diarization-service:
+              - 'services/diarization-service/**'
+              - '.github/workflows/ci.yml'
+            final-stt-service:
+              - 'services/final-stt-service/**'
+              - '.github/workflows/ci.yml'
+            live-stt-service:
+              - 'services/live-stt-service/**'
+              - '.github/workflows/ci.yml'
+            meeting-ai-service:
+              - 'services/meeting-ai-service/**'
+              - '.github/workflows/ci.yml'
+      - id: list
+        env:
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          DIAR: ${{ steps.filter.outputs.diarization-service }}
+          FINAL_STT: ${{ steps.filter.outputs.final-stt-service }}
+          LIVE_STT: ${{ steps.filter.outputs.live-stt-service }}
+          MEETING_AI: ${{ steps.filter.outputs.meeting-ai-service }}
+        run: |
+          set -euo pipefail
+          # Non-PR events (push to main, workflow_dispatch, schedule) always
+          # run the full matrix. PR events include only touched services.
+          if [ "$IS_PR" != "true" ]; then
+            services='["diarization-service","final-stt-service","live-stt-service","meeting-ai-service"]'
+          else
+            selected=()
+            [ "$DIAR"        = "true" ] && selected+=('"diarization-service"')
+            [ "$FINAL_STT"   = "true" ] && selected+=('"final-stt-service"')
+            [ "$LIVE_STT"    = "true" ] && selected+=('"live-stt-service"')
+            [ "$MEETING_AI"  = "true" ] && selected+=('"meeting-ai-service"')
+            if [ "${#selected[@]}" -eq 0 ]; then
+              services='[]'
+            else
+              services="[$(IFS=,; echo "${selected[*]}")]"
+            fi
+          fi
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+          echo "Selected services matrix: $services"
+
   service-tests:
+    needs: service-changes
+    # Skip the whole job (no matrix expansion) when no service was touched.
+    # Empty-array matrix would produce zero jobs anyway; the guard here
+    # keeps the CI status list clean.
+    if: needs.service-changes.outputs.services != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        service:
-          - diarization-service
-          - final-stt-service
-          - live-stt-service
-          - meeting-ai-service
+        service: ${{ fromJSON(needs.service-changes.outputs.services) }}
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
@@ -232,6 +295,7 @@ jobs:
         run: python -m mypy app
 
       - name: Pytest (unit)
+        timeout-minutes: 15
         run: python -m pytest tests/unit -q
 
   gpu-host-windows-contract:
