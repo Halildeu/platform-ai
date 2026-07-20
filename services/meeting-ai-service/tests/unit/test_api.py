@@ -185,3 +185,106 @@ def test_analyze_fails_closed_when_durable_queue_is_full(monkeypatch, tmp_path: 
     assert first.status_code == 200
     assert second.status_code == 503
     assert second.headers["Retry-After"] == "30"
+
+
+# ── Faz 24 live analysis (Zeynep 2026-07-20 kapsam kararı) ─────────────────
+
+
+def test_analyze_live_marks_is_partial_true_and_threads_version() -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze/live",
+            json={
+                "transcript": "Toplantı başladı. Bütçe kararlaştırıldı.",
+                "segment_seq": 42,
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Live-only metadata differentiators — a live and a final call over the
+    # same content produce byte-identical payloads apart from these two fields
+    # plus the X-Analysis-* response headers below.
+    assert body["is_partial"] is True
+    assert body["version"] == 42
+    # Response headers pin the same signal for downstream consumers that read
+    # metadata before parsing the body (SSE relay, meeting-service ingestion).
+    assert resp.headers["X-Analysis-Is-Partial"] == "true"
+    assert resp.headers["X-Analysis-Version"] == "42"
+
+
+def test_analyze_live_defaults_version_zero_when_segment_seq_missing() -> None:
+    # A caller (or an early recorder revision) may omit segment_seq. The
+    # endpoint stays available; version defaults to 0 so the ingestion side
+    # can still order by (meeting_id, version) without null handling.
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze/live",
+            json={"transcript": "Kısa transcript."},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_partial"] is True
+    assert body["version"] == 0
+    assert resp.headers["X-Analysis-Version"] == "0"
+
+
+def test_analyze_default_endpoint_stays_final_not_partial() -> None:
+    # Regression: the existing /analyze endpoint MUST NOT flip to partial just
+    # because segment_seq shows up in the request. `is_partial` defaults False,
+    # `version` defaults 0, and `/analyze` never mutates them. This keeps
+    # downstream consumers that read `is_partial` from mis-classifying the
+    # final analysis result as a live/superseded delivery.
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze",
+            json={
+                "transcript": "Toplantı başladı. Bütçe kararlaştırıldı.",
+                "segment_seq": 99,  # ignored by /analyze
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_partial"] is False
+    assert body["version"] == 0
+    # /analyze does not emit the live headers
+    assert "X-Analysis-Is-Partial" not in resp.headers
+    assert "X-Analysis-Version" not in resp.headers
+
+
+def test_analyze_live_empty_transcript_422() -> None:
+    # Same validation as /analyze — empty transcript is a client contract
+    # violation regardless of live/final variant.
+    with TestClient(app) as client:
+        resp = client.post("/analyze/live", json={"transcript": ""})
+    assert resp.status_code == 422
+
+
+def test_analyze_live_too_large_413(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Transcript size limit is a shared invariant with /analyze; live must
+    # NOT sneak an oversized payload past the cap by using the live path.
+    monkeypatch.setenv("MAI_MAX_TRANSCRIPT_CHARS", "10")
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze/live",
+            json={"transcript": "x" * 50, "segment_seq": 1},
+        )
+    assert resp.status_code == 413
+
+
+def test_analyze_live_redacts_pii_same_as_analyze() -> None:
+    # KVKK invariant: the redaction guard runs on live just like final.
+    # A live call MUST NOT leak PII in the response payload because "it's
+    # only partial" — the delivery path may still fan out to viewers.
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze/live",
+            json={
+                "transcript": "Ali ali@example.com adresinden gönderecek. Karar verildi.",
+                "segment_seq": 5,
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["redaction_count"] >= 1
+    blob = body["summary"] + " ".join(a["text"] for a in body["action_items"])
+    assert "ali@example.com" not in blob

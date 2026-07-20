@@ -195,3 +195,155 @@ async def analyze_endpoint(
     mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.SUCCESS.value).inc()
 
     return result
+
+
+# Faz 24 live analysis endpoint (Zeynep 2026-07-20 kapsam kararı):
+# `/analyze/live` reuses the same analyzer pipeline, redaction guard, and
+# durable delivery as `/analyze` — the only differences are:
+#   1. The response carries `is_partial=True` so downstream consumers
+#      (meeting-service, desktop panel) know a later delivery will supersede.
+#   2. `version` is derived from `body.segment_seq` (defaults to 0 if the
+#      caller did not thread the recorder's sequence).
+# Error map, redaction, LLM stub behaviour, delivery back-pressure and metrics
+# are identical to `/analyze`; a live run and a final run of the same content
+# produce byte-identical `AnalyzeResponse` payloads apart from the two
+# metadata fields above.
+#
+# Sentinel: the final `/analyze` call at recording end sets `version` from a
+# distinct sentinel value that always compares greater than any live segment
+# sequence, so a delayed live delivery cannot displace the final. This scaffold
+# reserves the sentinel here — the caller/meeting-service enforcement lands in
+# the follow-up ingestion PR.
+FINAL_ANALYSIS_VERSION_SENTINEL = 2**31 - 1
+
+
+@router.post(
+    "/analyze/live",
+    response_model=AnalyzeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Incremental analysis over an in-progress transcript",
+)
+async def analyze_live_endpoint(
+    request: Request,
+    response: Response,
+    body: AnalyzeRequest,
+    settings: Settings = Depends(get_settings),  # noqa: B008
+) -> AnalyzeResponse:
+    """Live variant of /analyze — reuses the analyzer + delivery, marks is_partial=True.
+
+    Error map matches `/analyze`: 400 empty, 413 too large, 501 LLM stub,
+    502 backend down, 504 timeout, 500 I/O, 422 redaction/contract, 503 queue.
+    """
+    transcript = body.transcript
+    if len(transcript) > settings.max_transcript_chars:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Transcript {len(transcript)} chars > limit {settings.max_transcript_chars}",
+        )
+
+    service: MeetingAnalysisService = get_service(settings)
+    corr_id = _correlation_id(request)
+    live_version = body.segment_seq if body.segment_seq is not None else 0
+    log_extra = {
+        "correlation_id": corr_id,
+        "meeting_id": body.meeting_id or "",
+        "session_id": body.session_id or "",
+        "transcript_chars": len(transcript),
+        "backend": settings.backend,
+        "is_partial": True,
+        "version": live_version,
+    }
+
+    segments = [s.model_dump() for s in body.segments] if body.segments else None
+    try:
+        result = await asyncio.wait_for(
+            run_in_threadpool(service.analyze, transcript, segments),
+            timeout=settings.request_timeout,
+        )
+    except (asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041
+        logger.warning("Analyze/live timeout", extra=log_extra)
+        mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.TIMEOUT.value).inc()
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Analyze/live exceeded {settings.request_timeout}s timeout",
+        ) from exc
+    except RedactionError as exc:
+        logger.warning(
+            "Analyze/live blocked: residual PII after redaction (KVKK fail-closed)",
+            extra={**log_extra, "err_class": type(exc).__name__},
+        )
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.REDACTION_BLOCKED.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Redaction could not guarantee PII removal; blocked ({exc})",
+        ) from exc
+    except NotImplementedError as exc:
+        logger.warning("Analyze/live backend not implemented", extra=log_extra)
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.NOT_IMPLEMENTED.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Selected LLM backend is not wired yet",
+        ) from exc
+    except BackendUnavailableError as exc:
+        logger.error(
+            "Analyze/live backend unavailable",
+            extra={**log_extra, "err_class": type(exc).__name__},
+        )
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.BACKEND_ERROR.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    except OSError as exc:
+        logger.error(
+            "Analyze/live I/O failure",
+            extra={**log_extra, "err_class": type(exc).__name__},
+        )
+        mai_analyze_total.labels(
+            backend=settings.backend, result=AnalyzeResult.IO_ERROR.value
+        ).inc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"I/O failure ({type(exc).__name__})",
+        ) from exc
+
+    # Faz 24 live delivery: mark is_partial and thread version so the ingestion
+    # side (meeting-service, next PR) can order/supersede incremental writes.
+    result.is_partial = True
+    result.version = live_version
+
+    logger.info(
+        "Analyze/live success",
+        extra={
+            **log_extra,
+            "elapsed_ms": result.elapsed_ms,
+            "redaction_count": result.redaction_count,
+            "decisions": len(result.decisions),
+            "action_items": len(result.action_items),
+        },
+    )
+    mai_analyze_duration_seconds.labels(backend=settings.backend).observe(
+        result.elapsed_ms / 1000.0
+    )
+    mai_transcript_chars_total.labels(backend=settings.backend).inc(len(transcript))
+    if result.redaction_count:
+        mai_pii_redaction_total.labels(backend=settings.backend).inc(result.redaction_count)
+
+    # The durable-delivery hop is intentionally skipped for /analyze/live in
+    # this scaffold PR. Live partial deliveries route through a partial-aware
+    # ingestion path (`is_partial=True`, `version=N`) that the meeting-service
+    # side does not yet accept; wiring it now would let live payloads land in
+    # the final-only column and silently overwrite an authoritative final
+    # result. The follow-up ingestion PR extends AnalysisDeliveryRuntime and
+    # meeting-service to accept partials with a version-monotonic guard.
+    response.headers["X-Analysis-Is-Partial"] = "true"
+    response.headers["X-Analysis-Version"] = str(live_version)
+    mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.SUCCESS.value).inc()
+
+    return result
