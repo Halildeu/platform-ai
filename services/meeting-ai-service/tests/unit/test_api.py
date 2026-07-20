@@ -288,3 +288,145 @@ def test_analyze_live_redacts_pii_same_as_analyze() -> None:
     assert body["redaction_count"] >= 1
     blob = body["summary"] + " ".join(a["text"] for a in body["action_items"])
     assert "ali@example.com" not in blob
+
+
+# ── Faz 24 live-stream SSE relay (İ2) ──────────────────────────────────────
+#
+# Behavioural coverage split:
+#   - LiveStreamHub itself (pub/sub, drop-oldest, isolation) is exercised in
+#     tests/unit/test_live_stream_hub.py against the class directly.
+#   - Here we prove the WIRING: /analyze/live publishes into whatever hub is
+#     mounted on `app.state.live_stream_hub`, using a stub that captures
+#     calls. This avoids driving a real SSE stream through TestClient (which
+#     deadlocks on a keep-alive endpoint because sync `iter_bytes` does not
+#     honour a read timeout the way an async client would).
+#   - End-to-end SSE-over-HTTP is validated by Faz D acceptance smoke
+#     (browser MCP + curl chain) rather than a TestClient integration test —
+#     the sync client cannot cleanly interrupt an SSE stream mid-flight.
+
+
+def test_analyze_live_publishes_result_to_hub_on_state() -> None:
+    """`/analyze/live` must call `app.state.live_stream_hub.publish` for a
+    request that carries a `meeting_id`, and pass the response payload.
+
+    A no-op stub replaces the real hub for the duration of the test so we
+    exercise the wiring without booting the SSE reader.
+    """
+
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    class _StubHub:
+        async def publish(self, meeting_id: str, event: dict[str, object]) -> tuple[int, int]:
+            captured.append((meeting_id, event))
+            return (0, 0)
+
+    meeting_id = "66666666-6666-4666-8666-666666666666"
+    with TestClient(app) as client:
+        # Swap the real hub for a stub AFTER the lifespan install so we do
+        # not race the app startup.
+        app.state.live_stream_hub = _StubHub()
+        try:
+            resp = client.post(
+                "/analyze/live",
+                json={
+                    "transcript": "Toplantı başladı. Bütçe kararlaştırıldı.",
+                    "meeting_id": meeting_id,
+                    "segment_seq": 11,
+                },
+            )
+        finally:
+            # Do not leak the stub to sibling tests in this session.
+            app.state.live_stream_hub = None
+
+    assert resp.status_code == 200
+    assert len(captured) == 1
+    got_meeting, got_event = captured[0]
+    assert got_meeting == meeting_id
+    # The payload MUST be the AnalyzeResponse dict (not the request) — check
+    # a few pinned fields that only the response carries.
+    assert got_event.get("is_partial") is True
+    assert got_event.get("version") == 11
+    assert "summary" in got_event
+    assert "decisions" in got_event
+
+
+def test_analyze_live_without_meeting_id_does_not_publish() -> None:
+    """No `meeting_id` on the request → no `publish` call.
+
+    A live analysis with no meeting_id has no channel to fan out to, so the
+    endpoint MUST NOT invoke publish with an empty string (which would leak
+    events across meetings via the shared bucket).
+    """
+
+    captured: list[str] = []
+
+    class _StubHub:
+        async def publish(self, meeting_id: str, event: dict[str, object]) -> tuple[int, int]:
+            captured.append(meeting_id)
+            return (0, 0)
+
+    with TestClient(app) as client:
+        app.state.live_stream_hub = _StubHub()
+        try:
+            resp = client.post(
+                "/analyze/live",
+                json={
+                    "transcript": "Toplantı başladı.",
+                    "segment_seq": 3,
+                    # no meeting_id
+                },
+            )
+        finally:
+            app.state.live_stream_hub = None
+
+    assert resp.status_code == 200
+    assert captured == [], "publish called with a meeting-id-less request"
+
+
+def test_analyze_live_publish_error_does_not_break_the_request() -> None:
+    """If the hub raises during publish, `/analyze/live` still returns 200.
+
+    Live relay is best-effort — a broken relay MUST NOT surface as a 5xx to
+    the analyzer caller (audio-gateway / recorder). We rely on the drop
+    metric to alert instead.
+    """
+
+    class _BrokenHub:
+        async def publish(self, meeting_id: str, event: dict[str, object]) -> tuple[int, int]:
+            raise RuntimeError("simulated hub failure")
+
+    with TestClient(app) as client:
+        app.state.live_stream_hub = _BrokenHub()
+        try:
+            resp = client.post(
+                "/analyze/live",
+                json={
+                    "transcript": "Toplantı başladı.",
+                    "meeting_id": "77777777-7777-4777-8777-777777777777",
+                    "segment_seq": 1,
+                },
+            )
+        finally:
+            app.state.live_stream_hub = None
+
+    assert resp.status_code == 200, resp.text
+
+
+def test_live_stream_endpoint_503_when_hub_missing() -> None:
+    """If the SSE endpoint is hit before the hub is installed (or after it is
+    torn down for a test), it must fail-fast with 503 rather than serving an
+    empty stream forever.
+    """
+
+    with TestClient(app) as client:
+        original = getattr(app.state, "live_stream_hub", None)
+        app.state.live_stream_hub = None
+        try:
+            resp = client.get(
+                "/analyze/live/stream/88888888-8888-4888-8888-888888888888",
+                timeout=2.0,
+            )
+        finally:
+            app.state.live_stream_hub = original
+
+    assert resp.status_code == 503

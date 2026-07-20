@@ -79,6 +79,30 @@ mai_ingestion_oldest_pending_age_seconds = Gauge(
     "Age of the oldest pending or leased analysis-result row",
 )
 
+# ── Faz 24 live-stream SSE relay (Zeynep 2026-07-20 kapsam) ────────────
+# Meeting-id label deliberately absent — cardinality is unbounded (UUIDs) and
+# a per-meeting breakdown belongs in traces, not metrics. Aggregate signals
+# are enough for capacity + drop alerting.
+mai_analyze_live_stream_subscribers = Gauge(
+    "mai_analyze_live_stream_subscribers",
+    "Currently connected SSE subscribers to /analyze/live/stream (all meetings)",
+)
+
+mai_analyze_live_stream_delivered_total = Counter(
+    "mai_analyze_live_stream_delivered_total",
+    "Live analysis events successfully enqueued to a subscriber",
+)
+
+mai_analyze_live_stream_dropped_total = Counter(
+    "mai_analyze_live_stream_dropped_total",
+    "Live analysis events dropped due to a full subscriber queue (drop-oldest)",
+)
+
+mai_analyze_live_stream_published_total = Counter(
+    "mai_analyze_live_stream_published_total",
+    "Publish attempts to the live-stream hub (0-subscriber calls counted here too)",
+)
+
 
 @router.get("/metrics", summary="Prometheus metrics endpoint")
 def metrics() -> Response:

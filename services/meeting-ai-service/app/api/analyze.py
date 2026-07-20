@@ -15,6 +15,10 @@ from starlette.concurrency import run_in_threadpool
 from app.api.metrics import (
     AnalyzeResult,
     mai_analyze_duration_seconds,
+    mai_analyze_live_stream_delivered_total,
+    mai_analyze_live_stream_dropped_total,
+    mai_analyze_live_stream_published_total,
+    mai_analyze_live_stream_subscribers,
     mai_analyze_total,
     mai_pii_redaction_total,
     mai_transcript_chars_total,
@@ -27,6 +31,7 @@ from app.services.analysis_delivery import (
 )
 from app.services.analyze import BackendUnavailableError, MeetingAnalysisService, get_service
 from app.services.durable_outbox import OutboxError, OutboxFullError
+from app.services.live_stream_hub import LiveStreamHub
 from app.services.redact import RedactionError
 
 router = APIRouter()
@@ -346,4 +351,125 @@ async def analyze_live_endpoint(
     response.headers["X-Analysis-Version"] = str(live_version)
     mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.SUCCESS.value).inc()
 
+    # Faz 24 live-stream SSE relay: publish this result to every subscriber
+    # of the meeting's SSE stream. Non-blocking, drop-oldest on subscriber
+    # backpressure; a missing meeting_id or zero subscribers is a no-op.
+    # Errors here are counted (`dropped_total`) and swallowed — the analyze
+    # HTTP path MUST succeed regardless of relay state.
+    hub = _get_hub(request)
+    if hub is not None and body.meeting_id:
+        try:
+            delivered, dropped = await hub.publish(body.meeting_id, result.model_dump())
+            mai_analyze_live_stream_published_total.inc()
+            if delivered:
+                mai_analyze_live_stream_delivered_total.inc(delivered)
+            if dropped:
+                mai_analyze_live_stream_dropped_total.inc(dropped)
+        except Exception:  # noqa: BLE001 — defensive: relay MUST NOT fail the request
+            logger.warning("Live-stream publish failed; swallowing", extra=log_extra)
+            mai_analyze_live_stream_dropped_total.inc()
+
     return result
+
+
+# Faz 24 live-stream SSE relay endpoint (Zeynep 2026-07-20 kapsam):
+# Clients (desktop panel today; mobile later) subscribe to per-meeting live
+# analysis events over an HTTP Server-Sent Events stream. Each `/analyze/live`
+# call above fans out its result to every subscriber of the meeting_id.
+#
+# Standards-compliant SSE:
+#   - `Content-Type: text/event-stream`
+#   - `Cache-Control: no-cache`, `X-Accel-Buffering: no` (bypass nginx buffer)
+#   - `event: analysis` frames carry the AnalyzeResponse JSON
+#   - `event: ping` frames every `live_stream_heartbeat_sec` keep the
+#     connection warm through proxies and let clients notice a peer gone
+#     (a stalled connection stops receiving pings)
+#   - The initial `: subscribed <n>` comment is a "hello" that some clients
+#     use to confirm the connection is established.
+#
+# Client contract:
+#   GET /analyze/live/stream/{meeting_id}
+#     -> 200 text/event-stream (indefinite)
+#   Read `event: analysis` frames, parse `data:` JSON as AnalyzeResponse.
+#   `is_partial=True` + `version=N` — order by version, keep the highest.
+#
+# The endpoint intentionally has NO transcript request/response body — it is
+# a subscribe-only channel. Auth (when we wire it) will be the same JWT
+# middleware guarding the analyze endpoints.
+
+
+def _get_hub(request: Request) -> LiveStreamHub | None:
+    return getattr(request.app.state, "live_stream_hub", None)
+
+
+@router.get(
+    "/analyze/live/stream/{meeting_id}",
+    summary="Subscribe to per-meeting live analysis SSE stream",
+    response_class=Response,  # documented as Response; the implementation streams
+    responses={
+        200: {"content": {"text/event-stream": {}}},
+        503: {"description": "Live-stream hub not initialised"},
+    },
+)
+async def analyze_live_stream_endpoint(
+    request: Request,
+    meeting_id: str,
+    settings: Settings = Depends(get_settings),  # noqa: B008
+) -> Response:
+    """SSE subscribe. See module doc for the frame protocol."""
+    from starlette.responses import (
+        StreamingResponse,  # local import: avoid top-level for test isolation
+    )
+
+    hub = _get_hub(request)
+    if hub is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="live-stream hub not initialised",
+        )
+
+    heartbeat = float(settings.live_stream_heartbeat_sec)
+    corr_id = _correlation_id(request)
+
+    async def event_stream() -> asyncio.AsyncIterator[bytes]:  # type: ignore[name-defined]
+        import json
+
+        sub = await hub.subscribe(meeting_id)
+        mai_analyze_live_stream_subscribers.inc()
+        logger.info(
+            "Live-stream subscribed",
+            extra={"correlation_id": corr_id, "meeting_id": meeting_id},
+        )
+        try:
+            # SSE comment (starts with `:`) — clients ignore it but proxies see traffic.
+            initial = await hub.subscriber_count(meeting_id)
+            yield f": subscribed {initial}\n\n".encode()
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(sub.queue.get(), timeout=heartbeat)
+                    payload = json.dumps(event, default=str)
+                    yield f"event: analysis\ndata: {payload}\n\n".encode()
+                except TimeoutError:
+                    yield b"event: ping\ndata: {}\n\n"
+        except asyncio.CancelledError:
+            # Client dropped mid-stream; normal path.
+            raise
+        finally:
+            await hub.unsubscribe(meeting_id, sub)
+            mai_analyze_live_stream_subscribers.dec()
+            logger.info(
+                "Live-stream unsubscribed",
+                extra={"correlation_id": corr_id, "meeting_id": meeting_id},
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
