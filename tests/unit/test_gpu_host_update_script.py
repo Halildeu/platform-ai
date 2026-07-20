@@ -169,12 +169,12 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("faz24.transcriptReadyPermitConsumption.v1", script)
         self.assertIn("faz24.transcriptReadyActivationReceipt.v3", script)
         self.assertIn(
-            'Enabled ready-consumer provisioning requires '
-            'TranscriptServiceClientSecret.',
+            'transcript-service delivery capability OAuth client secret',
             script,
         )
         self.assertIn(
-            'if (-not [string]::IsNullOrWhiteSpace($transcriptSecretBlob))',
+            '$readyConfig["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] = '
+            '$transcriptSecretBlob',
             script,
         )
         self.assertIn("SkipReadyArtifactExistence", script)

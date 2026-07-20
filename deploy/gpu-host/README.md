@@ -39,10 +39,22 @@ shell history'ye veya repoya yazilmaz; script `SecureString` prompt kullanir.
 
 ```powershell
 cd C:\platform-ai
+$transcriptSecret = Read-Host `
+  "transcript-service delivery capability OAuth secret" -AsSecureString
 .\deploy\gpu-host\configure-meeting-ai.ps1 `
   -MeetingServiceBaseUrl "https://<internal-meeting-service-origin>" `
-  -MeetingServiceTokenUrl "https://<internal-auth-service-origin>/oauth2/token"
+  -MeetingServiceTokenUrl "https://<internal-auth-service-origin>/oauth2/token" `
+  -TranscriptServiceBaseUrl "https://<internal-transcript-service-origin>" `
+  -TranscriptServiceCapabilityPathTemplate '/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability' `
+  -TranscriptServiceTokenUrl "https://<internal-auth-service-origin>/oauth2/token" `
+  -TranscriptServiceClientSecret $transcriptSecret
 ```
+
+Ready consumer kapali olsa da durable analysis-result teslimi her POST icin exact
+meeting/session/finalization tuple'ina bagli tek-kullanimlik capability alir. Bu nedenle
+transcript-service capability endpoint'i ve ayri OAuth credential her ingestion configinde
+zorunludur. Rollback yalniz Redis consumer, canonical transcript read path'i ve aktivasyon
+permit baglarini kaldirir; result-delivery capability credential'ini korur.
 
 Kalici uretim siniri icin ayni komut mTLS malzemesini operator tarafindan dosya
 yolu ile alir; private key degeri komut satirina yazilmaz:

@@ -512,6 +512,22 @@ function Assert-MeetingAiConfigValues {
     [void](Assert-MeetingAiRuntimePath -Path $Values["MAI_INGESTION_STORE_PATH"] `
         -Purpose "Analysis delivery store")
 
+    $deliveryCapabilityRequired = @(
+        "MAI_TRANSCRIPT_SERVICE_BASE_URL",
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+        "MAI_TRANSCRIPT_SERVICE_TOKEN_URL",
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_ID",
+        "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI",
+        "MAI_TRANSCRIPT_SERVICE_AUDIENCE",
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE"
+    )
+    foreach ($name in $deliveryCapabilityRequired) {
+        if (-not $Values.ContainsKey($name) -or
+            [string]::IsNullOrWhiteSpace($Values[$name])) {
+            throw "Durable delivery runtime config is missing required key: $name."
+        }
+    }
+
     $readyEnabled = "false"
     if ($Values.ContainsKey("MAI_READY_CONSUMER_ENABLED")) {
         $readyEnabled = $Values["MAI_READY_CONSUMER_ENABLED"].ToLowerInvariant()
@@ -526,15 +542,8 @@ function Assert-MeetingAiConfigValues {
         "MAI_READY_REDIS_STREAM",
         "MAI_READY_REDIS_GROUP",
         "MAI_READY_PRODUCER_REPLAY_HORIZON_SEC",
-        "MAI_TRANSCRIPT_SERVICE_BASE_URL",
         "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE",
-        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
-        "MAI_TRANSCRIPT_SERVICE_TOKEN_URL",
-        "MAI_TRANSCRIPT_SERVICE_CLIENT_ID",
-        "MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI",
-        "MAI_TRANSCRIPT_SERVICE_AUDIENCE",
         "MAI_TRANSCRIPT_SERVICE_SCOPE",
-        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE",
         "MAI_READY_PRE_ENABLE_PERMIT_PATH",
         "MAI_READY_PERMIT_TRUST_ROOT_PATH",
         "MAI_READY_ACTIVATION_RECEIPT_PATH",

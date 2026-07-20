@@ -67,6 +67,18 @@ function Assert-ThrowsLike {
     throw "Expected an exception containing '$Expected'."
 }
 
+function Assert-PythonRuntimeConfigLoads {
+    Push-Location (Join-Path $repoRoot "services\meeting-ai-service")
+    try {
+        & $pythonExe -c "from app.core.config import Settings; Settings()"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Python runtime settings rejected the imported meeting-ai config."
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
 function Write-FreshPermit {
     param(
         [string]$Path = $permitSource,
@@ -121,6 +133,10 @@ try {
         -MeetingServiceTokenUrl "https://auth.internal.example/oauth2/token" `
         -ClientId "meeting-ai-ci" `
         -ClientSecret $secureCredential `
+        -TranscriptServiceBaseUrl "https://transcript.internal.example" `
+        -TranscriptServiceCapabilityPathTemplate "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability" `
+        -TranscriptServiceTokenUrl "https://auth.internal.example/oauth2/token" `
+        -TranscriptServiceClientSecret $secureTranscriptCredential `
         -StorePath $storePath `
         -ConfigPath $configPath `
         -Confirm:$false
@@ -139,6 +155,8 @@ try {
         "Plain client credential key must not be stored."
     Assert-True ($configText.Contains("MAI_READY_CONSUMER_ENABLED=false")) `
         "Ready consumer must be explicitly default-off."
+    Assert-True ($configText.Contains("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI=")) `
+        "Default-off durable delivery capability credential is missing."
 
     $loaded = Import-MeetingAiRuntimeEnvironment -Path $configPath
     Assert-True $loaded "Runtime config import must succeed."
@@ -146,6 +164,9 @@ try {
         "DPAPI client credential round trip failed."
     Assert-True ($env:MAI_MEETING_SERVICE_CLIENT_ID -eq "meeting-ai-ci") `
         "Non-secret runtime value import failed."
+    Assert-True ($env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET -eq $plainTranscriptCredential) `
+        "Default-off delivery capability credential round trip failed."
+    Assert-PythonRuntimeConfigLoads
     Assert-True ([string]::IsNullOrWhiteSpace(
         $env:MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI
     )) "DPAPI blob must not be exported to the child environment."
@@ -727,6 +748,7 @@ try {
         "Ready Redis credential must be cleared from process memory on rollback."
     Assert-True ($env:MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET -eq $plainTranscriptCredential) `
         "Rollback must retain the delivery-only transcript capability credential."
+    Assert-PythonRuntimeConfigLoads
     Assert-True ([string]::IsNullOrWhiteSpace(
         $env:MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE
     )) "Canonical transcript read path must be cleared on rollback."
@@ -768,30 +790,6 @@ try {
     $beforeCount = @($beforeKeyring.PSObject.Properties).Count
     $beforeLookupValue = [string]$beforeKeyring.PSObject.Properties[$beforeLookup].Value
 
-    & $configureScript `
-        -RotateEncryptionKey `
-        -StorePath $storePath `
-        -ConfigPath $configPath `
-        -Confirm:$false
-    $rotatedValues = Read-MeetingAiConfigFile -Path $configPath
-    $rotatedJson = Unprotect-MeetingAiSecret `
-        -ProtectedBase64 $rotatedValues["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
-        -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
-    $rotatedCount = @(($rotatedJson | ConvertFrom-Json).PSObject.Properties).Count
-    Assert-True ($rotatedCount -eq ($beforeCount + 1)) `
-        "Rotation must append exactly one key."
-    Assert-True ($rotatedValues["MAI_INGESTION_ACTIVE_KEY_ID"] -ne $beforeActive) `
-        "Rotation must select a new active key."
-    Assert-True ($rotatedValues["MAI_INGESTION_LOOKUP_KEY_ID"] -eq $beforeLookup) `
-        "Payload DEK rotation must preserve the blind-index key id."
-    $rotatedKeyring = $rotatedJson | ConvertFrom-Json
-    Assert-True (
-        [string]$rotatedKeyring.PSObject.Properties[$beforeLookup].Value -eq $beforeLookupValue
-    ) "Payload DEK rotation must preserve the blind-index key material."
-    Assert-True (Test-Path -LiteralPath "$configPath.bak") `
-        "Atomic rotation backup is missing."
-    Assert-MeetingAiAcl -Path "$configPath.bak"
-
     $keyringProbe = Join-Path $PSScriptRoot "exercise-meeting-ai-keyring.py"
     $keyringMaterialPath = Join-Path $runtimeRoot "meeting-ai-keyring-probe.json"
     function Write-KeyringProbeMaterial {
@@ -816,6 +814,31 @@ try {
     & $pythonExe $keyringProbe seed `
         --store $storePath --keyring $keyringMaterialPath --expected-active $beforeActive
     if ($LASTEXITCODE -ne 0) { throw "Initial retained-row keyring probe failed." }
+
+    & $configureScript `
+        -RotateEncryptionKey `
+        -StorePath $storePath `
+        -ConfigPath $configPath `
+        -Confirm:$false
+    $rotatedValues = Read-MeetingAiConfigFile -Path $configPath
+    $rotatedJson = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $rotatedValues["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] `
+        -KeyName "MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"
+    $rotatedCount = @(($rotatedJson | ConvertFrom-Json).PSObject.Properties).Count
+    Assert-True ($rotatedCount -eq ($beforeCount + 1)) `
+        "Rotation must append exactly one key."
+    Assert-True ($rotatedValues["MAI_INGESTION_ACTIVE_KEY_ID"] -ne $beforeActive) `
+        "Rotation must select a new active key."
+    Assert-True ($rotatedValues["MAI_INGESTION_LOOKUP_KEY_ID"] -eq $beforeLookup) `
+        "Payload DEK rotation must preserve the blind-index key id."
+    $rotatedKeyring = $rotatedJson | ConvertFrom-Json
+    Assert-True (
+        [string]$rotatedKeyring.PSObject.Properties[$beforeLookup].Value -eq $beforeLookupValue
+    ) "Payload DEK rotation must preserve the blind-index key material."
+    Assert-True (Test-Path -LiteralPath "$configPath.bak") `
+        "Atomic rotation backup is missing."
+    Assert-MeetingAiAcl -Path "$configPath.bak"
+
     Write-KeyringProbeMaterial -Values $rotatedValues
     & $pythonExe $keyringProbe verify `
         --store $storePath --keyring $keyringMaterialPath `
@@ -844,6 +867,85 @@ try {
         --store $storePath --keyring $keyringMaterialPath --expected-active $beforeActive
     if ($LASTEXITCODE -ne 0) { throw "Restored retained-row keyring probe failed." }
     Remove-Item -LiteralPath $keyringMaterialPath -Force
+
+    function Copy-ConfigValues {
+        param($Values)
+
+        $copy = @{}
+        foreach ($name in $Values.Keys) { $copy[$name] = $Values[$name] }
+        return $copy
+    }
+
+    function Write-RestoreConflictFixture {
+        param(
+            [Parameter(Mandatory = $true)][string]$Path,
+            [Parameter(Mandatory = $true)]$CurrentValues,
+            [Parameter(Mandatory = $true)]$BackupValues
+        )
+
+        Write-MeetingAiSecretFileAtomic `
+            -Path $Path `
+            -Content (ConvertTo-MeetingAiConfigContent -Values $CurrentValues)
+        Write-MeetingAiSecretFileAtomic `
+            -Path "$Path.bak" `
+            -Content (ConvertTo-MeetingAiConfigContent -Values $BackupValues)
+    }
+
+    $lookupConflictPath = Join-Path $runtimeRoot "lookup-conflict.env"
+    $lookupConflictCurrent = Copy-ConfigValues -Values $restoredValues
+    $lookupConflictBackup = Copy-ConfigValues -Values $restoredValues
+    $lookupConflictBackup["MAI_INGESTION_LOOKUP_KEY_ID"] = $rotatedActive
+    Write-RestoreConflictFixture `
+        -Path $lookupConflictPath `
+        -CurrentValues $lookupConflictCurrent `
+        -BackupValues $lookupConflictBackup
+    Assert-ThrowsLike {
+        & $configureScript `
+            -RestoreBackup `
+            -StorePath $storePath `
+            -ConfigPath $lookupConflictPath `
+            -Confirm:$false
+    } "cannot cross an unversioned blind-index key change"
+
+    $materialConflictPath = Join-Path $runtimeRoot "material-conflict.env"
+    $materialConflictCurrent = Copy-ConfigValues -Values $restoredValues
+    $materialConflictBackup = Copy-ConfigValues -Values $restoredValues
+    $materialConflictKeyring = $restoredJson | ConvertFrom-Json
+    $differentKeyBytes = New-Object byte[] 32
+    for ($index = 0; $index -lt $differentKeyBytes.Length; $index++) {
+        $differentKeyBytes[$index] = 165
+    }
+    try {
+        $materialConflictKeyring.PSObject.Properties[$rotatedActive].Value = `
+            [Convert]::ToBase64String($differentKeyBytes)
+        $materialConflictBackup["MAI_INGESTION_ENCRYPTION_KEYS_JSON_DPAPI"] = `
+            Protect-MeetingAiSecret -PlainText (
+                $materialConflictKeyring | ConvertTo-Json -Compress
+            )
+    } finally {
+        [Array]::Clear($differentKeyBytes, 0, $differentKeyBytes.Length)
+    }
+    Write-RestoreConflictFixture `
+        -Path $materialConflictPath `
+        -CurrentValues $materialConflictCurrent `
+        -BackupValues $materialConflictBackup
+    Assert-ThrowsLike {
+        & $configureScript `
+            -RestoreBackup `
+            -StorePath $storePath `
+            -ConfigPath $materialConflictPath `
+            -Confirm:$false
+    } "conflicting material for key id"
+    foreach ($path in @(
+            $lookupConflictPath,
+            "$lookupConflictPath.bak",
+            $materialConflictPath,
+            "$materialConflictPath.bak"
+        )) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
 
     $acl = Get-Acl -LiteralPath $configPath
     $users = New-Object Security.Principal.SecurityIdentifier("S-1-5-32-545")

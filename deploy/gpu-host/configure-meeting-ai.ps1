@@ -652,27 +652,31 @@ try {
     } elseif ($null -ne $existing -and
         $existing.ContainsKey("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI")) {
         $existing["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"]
-    } elseif ($effectiveReadyEnabled -eq "false") {
-        ""
     } else {
-        throw "Enabled ready-consumer provisioning requires TranscriptServiceClientSecret."
+        $prompted = Read-Host `
+            "transcript-service delivery capability OAuth client secret" -AsSecureString
+        try {
+            Protect-SuppliedSecureValue -Value $prompted
+        } finally {
+            $prompted.Dispose()
+        }
     }
     $readyConfig = [ordered]@{
         "MAI_READY_CONSUMER_ENABLED" = $effectiveReadyEnabled
     }
     $optionalTranscriptConfig = [ordered]@{
         "MAI_TRANSCRIPT_SERVICE_BASE_URL" = (
-            Get-SuppliedOrExistingValue -Existing $existing `
+            Get-ExistingValue -Existing $existing `
                 -Name "MAI_TRANSCRIPT_SERVICE_BASE_URL" `
                 -Supplied $TranscriptServiceBaseUrl
         )
         "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" = (
-            Get-SuppliedOrExistingValue -Existing $existing `
+            Get-ExistingValue -Existing $existing `
                 -Name "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE" `
                 -Supplied $TranscriptServiceCapabilityPathTemplate
         )
         "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" = (
-            Get-SuppliedOrExistingValue -Existing $existing `
+            Get-ExistingValue -Existing $existing `
                 -Name "MAI_TRANSCRIPT_SERVICE_TOKEN_URL" `
                 -Supplied $TranscriptServiceTokenUrl
         )
@@ -685,14 +689,9 @@ try {
         )
     }
     foreach ($name in $optionalTranscriptConfig.Keys) {
-        if (-not [string]::IsNullOrWhiteSpace($optionalTranscriptConfig[$name])) {
-            $readyConfig[$name] = $optionalTranscriptConfig[$name]
-        }
+        $readyConfig[$name] = $optionalTranscriptConfig[$name]
     }
-    if (-not [string]::IsNullOrWhiteSpace($transcriptSecretBlob)) {
-        $readyConfig["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] = `
-            $transcriptSecretBlob
-    }
+    $readyConfig["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] = $transcriptSecretBlob
     if ($effectiveReadyEnabled -eq "true") {
         if ([string]::IsNullOrWhiteSpace($effectiveAppEnv)) {
             throw "Ready consumer provisioning requires RuntimeAppEnv."
