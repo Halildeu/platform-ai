@@ -219,9 +219,12 @@ function Get-RegisteredContract {
 
     $task = $Folder.GetTask($TaskName)
     $action = $task.Definition.Actions.Item(1)
+    # The fixture intentionally models the legacy bare powershell.exe action.
+    # Keep this exception scoped to migration readback; deployment validation
+    # continues to require the absolute trusted Windows PowerShell path.
     return Get-GpuHostTaskActionContract -TaskName $TaskName `
         -Execute ([string]$action.Path) -Arguments ([string]$action.Arguments) `
-        -WorkingDirectory ([string]$action.WorkingDirectory)
+        -WorkingDirectory ([string]$action.WorkingDirectory) -AllowBarePowerShell
 }
 
 function Set-RegisteredActionArguments {
