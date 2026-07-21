@@ -324,9 +324,20 @@ function Get-GpuHostTaskXmlContract {
             throw "principal-invalid"
         }
         $exec = $execs[0]
+        $commandNode = $exec.SelectSingleNode("t:Command", $namespace)
+        $argumentsNode = $exec.SelectSingleNode("t:Arguments", $namespace)
+        if ($null -eq $commandNode -or $null -eq $argumentsNode) {
+            throw "action-contract-invalid"
+        }
+        $workingDirectory = ""
+        $workingDirectoryNode = $exec.SelectSingleNode("t:WorkingDirectory", $namespace)
+        if ($null -ne $workingDirectoryNode) {
+            $workingDirectory = [string]$workingDirectoryNode.InnerText
+        }
         $actionContract = Get-GpuHostTaskActionContract -TaskName $TaskName `
-            -Execute ([string]$exec.Command) -Arguments ([string]$exec.Arguments) `
-            -WorkingDirectory ([string]$exec.WorkingDirectory)
+            -Execute ([string]$commandNode.InnerText) `
+            -Arguments ([string]$argumentsNode.InnerText) `
+            -WorkingDirectory $workingDirectory
         if (-not $actionContract.Valid) {
             throw "action-contract-invalid"
         }

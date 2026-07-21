@@ -150,6 +150,15 @@ $validTaskXml = Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
     -TaskXml $taskXml -SkipPythonPathValidation
 Assert-True $validTaskXml.Valid `
     ("Canonical single SYSTEM task action must pass: {0}" -f $validTaskXml.Reason)
+$workingDirectoryXml = $taskXml.Replace(
+    "</Exec>",
+    "<WorkingDirectory>C:\platform-ai</WorkingDirectory></Exec>"
+)
+$workingDirectoryAction = Get-GpuHostTaskXmlContract `
+    -TaskName "platform-ai-live-stt" -TaskXml $workingDirectoryXml `
+    -SkipPythonPathValidation
+Assert-True (-not $workingDirectoryAction.Valid) `
+    "A non-empty Scheduled Task working directory must fail closed."
 $multiActionXml = $taskXml.Replace(
     "</Actions>",
     "<Exec><Command>$escapedPowerShell</Command><Arguments>$escapedArguments</Arguments></Exec></Actions>"
