@@ -14,7 +14,7 @@ Telefon, masaüstü ve ileride Teams/Zoom kaynaklarından gelen ses akışını 
 
 üretir. Faz 24 Meeting Intelligence kapsamında konumlanır.
 
-**ERP/CRM-agnostic ürün kuralı**: Hiçbir ERP/CRM marka adı core servis kontratına, API/DTO'ya, model prompt'una, observability etiketine veya acceptance gate'e gömülmez. Pilot müşteri veya adapter örnekleri vendor-specific dokümanda kalır; ürün hedefi tüm ERP/CRM'lerle genel adapter kontratı üzerinden çalışmaktır.
+**ERP/CRM-agnostic ürün kuralı**: Hiçbir ERP/CRM marka adı, müşteri adı veya pilot adapter adı core servis kontratına, API/DTO'ya, model prompt'una, observability etiketine veya acceptance gate'e gömülmez. Pilot/customer isimleri yalnızca adapter, evidence veya deployment notu sınırında kalır; ürün hedefi tüm ERP/CRM'lerle genel adapter kontratı üzerinden çalışmaktır.
 
 ## Repo Konumu (Platform ekosistem haritası)
 

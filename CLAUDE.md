@@ -14,7 +14,7 @@ Repo eşleştirmesi: [README.md](./README.md) "Repo Konumu" tablosu.
 
 ## Ekosistem Reuse
 
-Bu repo **standalone değil** — Platform altyapısının doğal uzantısıdır. Pilot müşteri veya adapter örnekleri vendor-specific dokümanda kalır; core servis kontratı belirli ERP/CRM markasına bağlanmaz.
+Bu repo **standalone değil** — Platform altyapısının doğal uzantısıdır. Pilot/customer/adapter isimleri yalnızca adapter, evidence veya deployment notu sınırında kalır; core servis kontratı belirli ERP/CRM markasına bağlanmaz.
 
 - **Auth**: Keycloak SSO (`auth-service` realm) — JWT validation FastAPI middleware
 - **Routing**: api-gateway (Spring Cloud Gateway) — `/api/v1/ai/*` route
