@@ -140,3 +140,35 @@ def test_preload_can_be_disabled(monkeypatch) -> None:
         threading.Event().wait(0.2)
 
     assert calls == [], "STREAM_PRELOAD_MODELS=false must leave loading to the WS path"
+
+
+def test_preload_log_names_the_model_and_duration(monkeypatch, caplog) -> None:
+    """The rendered message must identify which model loaded, and how long.
+
+    The service log format renders only `%(message)s`, so anything passed via
+    `extra` is invisible to an operator tailing the log. With both models
+    emitting an identical line there was no way to tell whether one or both
+    had finished — during the Bulgu 3-F rollout that ambiguity cost a
+    diagnostic step.
+    """
+    import logging
+
+    calls: list[str] = []
+    _patch_factories(
+        monkeypatch, _RecordingService("live", calls), _RecordingService("final", calls)
+    )
+
+    app = _run_lifespan(monkeypatch, preload=True)
+    with caplog.at_level(logging.INFO, logger="app.main"), TestClient(app) as client:
+        assert client.get("/probe").status_code == 200
+        for _ in range(100):
+            if len(calls) == 2:
+                break
+            threading.Event().wait(0.05)
+        threading.Event().wait(0.2)
+
+    rendered = [r.getMessage() for r in caplog.records if "preloaded" in r.getMessage()]
+    assert len(rendered) == 2, f"expected one line per model, got {rendered}"
+    assert any("role=live" in m for m in rendered), rendered
+    assert any("role=final" in m for m in rendered), rendered
+    assert all("elapsed_sec=" in m for m in rendered), rendered

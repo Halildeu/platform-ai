@@ -101,8 +101,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     # A failed preload is not fatal: the WS path still calls
                     # ensure_model(), so behaviour degrades to the old lazy load
                     # rather than taking the service down.
+                    # Role and duration go in the message, not only in `extra`:
+                    # the configured format renders just `%(message)s`, so extras
+                    # are invisible in the log an operator actually reads.
                     logger.error(
-                        "streaming model preload failed",
+                        "streaming model preload failed role=%s error=%s elapsed_sec=%.1f",
+                        label,
+                        type(exc).__name__,
+                        time.monotonic() - started,
                         extra={
                             "correlation_id": "startup",
                             "model_role": label,
@@ -112,7 +118,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     )
                     continue
                 logger.info(
-                    "streaming model preloaded",
+                    "streaming model preloaded role=%s elapsed_sec=%.1f",
+                    label,
+                    time.monotonic() - started,
                     extra={
                         "correlation_id": "startup",
                         "model_role": label,
