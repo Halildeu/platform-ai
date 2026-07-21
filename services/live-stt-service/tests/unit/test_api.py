@@ -22,11 +22,11 @@ def test_health_loading_before_first_request(client) -> None:  # type: ignore[no
     assert body["device"] == "cpu"
 
 
-def test_ready_is_available_when_preload_is_intentionally_disabled(client) -> None:  # type: ignore[no-untyped-def]
+def test_ready_fails_closed_when_preload_is_disabled(client) -> None:  # type: ignore[no-untyped-def]
     r = client.get("/ready")
-    assert r.status_code == 200
+    assert r.status_code == 503
     assert r.json() == {
-        "status": "ready",
+        "status": "disabled",
         "streaming_preload_enabled": False,
         "roles": {"live": "disabled", "final": "disabled"},
         "attempts": {"live": 0, "final": 0},

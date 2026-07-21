@@ -86,8 +86,19 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         script = self._read_script("update.ps1")
 
         self.assertIn('Invoke-RestMethod "http://127.0.0.1:8200/ready"', script)
+        self.assertIn(
+            "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
+            script,
+        )
         self.assertIn('Set-DeploymentLedgerResult -Result "readiness-failed"', script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
+
+    def test_live_stt_production_launcher_reasserts_preload_after_local_overrides(self) -> None:
+        script = self._read_script("start-live-stt.ps1")
+
+        preload_line = '$env:STT_STREAM_PRELOAD_MODELS = "true"'
+        env_local_line = "$envLocal = Join-Path"
+        self.assertGreater(script.rindex(preload_line), script.index(env_local_line))
 
     def test_meeting_ai_launcher_uses_non_executable_dpapi_config(self) -> None:
         script = self._read_script("start-meeting-ai.ps1")

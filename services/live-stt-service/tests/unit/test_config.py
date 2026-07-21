@@ -172,12 +172,20 @@ def test_production_requires_content_addressed_local_model() -> None:
             model_revision="a" * 40,
             model_sha256="b" * 64,
         )
+    with pytest.raises(ValueError, match="stream_preload_models must be enabled"):
+        cfg.Settings(
+            environment="production",
+            model_revision="a" * 40,
+            model_sha256="b" * 64,
+            model_path="/models/faster-whisper-medium",
+        )
     settings = cfg.Settings(
         environment="production",
         model_name="Systran/faster-whisper-medium",
         model_revision="a" * 40,
         model_sha256="sha256:" + "b" * 64,
         model_path="/models/faster-whisper-medium",
+        stream_preload_models=True,
     )
     assert settings.model_revision == "a" * 40
 

@@ -173,7 +173,7 @@ def test_preload_can_be_disabled(monkeypatch) -> None:
     app = _run_lifespan(monkeypatch, preload=False)
     with TestClient(app) as client:
         assert client.get("/probe").status_code == 200
-        assert client.get("/ready").status_code == 200
+        assert client.get("/ready").status_code == 503
         threading.Event().wait(0.2)
 
     assert calls == [], "STREAM_PRELOAD_MODELS=false must leave loading to the WS path"

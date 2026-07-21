@@ -186,10 +186,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             },
         )
     yield
+    # Stop preload progression first. Consumer shutdown can take five seconds;
+    # without this signal the preload thread could begin the second GPU model
+    # while the service is already leaving its lifespan.
+    preload_state.request_stop()
     if consumer is not None and consumer_thread is not None:
         consumer.stop()
         consumer_thread.join(timeout=5)
-    preload_state.request_stop()
     from app.services.streaming_models import shutdown_streaming_services
 
     try:

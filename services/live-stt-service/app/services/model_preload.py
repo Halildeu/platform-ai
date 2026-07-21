@@ -18,7 +18,7 @@ class StreamingPreloadSnapshot:
 
     @property
     def ready(self) -> bool:
-        return self.status in {"disabled", "ready"}
+        return self.status == "ready"
 
 
 class StreamingPreloadState:

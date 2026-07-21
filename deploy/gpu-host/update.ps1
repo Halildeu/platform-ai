@@ -380,7 +380,7 @@ function Invoke-SchtasksTask {
 
 function Wait-LiveSttStreamReady {
   param(
-    [string]$Url = "ws://127.0.0.1:8200/ws/stream",
+    [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
     [int]$TimeoutSec = 240
   )
 
@@ -528,7 +528,7 @@ if (-not $NoRestart -and -not $restartFailed) {
   Write-Host "[update] live-stt streaming models ready" -ForegroundColor Green
 
   Write-Host "[update] verifying live-stt direct /ws/stream handshake..." -ForegroundColor Cyan
-  if (Wait-LiveSttStreamReady -Url "ws://127.0.0.1:8200/ws/stream" -TimeoutSec 240) {
+  if (Wait-LiveSttStreamReady -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1" -TimeoutSec 240) {
     Write-Host "[update] direct /ws/stream ready (preloaded live + final models)" -ForegroundColor Green
   } else {
     Set-DeploymentLedgerResult -Result "readiness-failed"
@@ -537,7 +537,7 @@ if (-not $NoRestart -and -not $restartFailed) {
   }
 }
 
-Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8200/ready ; :8300/health ; ws://127.0.0.1:8200/ws/stream ready" -ForegroundColor Cyan
+Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8200/ready ; :8300/health ; ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1 ready" -ForegroundColor Cyan
 if (-not $NoRestart) {
   Set-DeploymentLedgerResult -Result "tasks-restarted"
 }

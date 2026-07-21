@@ -196,6 +196,8 @@ class Settings(BaseSettings):
                 raise ValueError("model_sha256 is required in staging/production")
             if self.model_path is None:
                 raise ValueError("model_path is required in staging/production")
+        if self.environment == "production" and not self.stream_preload_models:
+            raise ValueError("stream_preload_models must be enabled in production")
         if self.min_speech_rms < self.silence_rms:
             raise ValueError("min_speech_rms must be >= silence_rms")
         if self.min_infer_sec > self.live_window_sec:

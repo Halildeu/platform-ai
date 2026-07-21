@@ -73,6 +73,7 @@ if (Test-Path $envLocal) {
 # "medium" nor the live-stt service version is a model version. Values are
 # public artifact metadata, not credentials.
 $env:STT_ENVIRONMENT = "production"
+$env:STT_STREAM_PRELOAD_MODELS = "true"
 $env:STT_MODEL_NAME = "Systran/faster-whisper-medium"
 $env:STT_MODEL_REVISION = "08e178d48790749d25932bbc082711ddcfdfbc4f"
 $env:STT_MODEL_SHA256 = "sha256:9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae"
