@@ -105,7 +105,8 @@ foreach ($t in $tasks) {
         $actionParams.CudaBin = $cudaBin
     }
     $arg = New-GpuHostTaskActionArguments @actionParams
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
+    $action = New-ScheduledTaskAction `
+        -Execute (Get-GpuHostWindowsPowerShellPath) -Argument $arg
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet `

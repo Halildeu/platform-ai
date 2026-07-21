@@ -153,7 +153,7 @@ class Settings(BaseSettings):
     stream_preload_models: bool = Field(default=False)
     stream_preload_max_attempts: int = Field(default=2, ge=1, le=5)
     stream_preload_retry_base_sec: float = Field(default=1.0, ge=0.1, le=30.0)
-    stream_preload_readiness_budget_sec: float = Field(default=780.0, ge=1.0, le=3600.0)
+    stream_preload_readiness_budget_sec: float = Field(default=960.0, ge=1.0, le=3600.0)
     stream_recovery_poll_sec: float = Field(default=1.0, ge=0.1, le=30.0)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.

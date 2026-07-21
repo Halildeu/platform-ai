@@ -28,8 +28,13 @@ class _RecordingService:
         self.healthy = True
         self.model_loaded = False
 
-    def ensure_model(self, *, deadline: float | None = None) -> None:
-        del deadline
+    def ensure_model(
+        self,
+        *,
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
+        del deadline, cleanup_deadline
         if self._blocker is not None:
             # Simulates a slow cold load so the test can assert startup did not
             # wait for it.
@@ -93,16 +98,24 @@ def test_both_models_are_loaded_at_startup(monkeypatch) -> None:
     )
 
 
-def test_both_startup_roles_share_one_absolute_deadline(monkeypatch) -> None:
-    deadlines: list[float] = []
+def test_each_startup_attempt_is_bounded_inside_one_global_deadline(monkeypatch) -> None:
+    import time
+
+    deadlines: list[tuple[float, float, float]] = []
 
     class _DeadlineRecorder:
         healthy = True
         model_loaded = False
 
-        def ensure_model(self, *, deadline: float | None = None) -> None:
+        def ensure_model(
+            self,
+            *,
+            deadline: float | None = None,
+            cleanup_deadline: float | None = None,
+        ) -> None:
             assert deadline is not None
-            deadlines.append(deadline)
+            assert cleanup_deadline is not None
+            deadlines.append((time.monotonic(), deadline, cleanup_deadline))
             self.model_loaded = True
 
     _patch_factories(monkeypatch, _DeadlineRecorder(), _DeadlineRecorder())
@@ -114,7 +127,11 @@ def test_both_startup_roles_share_one_absolute_deadline(monkeypatch) -> None:
             threading.Event().wait(0.02)
 
     assert len(deadlines) == 2
-    assert deadlines[0] == deadlines[1]
+    for observed_at, operation_deadline, cleanup_deadline in deadlines:
+        assert 0 < operation_deadline - observed_at <= 180.1
+        assert operation_deadline <= cleanup_deadline
+        assert cleanup_deadline - operation_deadline <= 4.1
+    assert deadlines[1][1] >= deadlines[0][1]
 
 
 def test_startup_does_not_block_on_a_slow_load(monkeypatch) -> None:
@@ -148,8 +165,10 @@ def test_preload_failure_keeps_liveness_but_fails_readiness(monkeypatch) -> None
         healthy = True
         model_loaded = False
 
-        def ensure_model(self, *, deadline: float | None = None) -> None:
-            del deadline
+        def ensure_model(
+            self, *, deadline: float | None = None, cleanup_deadline: float | None = None
+        ) -> None:
+            del deadline, cleanup_deadline
             raise RuntimeError("model weights unavailable")
 
     calls: list[str] = []
@@ -178,8 +197,10 @@ def test_preload_retries_are_bounded_and_can_recover(monkeypatch) -> None:
         healthy = True
         model_loaded = False
 
-        def ensure_model(self, *, deadline: float | None = None) -> None:
-            del deadline
+        def ensure_model(
+            self, *, deadline: float | None = None, cleanup_deadline: float | None = None
+        ) -> None:
+            del deadline, cleanup_deadline
             self.attempts += 1
             if self.attempts == 1:
                 raise RuntimeError("transient load failure")
@@ -310,8 +331,10 @@ def test_shutdown_cancels_before_starting_the_next_model(monkeypatch) -> None:
     release = threading.Event()
 
     class _BlockingLive:
-        def ensure_model(self, *, deadline: float | None = None) -> None:
-            del deadline
+        def ensure_model(
+            self, *, deadline: float | None = None, cleanup_deadline: float | None = None
+        ) -> None:
+            del deadline, cleanup_deadline
             entered.set()
             release.wait(timeout=5)
             calls.append("live")

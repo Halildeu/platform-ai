@@ -12,6 +12,30 @@ function New-GpuHostOwnerResult {
     }
 }
 
+function ConvertFrom-GpuHostNetstatLines {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [AllowEmptyCollection()][string[]]$Lines = @()
+    )
+
+    if ($ExitCode -ne 0) {
+        return New-GpuHostOwnerResult -Succeeded $false -Reason "query-failed"
+    }
+    $pattern = '^\s*TCP\s+\S+:' + $Port + '\s+\S+\s+LISTENING\s+(\d+)\s*$'
+    $candidate = '^\s*TCP\s+\S+:' + $Port + '\s+'
+    $owners = @()
+    foreach ($line in $Lines) {
+        if ([string]$line -match $pattern) {
+            $owners += [int]$Matches[1]
+        } elseif ([string]$line -match $candidate -and
+            [string]$line -match '(?i)LISTEN') {
+            return New-GpuHostOwnerResult -Succeeded $false -Reason "parse-failed"
+        }
+    }
+    return New-GpuHostOwnerResult -Succeeded $true -Owners $owners
+}
+
 function Get-GpuHostListeningPortOwnerSnapshot {
     param([Parameter(Mandatory = $true)][int]$Port)
 
@@ -19,21 +43,8 @@ function Get-GpuHostListeningPortOwnerSnapshot {
     try {
         $ErrorActionPreference = "Continue"
         $lines = @(& netstat.exe -ano -p TCP 2> $null)
-        if ($LASTEXITCODE -ne 0) {
-            return New-GpuHostOwnerResult -Succeeded $false -Reason "query-failed"
-        }
-        $pattern = '^\s*TCP\s+\S+:' + $Port + '\s+\S+\s+LISTENING\s+(\d+)\s*$'
-        $candidate = '^\s*TCP\s+\S+:' + $Port + '\s+'
-        $owners = @()
-        foreach ($line in $lines) {
-            if ([string]$line -match $pattern) {
-                $owners += [int]$Matches[1]
-            } elseif ([string]$line -match $candidate -and
-                [string]$line -match '(?i)LISTEN') {
-                return New-GpuHostOwnerResult -Succeeded $false -Reason "parse-failed"
-            }
-        }
-        return New-GpuHostOwnerResult -Succeeded $true -Owners $owners
+        return ConvertFrom-GpuHostNetstatLines -Port $Port `
+            -ExitCode $LASTEXITCODE -Lines $lines
     } catch {
         return New-GpuHostOwnerResult -Succeeded $false -Reason "query-exception"
     } finally {
@@ -125,24 +136,214 @@ function Wait-GpuHostNewPortOwner {
     return New-GpuHostOwnerResult -Succeeded $false -Reason "deadline-exhausted"
 }
 
-function Get-GpuHostTaskInstancePids {
+function New-GpuHostTaskInstanceResult {
+    param([bool]$Succeeded, [object[]]$Instances = @(), [string]$Reason = "")
+    return [pscustomobject]@{
+        Succeeded = $Succeeded
+        Instances = @($Instances)
+        Reason = $Reason
+    }
+}
+
+function Get-GpuHostTaskInstanceSnapshot {
     param(
-        [Parameter(Mandatory = $true)][string]$TaskName,
-        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
-        [Parameter(Mandatory = $true)][double]$DeadlineSec
+        [Parameter(Mandatory = $true)][string]$TaskName
     )
 
     try {
         $service = New-Object -ComObject "Schedule.Service"
         $service.Connect()
         $task = $service.GetFolder("\").GetTask($TaskName)
-        do {
-            $pids = @($task.GetInstances(0) | ForEach-Object { [int]$_.EnginePID })
-            if ($pids.Count -gt 0) { return @($pids | Sort-Object -Unique) }
-            Start-Sleep -Milliseconds 250
-        } while (Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec)
-    } catch { }
-    return @()
+        $instances = @($task.GetInstances(0) | ForEach-Object {
+            [pscustomobject]@{
+                InstanceGuid = ([string]$_.InstanceGuid).ToLowerInvariant()
+                EnginePid = [int]$_.EnginePID
+            }
+        })
+        foreach ($instance in $instances) {
+            if ($instance.InstanceGuid -notmatch '^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$' -or
+                $instance.EnginePid -le 0) {
+                return New-GpuHostTaskInstanceResult -Succeeded $false `
+                    -Reason "invalid-instance"
+            }
+        }
+        return New-GpuHostTaskInstanceResult -Succeeded $true -Instances $instances
+    } catch {
+        return New-GpuHostTaskInstanceResult -Succeeded $false -Reason "query-failed"
+    }
+}
+
+function Invoke-GpuHostTaskInstanceQuery {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$TaskInstanceQuery,
+        [Parameter(Mandatory = $true)][string]$TaskName
+    )
+    try {
+        $result = & $TaskInstanceQuery $TaskName
+        if ($null -eq $result -or
+            $result.PSObject.Properties.Name -notcontains "Succeeded" -or
+            $result.PSObject.Properties.Name -notcontains "Instances") {
+            return New-GpuHostTaskInstanceResult -Succeeded $false -Reason "invalid-result"
+        }
+        return New-GpuHostTaskInstanceResult -Succeeded ([bool]$result.Succeeded) `
+            -Instances @($result.Instances) -Reason ([string]$result.Reason)
+    } catch {
+        return New-GpuHostTaskInstanceResult -Succeeded $false -Reason "query-exception"
+    }
+}
+
+function Wait-GpuHostTaskInstancesReleased {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [string[]]$PreviousInstanceGuids = @(),
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
+        [Parameter(Mandatory = $true)][double]$DeadlineSec,
+        [scriptblock]$TaskInstanceQuery = {
+            param($value) Get-GpuHostTaskInstanceSnapshot -TaskName $value
+        },
+        [int]$StableSamples = 2
+    )
+    $stable = 0
+    while (Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec) {
+        $snapshot = Invoke-GpuHostTaskInstanceQuery `
+            -TaskInstanceQuery $TaskInstanceQuery -TaskName $TaskName
+        if (-not $snapshot.Succeeded) { return $snapshot }
+        $remaining = @($snapshot.Instances | Where-Object {
+            $PreviousInstanceGuids -contains ([string]$_.InstanceGuid).ToLowerInvariant()
+        })
+        if ($remaining.Count -eq 0) {
+            $stable++
+            if ($stable -ge $StableSamples) { return $snapshot }
+        } else {
+            $stable = 0
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return New-GpuHostTaskInstanceResult -Succeeded $false -Reason "deadline-exhausted"
+}
+
+function Wait-GpuHostNewTaskInstance {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [string[]]$PreviousInstanceGuids = @(),
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
+        [Parameter(Mandatory = $true)][double]$DeadlineSec,
+        [scriptblock]$TaskInstanceQuery = {
+            param($value) Get-GpuHostTaskInstanceSnapshot -TaskName $value
+        },
+        [int]$StableSamples = 3
+    )
+    $stable = 0
+    $candidate = ""
+    while (Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec) {
+        $snapshot = Invoke-GpuHostTaskInstanceQuery `
+            -TaskInstanceQuery $TaskInstanceQuery -TaskName $TaskName
+        if (-not $snapshot.Succeeded) { return $snapshot }
+        $newInstances = @($snapshot.Instances | Where-Object {
+            $PreviousInstanceGuids -notcontains ([string]$_.InstanceGuid).ToLowerInvariant()
+        })
+        if (@($snapshot.Instances).Count -eq 1 -and $newInstances.Count -eq 1) {
+            $current = "{0}|{1}" -f `
+                ([string]$newInstances[0].InstanceGuid).ToLowerInvariant(), `
+                ([int]$newInstances[0].EnginePid)
+            if ($current -eq $candidate) { $stable++ } else { $candidate = $current; $stable = 1 }
+            if ($stable -ge $StableSamples) {
+                return New-GpuHostTaskInstanceResult -Succeeded $true `
+                    -Instances $newInstances
+            }
+        } else {
+            $candidate = ""
+            $stable = 0
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return New-GpuHostTaskInstanceResult -Succeeded $false -Reason "deadline-exhausted"
+}
+
+function Test-GpuHostTaskInstanceStable {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$ExpectedInstanceGuid,
+        [Parameter(Mandatory = $true)][int]$ExpectedEnginePid,
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
+        [Parameter(Mandatory = $true)][double]$DeadlineSec,
+        [scriptblock]$TaskInstanceQuery = {
+            param($value) Get-GpuHostTaskInstanceSnapshot -TaskName $value
+        },
+        [int]$StableSamples = 2
+    )
+    for ($sample = 0; $sample -lt $StableSamples; $sample++) {
+        if (-not (Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec)) {
+            return $false
+        }
+        $snapshot = Invoke-GpuHostTaskInstanceQuery `
+            -TaskInstanceQuery $TaskInstanceQuery -TaskName $TaskName
+        if (-not $snapshot.Succeeded -or @($snapshot.Instances).Count -ne 1) {
+            return $false
+        }
+        $instance = $snapshot.Instances[0]
+        if (([string]$instance.InstanceGuid).ToLowerInvariant() -ne `
+                $ExpectedInstanceGuid.ToLowerInvariant() -or
+            [int]$instance.EnginePid -ne $ExpectedEnginePid) {
+            return $false
+        }
+        if ($sample + 1 -lt $StableSamples) { Start-Sleep -Milliseconds 250 }
+    }
+    return $true
+}
+
+function Get-GpuHostTaskXmlContract {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$TaskXml,
+        [switch]$SkipPythonPathValidation
+    )
+    try {
+        [xml]$document = $TaskXml
+        $namespace = New-Object Xml.XmlNamespaceManager($document.NameTable)
+        $namespace.AddNamespace("t", $document.DocumentElement.NamespaceURI)
+        $principals = @($document.SelectNodes("//t:Principals/t:Principal", $namespace))
+        $actions = @($document.SelectNodes("//t:Actions", $namespace))
+        $actionChildren = @($document.SelectNodes("//t:Actions/*", $namespace))
+        $execs = @($document.SelectNodes("//t:Actions/t:Exec", $namespace))
+        if ($principals.Count -ne 1 -or $actions.Count -ne 1 -or
+            $actionChildren.Count -ne 1 -or $execs.Count -ne 1) {
+            throw "action-cardinality-invalid"
+        }
+        $principal = $principals[0]
+        $principalId = [string]$principal.GetAttribute("id")
+        $actionContext = [string]$actions[0].GetAttribute("Context")
+        if ([string]::IsNullOrWhiteSpace($principalId) -or
+            [string]::IsNullOrWhiteSpace($actionContext) -or
+            -not $principalId.Equals($actionContext, [StringComparison]::Ordinal)) {
+            throw "action-context-invalid"
+        }
+        if ([string]$principal.UserId -notin @("SYSTEM", "S-1-5-18") -or
+            [string]$principal.LogonType -ne "ServiceAccount" -or
+            [string]$principal.RunLevel -ne "HighestAvailable") {
+            throw "principal-invalid"
+        }
+        $exec = $execs[0]
+        $actionContract = Get-GpuHostTaskActionContract -TaskName $TaskName `
+            -Execute ([string]$exec.Command) -Arguments ([string]$exec.Arguments) `
+            -WorkingDirectory ([string]$exec.WorkingDirectory)
+        if (-not $actionContract.Valid -or
+            (-not $SkipPythonPathValidation -and
+                -not (Test-Path -LiteralPath $actionContract.PythonExe -PathType Leaf))) {
+            throw "action-invalid"
+        }
+        return [pscustomobject]@{
+            Valid = $true
+            PythonExe = [string]$actionContract.PythonExe
+            Reason = ""
+        }
+    } catch {
+        return [pscustomobject]@{
+            Valid = $false
+            PythonExe = ""
+            Reason = [string]$_.Exception.Message
+        }
+    }
 }
 
 function Get-GpuHostStringSha256 {
@@ -184,15 +385,19 @@ function Get-GpuHostListenerIdentityProof {
             throw "interpreter-mismatch"
         }
         $tokens = @([PlatformAi.NativeCommandLine]::Split([string]$listener.CommandLine))
-        $moduleOk = $false
-        $portOk = $false
-        for ($index = 0; $index -lt $tokens.Count; $index++) {
-            if ($tokens[$index] -ieq "-m" -and $index + 1 -lt $tokens.Count -and
-                $tokens[$index + 1] -ieq "uvicorn") { $moduleOk = $true }
-            if ($tokens[$index] -ieq "--port" -and $index + 1 -lt $tokens.Count -and
-                $tokens[$index + 1] -eq "$ExpectedPort") { $portOk = $true }
+        $expectedTokens = @(
+            $expectedExe,
+            "-m", "uvicorn", "app.main:app",
+            "--host", "0.0.0.0",
+            "--port", "$ExpectedPort"
+        )
+        if ($tokens.Count -ne $expectedTokens.Count) { throw "command-mismatch" }
+        for ($index = 0; $index -lt $expectedTokens.Count; $index++) {
+            if (-not $tokens[$index].Equals(
+                $expectedTokens[$index],
+                [StringComparison]::OrdinalIgnoreCase
+            )) { throw "command-mismatch" }
         }
-        if (-not $moduleOk -or -not $portOk) { throw "command-mismatch" }
 
         $chain = @()
         $currentId = $ProcessId

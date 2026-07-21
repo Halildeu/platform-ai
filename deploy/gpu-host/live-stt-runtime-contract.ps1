@@ -6,7 +6,9 @@ $script:LiveSttWorkerKillGraceSec = 2
 $script:LiveSttPreloadMaxAttempts = 2
 $script:LiveSttPreloadRetryBaseSec = 1
 $script:LiveSttPreloadRoleCount = 2
-$script:LiveSttReadinessDeadlineSec = 780
+$script:LiveSttSmokeWorstCaseSec = 150
+$script:LiveSttTaskTransitionReserveSec = 60
+$script:LiveSttReadinessDeadlineSec = 960
 
 $script:LiveSttPreloadRetryWorstCaseSec = $script:LiveSttPreloadRetryBaseSec * (
     [Math]::Pow(2, $script:LiveSttPreloadMaxAttempts - 1) - 1
@@ -18,6 +20,12 @@ $script:LiveSttPreloadWorstCaseSec = $script:LiveSttPreloadRoleCount * (
     $script:LiveSttPreloadRetryWorstCaseSec
 )
 
-if ($script:LiveSttPreloadWorstCaseSec -gt $script:LiveSttReadinessDeadlineSec) {
-    throw "Live STT preload contract exceeds its readiness deadline."
+$script:LiveSttAcceptanceWorstCaseSec = (
+    $script:LiveSttPreloadWorstCaseSec +
+    $script:LiveSttSmokeWorstCaseSec +
+    $script:LiveSttTaskTransitionReserveSec
+)
+
+if ($script:LiveSttAcceptanceWorstCaseSec -gt $script:LiveSttReadinessDeadlineSec) {
+    throw "Live STT end-to-end acceptance contract exceeds its readiness deadline."
 }

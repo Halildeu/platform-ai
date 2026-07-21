@@ -96,6 +96,14 @@ function ConvertTo-GpuHostWindowsArgument {
     return $builder.ToString()
 }
 
+function Get-GpuHostWindowsPowerShellPath {
+    $systemRoot = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = "C:\Windows"
+    }
+    return Join-Path $systemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+}
+
 function Get-GpuHostTaskSpec {
     param([Parameter(Mandatory = $true)][string]$TaskName)
 
@@ -170,7 +178,8 @@ function Get-GpuHostTaskActionContract {
         [Parameter(Mandatory = $true)][string]$TaskName,
         [Parameter(Mandatory = $true)][string]$Execute,
         [Parameter(Mandatory = $true)][string]$Arguments,
-        [string]$WorkingDirectory = ''
+        [string]$WorkingDirectory = '',
+        [switch]$AllowBarePowerShell
     )
 
     $result = [ordered]@{
@@ -183,12 +192,15 @@ function Get-GpuHostTaskActionContract {
     }
     try {
         $spec = Get-GpuHostTaskSpec -TaskName $TaskName
-        $trustedPowerShell = @('powershell.exe')
-        if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
-            $trustedPowerShell += (Join-Path $env:SystemRoot `
-                'System32\WindowsPowerShell\v1.0\powershell.exe')
+        $trustedPowerShell = Get-GpuHostWindowsPowerShellPath
+        $absolutePowerShell = $trustedPowerShell.Equals(
+            $Execute,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+        if (-not $absolutePowerShell -and
+            (-not $AllowBarePowerShell -or $Execute -ine "powershell.exe")) {
+            return $result
         }
-        if ($trustedPowerShell -inotcontains $Execute) { return $result }
         if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) { return $result }
 
         $tokens = @([PlatformAi.NativeCommandLine]::Split(

@@ -61,6 +61,7 @@ $script:DeployExitRestartFailed = 3
 $script:DeployExitRollbackFailed = 4
 $script:DeployMutex = $null
 $script:DeployLockTaken = $false
+$script:TestAcceptanceInvocation = 0
 $script:DefaultDeploymentStatePath = `
   "C:\ProgramData\Acik\platform-ai\deployment-state.json"
 $script:TestFaultsEnabled = (
@@ -291,7 +292,7 @@ if ($afterResult.ExitCode -ne 0 -or $afterResult.Output.Count -ne 1 -or
   Stop-Deploy "Detached exact-pin postcondition failed." $pinFailedCode
 }
 
-$ledgerRecord = New-DeploymentStateRecord -CurrentCommit $target `
+$script:DeploymentLedgerRecord = New-DeploymentStateRecord -CurrentCommit $target `
   -PreviousCommit $previous -BranchRef $branchRef -Action $action `
   -Result "source-pinned"
 try {
@@ -299,7 +300,7 @@ try {
       $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE -eq "1") {
     throw "CI fault injection: deployment ledger write failure"
   }
-  Write-DeploymentStateAtomic -StatePath $StatePath -State $ledgerRecord
+  Write-DeploymentStateAtomic -StatePath $StatePath -State $script:DeploymentLedgerRecord
 } catch {
   Write-Host "[update] ledger write failed; restoring pre-deploy commit" `
     -ForegroundColor Red
@@ -338,10 +339,11 @@ Write-Host "[update] $before -> $target (detached immutable pin)" `
 function Set-DeploymentLedgerResult {
   param([Parameter(Mandatory = $true)][string]$Result)
 
-  $ledgerRecord["lastResult"] = $Result
-  $ledgerRecord["timestampUtc"] = [DateTime]::UtcNow.ToString("o")
+  $script:DeploymentLedgerRecord["lastResult"] = $Result
+  $script:DeploymentLedgerRecord["timestampUtc"] = [DateTime]::UtcNow.ToString("o")
   try {
-    Write-DeploymentStateAtomic -StatePath $StatePath -State $ledgerRecord
+    Write-DeploymentStateAtomic -StatePath $StatePath `
+      -State $script:DeploymentLedgerRecord
   } catch {
     Stop-Deploy ("Pinned source but ledger result update failed: {0}" -f `
       $_.Exception.Message) $script:DeployExitRollbackFailed
@@ -409,28 +411,21 @@ function Get-SchtasksTaskXml {
   }
 }
 
-function Get-TaskPythonExe {
-  param([Parameter(Mandatory = $true)][string]$TaskName)
+function Get-TaskRuntimeContract {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
 
-  try {
-    $query = Get-SchtasksTaskXml -TaskName $TaskName
-    if ($query.ExitCode -ne 0 -or $query.Output.Count -eq 0) { return "" }
-    [xml]$taskXml = ($query.Output -join [Environment]::NewLine)
-    $namespace = New-Object Xml.XmlNamespaceManager($taskXml.NameTable)
-    $namespace.AddNamespace("t", $taskXml.DocumentElement.NamespaceURI)
-    $exec = $taskXml.SelectSingleNode("//t:Actions/t:Exec", $namespace)
-    if ($null -eq $exec) { return "" }
-    $contract = Get-GpuHostTaskActionContract -TaskName $TaskName `
-      -Execute ([string]$exec.Command) -Arguments ([string]$exec.Arguments) `
-      -WorkingDirectory ([string]$exec.WorkingDirectory)
-    if (-not $contract.Valid -or
-        -not (Test-Path -LiteralPath $contract.PythonExe -PathType Leaf)) {
-      return ""
+    try {
+        $query = Get-SchtasksTaskXml -TaskName $TaskName
+        if ($query.ExitCode -ne 0 -or $query.Output.Count -eq 0) { throw "query-failed" }
+        return Get-GpuHostTaskXmlContract -TaskName $TaskName `
+          -TaskXml ($query.Output -join [Environment]::NewLine)
+    } catch {
+        return [pscustomobject]@{
+          Valid = $false
+          PythonExe = ""
+          Reason = [string]$_.Exception.Message
+        }
     }
-    return [string]$contract.PythonExe
-  } catch {
-    return ""
-  }
 }
 
 function Invoke-LiveSttStreamAcceptance {
@@ -519,107 +514,116 @@ function Invoke-LiveSttStreamAcceptance {
   }
 }
 
-if ($NoRestart) {
-  Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
-  Set-DeploymentLedgerResult -Result "pinned-no-restart"
-} else {
-  $restartFailed = $false
+function New-GpuHostAcceptanceResult {
+  param([bool]$Succeeded, [string]$Reason = "")
+  return [pscustomobject]@{ Succeeded = $Succeeded; Reason = $Reason }
+}
+
+function Invoke-GpuHostRevisionAcceptance {
+  param([Parameter(Mandatory = $true)][string]$ExpectedCommit)
+
+  if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -eq "reject-then-accept") {
+    $script:TestAcceptanceInvocation += 1
+    if ($script:TestAcceptanceInvocation -eq 1) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "injected-acceptance-failure"
+    }
+    return New-GpuHostAcceptanceResult -Succeeded $true -Reason "accepted"
+  }
+
   $liveSttPythonExe = ""
   $liveSttRuntimeOwner = 0
-  $liveSttTaskPids = @()
-  # One absolute monotonic budget covers both task restarts, port release,
-  # process binding, model preload readiness, direct inference, and stability.
+  $liveSttTaskInstance = $null
   $acceptanceClock = [Diagnostics.Stopwatch]::StartNew()
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
     if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
-      Write-Host "[update] ERROR: required task '$task' is not installed" `
-        -ForegroundColor Red
-      $restartFailed = $true
-      continue
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-missing"
     }
     $taskSpec = Get-GpuHostTaskSpec -TaskName $task
-    $taskPythonExe = Get-TaskPythonExe -TaskName $task
-    if ([string]::IsNullOrWhiteSpace($taskPythonExe)) {
-      Write-Host "[update] ERROR: task '$task' action contract is invalid" `
-        -ForegroundColor Red
-      $restartFailed = $true
-      continue
+    $taskContract = Get-TaskRuntimeContract -TaskName $task
+    if (-not $taskContract.Valid) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-contract"
     }
-    $previousSnapshot = Get-GpuHostListeningPortOwnerSnapshot -Port ([int]$taskSpec.Port)
-    if (-not $previousSnapshot.Succeeded) {
-      Write-Host "[update] ERROR: listener owner query failed for '$task'" `
-        -ForegroundColor Red
-      $restartFailed = $true
-      continue
+    $taskPythonExe = [string]$taskContract.PythonExe
+    $previousTaskSnapshot = Get-GpuHostTaskInstanceSnapshot -TaskName $task
+    if (-not $previousTaskSnapshot.Succeeded) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-query"
     }
-    $previousOwners = @($previousSnapshot.Owners)
-    # /End returns non-zero when the task is not running (benign). When it WAS
-    # running, require the listener to disappear before /Run. A fixed sleep can
-    # accept a stale child or make /Run a no-op while the previous process owns
-    # the port.
+    $previousInstanceGuids = @($previousTaskSnapshot.Instances | ForEach-Object {
+      ([string]$_.InstanceGuid).ToLowerInvariant()
+    })
+    $previousOwnerSnapshot = Get-GpuHostListeningPortOwnerSnapshot `
+      -Port ([int]$taskSpec.Port)
+    if (-not $previousOwnerSnapshot.Succeeded) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-owner-query"
+    }
+    $previousOwners = @($previousOwnerSnapshot.Owners)
     $endExit = Invoke-SchtasksTask -Action "/End" -TaskName $task
-    if ($previousOwners.Count -gt 0 -and $endExit -ne 0) {
-      Write-Host "[update] ERROR: schtasks /End '$task' exit=$endExit" -ForegroundColor Red
-      $restartFailed = $true
-      continue
+    if ($previousInstanceGuids.Count -gt 0 -and $endExit -ne 0) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-end"
     }
-    $released = Wait-GpuHostPortReleased -Port ([int]$taskSpec.Port) `
+    $taskReleased = Wait-GpuHostTaskInstancesReleased -TaskName $task `
+      -PreviousInstanceGuids $previousInstanceGuids -Clock $acceptanceClock `
+      -DeadlineSec $script:LiveSttReadinessDeadlineSec
+    if (-not $taskReleased.Succeeded) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-stale-task-instance"
+    }
+    $portReleased = Wait-GpuHostPortReleased -Port ([int]$taskSpec.Port) `
       -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec
-    if (-not $released.Succeeded) {
-      Write-Host "[update] ERROR: stale listener remained on port $($taskSpec.Port)" `
-        -ForegroundColor Red
-      $restartFailed = $true
-      continue
+    if (-not $portReleased.Succeeded) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-stale-listener"
     }
-    $runExit = Invoke-SchtasksTask -Action "/Run" -TaskName $task
-    if ($runExit -ne 0) {
-      Write-Host "[update] ERROR: schtasks /Run '$task' exit=$runExit" -ForegroundColor Red
-      $restartFailed = $true
-    } else {
-      $newOwnerResult = Wait-GpuHostNewPortOwner -Port ([int]$taskSpec.Port) `
-        -PreviousOwners $previousOwners -Clock $acceptanceClock `
-        -DeadlineSec $script:LiveSttReadinessDeadlineSec
-      if (-not $newOwnerResult.Succeeded -or @($newOwnerResult.Owners).Count -ne 1) {
-        Write-Host "[update] ERROR: task '$task' did not create a new listener" `
-          -ForegroundColor Red
-        $restartFailed = $true
-        continue
-      }
-      $newOwner = [int]$newOwnerResult.Owners[0]
-      $taskPids = @(Get-GpuHostTaskInstancePids -TaskName $task `
-        -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec)
-      if ($taskPids.Count -eq 0 -or
-          -not (Test-GpuHostListenerStable -Port ([int]$taskSpec.Port) `
-            -ExpectedOwnerId $newOwner -ExpectedPythonExe $taskPythonExe `
-            -ExpectedTaskPids $taskPids -Clock $acceptanceClock `
-            -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
-        Write-Host "[update] ERROR: task '$task' listener identity is not stable" `
-          -ForegroundColor Red
-        $restartFailed = $true
-        continue
-      }
-      if ($task -eq "platform-ai-live-stt") {
-        $liveSttPythonExe = $taskPythonExe
-        $liveSttRuntimeOwner = $newOwner
-        $liveSttTaskPids = $taskPids
-      }
-      Write-Host "[update] restarted $task with a new port owner" -ForegroundColor Green
+    if ((Invoke-SchtasksTask -Action "/Run" -TaskName $task) -ne 0) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-run"
     }
+    $newTaskResult = Wait-GpuHostNewTaskInstance -TaskName $task `
+      -PreviousInstanceGuids $previousInstanceGuids -Clock $acceptanceClock `
+      -DeadlineSec $script:LiveSttReadinessDeadlineSec
+    if (-not $newTaskResult.Succeeded -or @($newTaskResult.Instances).Count -ne 1) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-no-new-task-instance"
+    }
+    $newTaskInstance = $newTaskResult.Instances[0]
+    $newOwnerResult = Wait-GpuHostNewPortOwner -Port ([int]$taskSpec.Port) `
+      -PreviousOwners $previousOwners -Clock $acceptanceClock `
+      -DeadlineSec $script:LiveSttReadinessDeadlineSec
+    if (-not $newOwnerResult.Succeeded -or @($newOwnerResult.Owners).Count -ne 1) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-no-new-listener"
+    }
+    $newOwner = [int]$newOwnerResult.Owners[0]
+    $taskPids = @([int]$newTaskInstance.EnginePid)
+    if (-not (Test-GpuHostTaskInstanceStable -TaskName $task `
+          -ExpectedInstanceGuid ([string]$newTaskInstance.InstanceGuid) `
+          -ExpectedEnginePid ([int]$newTaskInstance.EnginePid) `
+          -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec) -or
+        -not (Test-GpuHostListenerStable -Port ([int]$taskSpec.Port) `
+          -ExpectedOwnerId $newOwner -ExpectedPythonExe $taskPythonExe `
+          -ExpectedTaskPids $taskPids -Clock $acceptanceClock `
+          -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-identity-unstable"
+    }
+    if ($task -eq "platform-ai-live-stt") {
+      $liveSttPythonExe = $taskPythonExe
+      $liveSttRuntimeOwner = $newOwner
+      $liveSttTaskInstance = $newTaskInstance
+    }
+    Write-Host "[update] restarted $task with a new task instance and listener" `
+      -ForegroundColor Green
   }
-  if ($restartFailed) {
-    Set-DeploymentLedgerResult -Result "restart-failed"
-    Stop-Deploy "Source pin landed but one or more scheduled tasks failed to restart." `
-      $script:DeployExitRestartFailed
-  }
-}
 
-# 5. Wait for both customer-path streaming models. Do not warm the legacy
-#    synchronous /transcribe model here: it is a third resident Whisper model,
-#    and allocating it during deployment can make the 8 GiB GPU peak unbounded.
-#    /transcribe remains lazy; the recording path is accepted by /ready plus the
-#    direct WebSocket handshake below.
-if (-not $NoRestart -and -not $restartFailed) {
-  Write-Host "[update] waiting for live-stt streaming model readiness..." -ForegroundColor Cyan
+  Write-Host "[update] waiting for live-stt streaming model readiness..." `
+    -ForegroundColor Cyan
   $streamReady = $false
   while ($acceptanceClock.Elapsed.TotalSeconds -lt $script:LiveSttReadinessDeadlineSec) {
     $remaining = $script:LiveSttReadinessDeadlineSec - $acceptanceClock.Elapsed.TotalSeconds
@@ -629,7 +633,7 @@ if (-not $NoRestart -and -not $restartFailed) {
         -TimeoutSec $requestTimeout -ErrorAction Stop
       $runtimeOk = (
         $readiness.status -eq "ready" -and
-        $readiness.runtime_commit -eq $target -and
+        $readiness.runtime_commit -eq $ExpectedCommit -and
         [int]$readiness.preload_budget_sec -eq $script:LiveSttReadinessDeadlineSec -and
         $readiness.runtime.legacy.device -eq "cpu" -and
         $readiness.runtime.legacy.compute_type -eq "int8" -and
@@ -647,37 +651,90 @@ if (-not $NoRestart -and -not $restartFailed) {
     if ($sleepMs -gt 0) { Start-Sleep -Milliseconds $sleepMs }
   }
   if (-not $streamReady) {
-    Set-DeploymentLedgerResult -Result "readiness-failed"
-    Stop-Deploy ("live-stt exact runtime did not reach /ready within {0}s." -f `
-      $script:LiveSttReadinessDeadlineSec) `
-      $script:DeployExitRestartFailed
+    return New-GpuHostAcceptanceResult -Succeeded $false -Reason "readiness-failed"
   }
-  if (-not (Test-GpuHostListenerStable -Port 8200 `
-      -ExpectedOwnerId $liveSttRuntimeOwner -ExpectedPythonExe $liveSttPythonExe `
-      -ExpectedTaskPids $liveSttTaskPids -Clock $acceptanceClock `
-      -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
-    Set-DeploymentLedgerResult -Result "readiness-failed"
-    Stop-Deploy "live-stt port owner changed during readiness acceptance." `
-      $script:DeployExitRestartFailed
+  $liveTaskPids = @([int]$liveSttTaskInstance.EnginePid)
+  if (-not (Test-GpuHostTaskInstanceStable -TaskName "platform-ai-live-stt" `
+        -ExpectedInstanceGuid ([string]$liveSttTaskInstance.InstanceGuid) `
+        -ExpectedEnginePid ([int]$liveSttTaskInstance.EnginePid) `
+        -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec) -or
+      -not (Test-GpuHostListenerStable -Port 8200 `
+        -ExpectedOwnerId $liveSttRuntimeOwner -ExpectedPythonExe $liveSttPythonExe `
+        -ExpectedTaskPids $liveTaskPids -Clock $acceptanceClock `
+        -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "readiness-failed-identity-changed"
   }
-  Write-Host "[update] live-stt streaming models ready" -ForegroundColor Green
-
-  Write-Host "[update] verifying live-stt direct inference + EOF contract..." -ForegroundColor Cyan
-  if (Invoke-LiveSttStreamAcceptance -PythonExe $liveSttPythonExe `
+  if (-not (Invoke-LiveSttStreamAcceptance -PythonExe $liveSttPythonExe `
       -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec `
-      -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1") {
-    Write-Host "[update] direct /ws/stream inference + source ranges accepted" -ForegroundColor Green
-  } else {
-    Set-DeploymentLedgerResult -Result "readiness-failed"
-    Stop-Deploy "direct /ws/stream inference/source-range acceptance failed." `
-      $script:DeployExitRestartFailed
+      -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1")) {
+    return New-GpuHostAcceptanceResult -Succeeded $false -Reason "smoke-failed"
   }
-  if (-not (Test-GpuHostListenerStable -Port 8200 `
-      -ExpectedOwnerId $liveSttRuntimeOwner -ExpectedPythonExe $liveSttPythonExe `
-      -ExpectedTaskPids $liveSttTaskPids -Clock $acceptanceClock `
-      -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
-    Set-DeploymentLedgerResult -Result "readiness-failed"
-    Stop-Deploy "live-stt listener changed during post-smoke stability acceptance." `
+  if (-not (Test-GpuHostTaskInstanceStable -TaskName "platform-ai-live-stt" `
+        -ExpectedInstanceGuid ([string]$liveSttTaskInstance.InstanceGuid) `
+        -ExpectedEnginePid ([int]$liveSttTaskInstance.EnginePid) `
+        -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec) -or
+      -not (Test-GpuHostListenerStable -Port 8200 `
+        -ExpectedOwnerId $liveSttRuntimeOwner -ExpectedPythonExe $liveSttPythonExe `
+        -ExpectedTaskPids $liveTaskPids -Clock $acceptanceClock `
+        -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "smoke-failed-identity-changed"
+  }
+  return New-GpuHostAcceptanceResult -Succeeded $true -Reason "accepted"
+}
+
+function Invoke-GpuHostAutomaticRollback {
+  param(
+    [Parameter(Mandatory = $true)][string]$RestoreCommit,
+    [Parameter(Mandatory = $true)][string]$RejectedResult
+  )
+
+  Set-DeploymentLedgerResult -Result $RejectedResult
+  Write-Host "[update] revision rejected; restoring $RestoreCommit" `
+    -ForegroundColor Yellow
+  $restoreOk = (
+    (Invoke-GitStream -GitArgs @("checkout", "--detach", $RestoreCommit)) -eq 0 -and
+    (Invoke-GitStream -GitArgs @("reset", "--hard", $RestoreCommit)) -eq 0
+  )
+  if (-not $restoreOk) { return $false }
+  $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+  if ($restoreHead.ExitCode -ne 0 -or $restoreHead.Output.Count -ne 1 -or
+      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -ne $RestoreCommit) {
+    return $false
+  }
+  $script:DeploymentLedgerRecord = New-DeploymentStateRecord `
+    -CurrentCommit $RestoreCommit -PreviousCommit $null -BranchRef $branchRef `
+    -Action "rollback" -Result "automatic-rollback-source-restored"
+  try {
+    Write-DeploymentStateAtomic -StatePath $StatePath `
+      -State $script:DeploymentLedgerRecord
+  } catch {
+    return $false
+  }
+  $rollbackAcceptance = Invoke-GpuHostRevisionAcceptance `
+    -ExpectedCommit $RestoreCommit
+  if (-not $rollbackAcceptance.Succeeded) {
+    Set-DeploymentLedgerResult `
+      -Result ("automatic-rollback-failed-{0}" -f $rollbackAcceptance.Reason)
+    return $false
+  }
+  Set-DeploymentLedgerResult -Result "automatic-rollback-accepted"
+  return $true
+}
+
+if ($NoRestart) {
+  Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
+  Set-DeploymentLedgerResult -Result "pinned-no-restart"
+} else {
+  $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target
+  if (-not $acceptance.Succeeded) {
+    if (-not (Invoke-GpuHostAutomaticRollback -RestoreCommit $before `
+        -RejectedResult $acceptance.Reason)) {
+      Stop-Deploy "Revision acceptance and automatic rollback acceptance failed." `
+        $script:DeployExitRollbackFailed
+    }
+    Stop-Deploy "Revision acceptance failed; previous revision was restored and reaccepted." `
       $script:DeployExitRestartFailed
   }
 }

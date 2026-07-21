@@ -746,6 +746,7 @@ def test_preload_lock_and_load_share_the_callers_absolute_deadline(
     service = object.__new__(SupervisedLiveWhisperService)
     service.role = "live"
     service._load_timeout_sec = 180.0
+    service._kill_grace_sec = 2.0
     service._call_lock = threading.Lock()
     observed: list[tuple[str, float]] = []
 
@@ -753,15 +754,24 @@ def test_preload_lock_and_load_share_the_callers_absolute_deadline(
         observed.append(("lock", deadline))
         assert service._call_lock.acquire(timeout=0)
 
-    def load(deadline: float | None = None) -> None:
+    def load(
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
         assert deadline is not None
+        assert cleanup_deadline is not None
         observed.append(("load", deadline))
+        observed.append(("cleanup", cleanup_deadline))
 
     monkeypatch.setattr(service, "_acquire_call_lock", acquire)
     monkeypatch.setattr(service, "_ensure_model_locked", load)
     service.ensure_model(deadline=12345.0)
 
-    assert observed == [("lock", 12345.0), ("load", 12345.0)]
+    assert observed == [
+        ("lock", 12345.0),
+        ("load", 12345.0),
+        ("cleanup", 12349.0),
+    ]
 
 
 def test_streaming_readiness_requires_loaded_current_workers() -> None:

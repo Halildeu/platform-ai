@@ -287,22 +287,30 @@ Assert-True ($insecure.ExitCode -eq 2) "insecure ledger ACL must trigger drift"
 Set-Acl -LiteralPath $statePath -AclObject (New-DeploymentStateAcl)
 Assert-DeploymentStateAcl -Path $statePath
 
-# Required tasks do not exist on the CI fixture host: the source pin must land,
-# ledger result must say restart-failed, and exit 3 must distinguish this state.
+# Required tasks do not exist on the CI fixture host. Both target acceptance and
+# rollback acceptance therefore fail; source must still restore to the previous
+# commit and the ledger must distinguish rollback-failed from target rejection.
 $restartFailure = Invoke-Update @("-TargetCommit", $commitD)
-Assert-True ($restartFailure.ExitCode -eq 3) `
-    "missing required tasks must return pin-landed/restart-failed exit 3"
+Assert-True ($restartFailure.ExitCode -eq 4) `
+    "target plus rollback acceptance failure must return exit 4"
 $state = Read-DeploymentState -StatePath $statePath
-Assert-True ($state.currentCommit -eq $commitD) "restart failure lost source pin"
-Assert-True ($state.previousCommit -eq $commitB) `
-    "restart failure lost bounded rollback target"
-Assert-True ($state.lastResult -eq "restart-failed") `
-    "restart failure ledger result mismatch"
+Assert-True ($state.currentCommit -eq $commitB) `
+    "automatic rollback did not restore the previous source commit"
+Assert-True ($null -eq $state.previousCommit) `
+    "rejected revision must not remain as a ping-pong rollback target"
+Assert-True ($state.lastResult -eq `
+    "automatic-rollback-failed-restart-failed-task-missing") `
+    "rollback acceptance failure ledger result mismatch"
 
-$postFailureRollback = Invoke-Update @(
-    "-Rollback", "-NoRestart"
-)
-Assert-True ($postFailureRollback.ExitCode -eq 0) `
-    "rollback after restart failure failed"
+$env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-then-accept"
+$acceptedRollback = Invoke-Update @("-TargetCommit", $commitD)
+Assert-True ($acceptedRollback.ExitCode -eq 3) `
+    "rejected target with reaccepted rollback must retain target-failed exit 3"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitB) `
+    "successful automatic rollback did not restore previous source"
+Assert-True ($state.lastResult -eq "automatic-rollback-accepted") `
+    "successful automatic rollback ledger result mismatch"
+Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
 Write-Host "immutable deployment ledger behavior contract: PASS"

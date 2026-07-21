@@ -551,7 +551,7 @@ function Get-TaskSnapshot {
     $action = $definition.Actions.Item(1)
     $contract = Get-GpuHostTaskActionContract -TaskName $TaskName `
         -Execute ([string]$action.Path) -Arguments ([string]$action.Arguments) `
-        -WorkingDirectory ([string]$action.WorkingDirectory)
+        -WorkingDirectory ([string]$action.WorkingDirectory) -AllowBarePowerShell
     if (-not $contract.Valid) {
         throw "TASK_ACTION_UNRECOGNIZED"
     }
@@ -1012,7 +1012,7 @@ try {
             foreach ($taskName in $script:Tasks) {
                 if (-not $changed[$taskName]) { continue }
                 $snapshot = $before[$taskName]
-                $snapshot.Action.Path = "powershell.exe"
+                $snapshot.Action.Path = Get-GpuHostWindowsPowerShellPath
                 $snapshot.Action.Arguments = $snapshot.Contract.CanonicalArguments
                 $snapshot.Action.WorkingDirectory = ""
                 Register-TaskDefinitionPreservingSecurity `

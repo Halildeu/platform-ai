@@ -28,7 +28,7 @@ def test_ready_fails_closed_when_preload_is_disabled(client) -> None:  # type: i
     assert r.json() == {
         "status": "disabled",
         "runtime_commit": "unversioned",
-        "preload_budget_sec": 780.0,
+        "preload_budget_sec": 960.0,
         "streaming_preload_enabled": False,
         "roles": {"live": "disabled", "final": "disabled"},
         "attempts": {"live": 0, "final": 0},

@@ -116,9 +116,14 @@ class DirectWhisperService:
         self._model: object | None = None
         self._lock = threading.Lock()
 
-    def ensure_model(self, *, deadline: float | None = None) -> None:
+    def ensure_model(
+        self,
+        *,
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
         """Load the model now (first call pays download/VRAM cost)."""
-        del deadline  # Inline backend is forbidden in staging/production.
+        del deadline, cleanup_deadline  # Inline backend is forbidden in staging/production.
         if self._model is None:
             with self._lock:
                 if self._model is None:
@@ -340,8 +345,9 @@ class _SupervisedWhisperService:
         restart_on_failure: bool = True,
         required_generation: int | None = None,
         require_loaded: bool = False,
+        cleanup_deadline: float | None = None,
     ) -> str:
-        cleanup_deadline = deadline if operation == "load" else None
+        effective_cleanup_deadline = cleanup_deadline if operation == "load" else None
         if self._is_closing():
             raise WorkerCrashedError(
                 f"streaming {getattr(self, 'role', 'final')} worker is shutting down"
@@ -363,7 +369,7 @@ class _SupervisedWhisperService:
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker is not alive"
                 )
-            self._terminate_and_restart(deadline=cleanup_deadline)
+            self._terminate_and_restart(deadline=effective_cleanup_deadline)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise WorkerTimeoutError(
@@ -381,7 +387,10 @@ class _SupervisedWhisperService:
                 timeout=remaining,
             )
         except queue.Full as exc:
-            self._terminate_and_restart(restart=restart_on_failure, deadline=cleanup_deadline)
+            self._terminate_and_restart(
+                restart=restart_on_failure,
+                deadline=effective_cleanup_deadline,
+            )
             raise WorkerTimeoutError(
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
             ) from exc
@@ -391,13 +400,19 @@ class _SupervisedWhisperService:
                     f"streaming {getattr(self, 'role', 'final')} worker is shutting down"
                 )
             if not self._is_alive():
-                self._terminate_and_restart(restart=restart_on_failure, deadline=cleanup_deadline)
+                self._terminate_and_restart(
+                    restart=restart_on_failure,
+                    deadline=effective_cleanup_deadline,
+                )
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker exited before response"
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._terminate_and_restart(restart=restart_on_failure, deadline=cleanup_deadline)
+                self._terminate_and_restart(
+                    restart=restart_on_failure,
+                    deadline=effective_cleanup_deadline,
+                )
                 raise WorkerTimeoutError(
                     f"streaming {getattr(self, 'role', 'final')} worker exceeded timeout"
                 )
@@ -412,7 +427,7 @@ class _SupervisedWhisperService:
                 if operation == "load":
                     # Native/CUDA load failures can leave a poisoned allocator or
                     # partial VRAM state. A retry is meaningful only in a fresh child.
-                    self._terminate_and_restart(deadline=deadline)
+                    self._terminate_and_restart(deadline=effective_cleanup_deadline)
                 raise error
             text = str(response.get("text", ""))
             if operation == "load":
@@ -426,7 +441,11 @@ class _SupervisedWhisperService:
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
             )
 
-    def _ensure_model_locked(self, deadline: float | None = None) -> None:
+    def _ensure_model_locked(
+        self,
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
         if self._model_loaded and self._is_alive():
             return
         effective_deadline = deadline
@@ -435,15 +454,26 @@ class _SupervisedWhisperService:
         self._invoke_locked(
             "load",
             deadline=effective_deadline,
+            cleanup_deadline=cleanup_deadline,
         )
 
-    def ensure_model(self, *, deadline: float | None = None) -> None:
+    def ensure_model(
+        self,
+        *,
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
         effective_deadline = deadline
         if effective_deadline is None:
             effective_deadline = time.monotonic() + self._load_timeout_sec
+        effective_cleanup_deadline = cleanup_deadline
+        if effective_cleanup_deadline is None:
+            effective_cleanup_deadline = effective_deadline + (2 * self._kill_grace_sec)
+        if effective_cleanup_deadline < effective_deadline:
+            raise ValueError("cleanup deadline must not precede operation deadline")
         self._acquire_call_lock(effective_deadline)
         try:
-            self._ensure_model_locked(effective_deadline)
+            self._ensure_model_locked(effective_deadline, effective_cleanup_deadline)
         finally:
             self._call_lock.release()
 

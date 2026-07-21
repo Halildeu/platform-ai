@@ -28,6 +28,14 @@ $release = Wait-GpuHostPortReleased -Port 8200 -Clock $clock -DeadlineSec 1 `
     -OwnerQuery $failedQuery
 Assert-True (-not $release.Succeeded) "Owner query failure must fail release acceptance."
 
+$netstatFailure = ConvertFrom-GpuHostNetstatLines -Port 8200 -ExitCode 1 -Lines @()
+Assert-True (-not $netstatFailure.Succeeded) `
+    "netstat non-zero exit must fail closed."
+$malformedNetstat = ConvertFrom-GpuHostNetstatLines -Port 8200 -ExitCode 0 `
+    -Lines @(" TCP 0.0.0.0:8200 0.0.0.0:0 LISTENING not-a-pid")
+Assert-True (-not $malformedNetstat.Succeeded) `
+    "Malformed matching netstat output must fail closed."
+
 $staleQuery = {
     param($port)
     return New-GpuHostOwnerResult -Succeeded $true -Owners @(41)
@@ -50,12 +58,45 @@ $churn = Wait-GpuHostNewPortOwner -Port 8200 -PreviousOwners @(41) `
     -Clock $clock -DeadlineSec 0.8 -OwnerQuery $churnQuery -StableSamples 3
 Assert-True (-not $churn.Succeeded) "PID churn must not satisfy stable-owner acceptance."
 
+$oldGuid = "11111111-1111-1111-1111-111111111111"
+$newGuid = "22222222-2222-2222-2222-222222222222"
+$oldTaskQuery = {
+    param($taskName)
+    return New-GpuHostTaskInstanceResult -Succeeded $true -Instances @(
+        [pscustomobject]@{ InstanceGuid = $oldGuid; EnginePid = 200 }
+    )
+}
+$clock = [Diagnostics.Stopwatch]::StartNew()
+$noOpRun = Wait-GpuHostNewTaskInstance -TaskName "platform-ai-live-stt" `
+    -PreviousInstanceGuids @($oldGuid) -Clock $clock -DeadlineSec 0.2 `
+    -TaskInstanceQuery $oldTaskQuery -StableSamples 1
+Assert-True (-not $noOpRun.Succeeded) `
+    "/Run no-op exposing the old task instance must fail closed."
+
+$newTaskQuery = {
+    param($taskName)
+    return New-GpuHostTaskInstanceResult -Succeeded $true -Instances @(
+        [pscustomobject]@{ InstanceGuid = $newGuid; EnginePid = 300 }
+    )
+}
+$clock = [Diagnostics.Stopwatch]::StartNew()
+$newTask = Wait-GpuHostNewTaskInstance -TaskName "platform-ai-live-stt" `
+    -PreviousInstanceGuids @($oldGuid) -Clock $clock -DeadlineSec 1 `
+    -TaskInstanceQuery $newTaskQuery -StableSamples 2
+Assert-True ($newTask.Succeeded -and $newTask.Instances.Count -eq 1) `
+    "A stable new task InstanceGuid and EnginePID must pass."
+$clock = [Diagnostics.Stopwatch]::StartNew()
+Assert-True (Test-GpuHostTaskInstanceStable -TaskName "platform-ai-live-stt" `
+    -ExpectedInstanceGuid $newGuid -ExpectedEnginePid 300 -Clock $clock `
+    -DeadlineSec 1 -TaskInstanceQuery $newTaskQuery -StableSamples 2) `
+    "The accepted task instance identity must remain stable."
+
 $processes = @{
     100 = [pscustomobject]@{
         ProcessId = 100
         ParentProcessId = 200
         ExecutablePath = "C:\Python311\python.exe"
-        CommandLine = '"C:\Python311\python.exe" -m uvicorn app.main:app --port 8200'
+        CommandLine = '"C:\Python311\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 8200'
         CreationDate = "20260721220000.000000+000"
     }
     200 = [pscustomobject]@{
@@ -76,6 +117,44 @@ $proof = Get-GpuHostListenerIdentityProof -ProcessId 100 `
     -ExpectedPythonExe "C:\Python311\python.exe" -ExpectedPort 8200 `
     -ExpectedTaskPids @(200) -ProcessQuery $processQuery
 Assert-True $proof.Succeeded "Exact interpreter, command, and task ancestry must pass."
+
+$processes[100].CommandLine = `
+    '"C:\Python311\python.exe" -m uvicorn other.main:app --host 0.0.0.0 --port 8200'
+$wrongApp = Get-GpuHostListenerIdentityProof -ProcessId 100 `
+    -ExpectedPythonExe "C:\Python311\python.exe" -ExpectedPort 8200 `
+    -ExpectedTaskPids @(200) -ProcessQuery $processQuery
+Assert-True (-not $wrongApp.Succeeded) `
+    "A different ASGI application must not satisfy exact command binding."
+$processes[100].CommandLine = `
+    '"C:\Python311\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 8200'
+
+$taskArguments = New-GpuHostTaskActionArguments `
+    -TaskName "platform-ai-live-stt" -RepoRoot "C:\platform-ai" `
+    -PythonExe "C:\Python311\python.exe" -HfHome "C:\hf-cache"
+$escapedArguments = [Security.SecurityElement]::Escape($taskArguments)
+$escapedPowerShell = [Security.SecurityElement]::Escape(
+    (Get-GpuHostWindowsPowerShellPath)
+)
+$taskXml = @"
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Actions Context="Author"><Exec><Command>$escapedPowerShell</Command><Arguments>$escapedArguments</Arguments></Exec></Actions>
+</Task>
+"@
+$validTaskXml = Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
+    -TaskXml $taskXml -SkipPythonPathValidation
+Assert-True $validTaskXml.Valid "Canonical single SYSTEM task action must pass."
+$multiActionXml = $taskXml.Replace(
+    "</Actions>",
+    "<Exec><Command>$escapedPowerShell</Command><Arguments>$escapedArguments</Arguments></Exec></Actions>"
+)
+$multiAction = Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
+    -TaskXml $multiActionXml -SkipPythonPathValidation
+Assert-True (-not $multiAction.Valid) "Multiple Scheduled Task actions must fail closed."
+$wrongPrincipalXml = $taskXml.Replace("S-1-5-18", "S-1-5-32-544")
+$wrongPrincipal = Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
+    -TaskXml $wrongPrincipalXml -SkipPythonPathValidation
+Assert-True (-not $wrongPrincipal.Valid) "Non-SYSTEM principal must fail closed."
 
 $stableOwner = {
     param($port)

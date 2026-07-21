@@ -125,8 +125,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     return False
                 preload_state.begin_attempt(label)
                 started = time.monotonic()
+                cleanup_reserve_sec = 2 * settings.worker_kill_grace_sec
+                attempt_deadline = min(
+                    deadline - cleanup_reserve_sec,
+                    started + settings.stream_model_load_timeout_sec,
+                )
+                if attempt_deadline <= started:
+                    preload_state.mark_failed(label)
+                    return False
+                cleanup_deadline = min(
+                    deadline,
+                    attempt_deadline + cleanup_reserve_sec,
+                )
                 try:
-                    service.ensure_model(deadline=deadline)
+                    service.ensure_model(
+                        deadline=attempt_deadline,
+                        cleanup_deadline=cleanup_deadline,
+                    )
                 except Exception as exc:  # noqa: BLE001 - readiness records the failure
                     preload_state.mark_failed(label)
                     logger.error(

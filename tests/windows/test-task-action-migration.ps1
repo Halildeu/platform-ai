@@ -157,6 +157,8 @@ function Register-TestTask {
     $trigger = $definition.Triggers.Create(1)
     $trigger.StartBoundary = "2099-01-01T00:00:00"
     $action = $definition.Actions.Create(0)
+    # Legacy fixture: migration may recognize this bare executable only long
+    # enough to rewrite it to the absolute trusted Windows PowerShell path.
     $action.Path = "powershell.exe"
     $action.Arguments = $Arguments
     $action.WorkingDirectory = ""
@@ -231,7 +233,7 @@ function Set-RegisteredActionArguments {
 
     $task = $Folder.GetTask($TaskName)
     $definition = $task.Definition
-    $definition.Actions.Item(1).Path = "powershell.exe"
+    $definition.Actions.Item(1).Path = Get-GpuHostWindowsPowerShellPath
     $definition.Actions.Item(1).Arguments = $Arguments
     $definition.Actions.Item(1).WorkingDirectory = ""
     $sddl = [string]$task.GetSecurityDescriptor(15)
