@@ -5,10 +5,9 @@ patience: a cold load takes minutes, the desktop recorder waits 10s for
 `ready`, and its disconnect cancelled the load ("WS disconnected during model
 load"). Every attempt restarted from zero, so no session could ever start.
 
-These tests pin the three properties that keep that deadlock impossible:
-both models are loaded at boot, startup is not blocked while it happens, and a
-preload failure degrades to the old lazy path instead of taking the service
-down.
+These tests pin the properties that keep that deadlock impossible: both models
+load at boot, startup remains live, readiness fails closed, retries are bounded,
+and shutdown cannot start another model worker after cancellation.
 """
 
 from __future__ import annotations
@@ -44,16 +43,20 @@ def _patch_factories(monkeypatch, live, final) -> None:
     )
 
 
-def _run_lifespan(monkeypatch, *, preload: bool) -> FastAPI:
+def _run_lifespan(monkeypatch, *, preload: bool, max_attempts: int = 1) -> FastAPI:
+    from app.api import health
     from app.core import config as cfg
     from app.main import lifespan
 
     monkeypatch.setenv("STT_STREAM_PRELOAD_MODELS", "true" if preload else "false")
+    monkeypatch.setenv("STT_STREAM_PRELOAD_MAX_ATTEMPTS", str(max_attempts))
+    monkeypatch.setenv("STT_STREAM_PRELOAD_RETRY_BASE_SEC", "0.1")
     # get_settings() memoises into a module global; drop it so the env above is
     # what the lifespan actually reads.
     monkeypatch.setattr(cfg, "_settings", None, raising=False)
 
     app = FastAPI(lifespan=lifespan)
+    app.include_router(health.router)
 
     @app.get("/probe")
     def _probe() -> dict[str, bool]:
@@ -101,12 +104,15 @@ def test_startup_does_not_block_on_a_slow_load(monkeypatch) -> None:
             # kill the service mid-load — the same never-finishes loop, one
             # layer down.
             assert client.get("/probe").status_code == 200
+            readiness = client.get("/ready")
+            assert readiness.status_code == 503
+            assert readiness.json()["status"] == "loading"
             assert calls == []
     finally:
         blocker.set()
 
 
-def test_preload_failure_does_not_take_the_service_down(monkeypatch) -> None:
+def test_preload_failure_keeps_liveness_but_fails_readiness(monkeypatch) -> None:
     class _Exploding:
         def ensure_model(self) -> None:
             raise RuntimeError("model weights unavailable")
@@ -121,10 +127,40 @@ def test_preload_failure_does_not_take_the_service_down(monkeypatch) -> None:
             if calls:
                 break
             threading.Event().wait(0.05)
+        readiness = client.get("/ready")
+        assert readiness.status_code == 503
+        assert readiness.json()["status"] == "failed"
 
-    # The live preload raised, yet startup survived and the final model was
-    # still attempted: behaviour degrades to the old lazy path rather than
-    # taking the whole service with it.
+    # The live preload raised, yet liveness survived and the final model was
+    # still attempted. /ready remains fail-closed so traffic is not sent to a
+    # process that cannot start the customer recording stream.
+    assert calls == ["final"]
+
+
+def test_preload_retries_are_bounded_and_can_recover(monkeypatch) -> None:
+    class _FailsOnce:
+        attempts = 0
+
+        def ensure_model(self) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("transient load failure")
+
+    calls: list[str] = []
+    live = _FailsOnce()
+    _patch_factories(monkeypatch, live, _RecordingService("final", calls))
+
+    app = _run_lifespan(monkeypatch, preload=True, max_attempts=2)
+    with TestClient(app) as client:
+        for _ in range(100):
+            if client.get("/ready").status_code == 200:
+                break
+            threading.Event().wait(0.02)
+        readiness = client.get("/ready")
+        assert readiness.status_code == 200
+        assert readiness.json()["attempts"] == {"live": 2, "final": 1}
+
+    assert live.attempts == 2
     assert calls == ["final"]
 
 
@@ -137,6 +173,7 @@ def test_preload_can_be_disabled(monkeypatch) -> None:
     app = _run_lifespan(monkeypatch, preload=False)
     with TestClient(app) as client:
         assert client.get("/probe").status_code == 200
+        assert client.get("/ready").status_code == 200
         threading.Event().wait(0.2)
 
     assert calls == [], "STREAM_PRELOAD_MODELS=false must leave loading to the WS path"
@@ -172,3 +209,33 @@ def test_preload_log_names_the_model_and_duration(monkeypatch, caplog) -> None:
     assert any("role=live" in m for m in rendered), rendered
     assert any("role=final" in m for m in rendered), rendered
     assert all("elapsed_sec=" in m for m in rendered), rendered
+
+
+def test_shutdown_cancels_before_starting_the_next_model(monkeypatch) -> None:
+    calls: list[str] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingLive:
+        def ensure_model(self) -> None:
+            entered.set()
+            release.wait(timeout=5)
+            calls.append("live")
+
+    _patch_factories(monkeypatch, _BlockingLive(), _RecordingService("final", calls))
+    app = _run_lifespan(monkeypatch, preload=True)
+    client = TestClient(app)
+    client.__enter__()
+    assert entered.wait(timeout=1)
+
+    shutdown = threading.Thread(target=lambda: client.__exit__(None, None, None))
+    shutdown.start()
+    for _ in range(100):
+        if app.state.streaming_preload.stop_event.is_set():
+            break
+        threading.Event().wait(0.01)
+    release.set()
+    shutdown.join(timeout=2)
+
+    assert not shutdown.is_alive()
+    assert calls == ["live"]

@@ -43,6 +43,10 @@ $env:STT_COMPUTE_TYPE = "float16"
 # evidence uses a 180s budget; the default 60s can kill the worker before it ever
 # warms, causing every retry to cold-start again. env.local.ps1 can still override.
 $env:STT_REQUEST_TIMEOUT = "180"
+# Customer recording startup depends on both streaming models. The generic
+# Settings default remains off for local/test imports; this production entry
+# point opts in and exposes fail-closed readiness at /ready.
+$env:STT_STREAM_PRELOAD_MODELS = "true"
 
 if ($HfHome) {
     $env:HF_HOME = $HfHome

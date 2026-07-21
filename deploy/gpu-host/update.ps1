@@ -495,65 +495,49 @@ if ($NoRestart) {
   }
 }
 
-# 5. Warm live-stt so /health reaches "ok" after the deploy without a manual
-#    transcribe (the /transcribe model is lazy-loaded on the first request). This
-#    is a plain FOREGROUND curl in update.ps1's own process - NOT a Start-Job: an
-#    in-process background job inside the SYSTEM start task breaks the uvicorn
-#    launch under WinPS 5.1 (#193 live-acceptance failed). Running it here, outside
-#    the service tree, cannot affect the service. Best-effort - never fails update;
-#    a reboot (not via this script) stays lazy until the first real transcribe.
+# 5. Wait for both customer-path streaming models. Do not warm the legacy
+#    synchronous /transcribe model here: it is a third resident Whisper model,
+#    and allocating it during deployment can make the 8 GiB GPU peak unbounded.
+#    /transcribe remains lazy; the recording path is accepted by /ready plus the
+#    direct WebSocket handshake below.
 if (-not $NoRestart -and -not $restartFailed) {
-  $warmupWav = Join-Path $RepoRoot "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.wav"
-  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-  if ((Test-Path $warmupWav) -and $curl) {
-    $oldEap = $ErrorActionPreference
-    try {
-      $ErrorActionPreference = "Continue"
-      Write-Host "[update] warming live-stt (lazy model load)..." -ForegroundColor Cyan
-      # Health-wait via Invoke-RestMethod (NOT curl -o $null -w http_code: under
-      # WinPS 5.1 a $null arg mangles curl so the code is never "200" and the
-      # warmup is always skipped - caught live 2026-06-22). IRM throws on non-200,
-      # caught; EAP=Continue is already set so it stays best-effort.
-      $up = $false
-      for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Seconds 5
-        try { $null = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5 -ErrorAction Stop; $up = $true; break } catch { }
-      }
-      if (-not $up) {
-        Write-Host "[update] live-stt /health did not answer in time; skipping warmup (lazy load on first transcribe)" -ForegroundColor Yellow
-      } else {
-        # -f so an HTTP 4xx/5xx (e.g. a 503 while the model loads) is a non-zero
-        # exit rather than a false success; then verify /health actually reached
-        # "ok" before logging green (curl exit 0 alone is not warmup acceptance).
-        # Match the GPU-host cold-load request budget from start-live-stt.ps1.
-        # The old 120s curl cap could abort the deploy warmup before the service
-        # reached its own 180s STT_REQUEST_TIMEOUT window.
-        & curl.exe -fsS --max-time 240 -F "audio=@$warmupWav;type=audio/wav" "http://127.0.0.1:8200/transcribe?language=tr&session_id=deploy-warmup&meeting_id=deploy-warmup&device_id=deploy-warmup" 1> $null 2> $null
-        $curlExit = $LASTEXITCODE
-        if ($curlExit -ne 0) {
-          Write-Host "[update] live-stt warmup curl exit=$curlExit (service is up; first real transcribe will load it)" -ForegroundColor Yellow
-        } else {
-          try {
-            $health = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5 -ErrorAction Stop
-            if ($health.status -eq "ok") { Write-Host "[update] live-stt warmup posted (model loaded -> /health ok)" -ForegroundColor Green }
-            else { Write-Host "[update] live-stt warmup posted but /health status=$($health.status) (first real transcribe may still load it)" -ForegroundColor Yellow }
-          } catch {
-            Write-Host "[update] live-stt warmup posted but /health verify failed (first real transcribe may still load it)" -ForegroundColor Yellow
-          }
-        }
-      }
-    } finally { $ErrorActionPreference = $oldEap }
+  Write-Host "[update] waiting for live-stt streaming model readiness..." -ForegroundColor Cyan
+  $up = $false
+  for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 5
+    try { $null = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5 -ErrorAction Stop; $up = $true; break } catch { }
   }
+  if (-not $up) {
+    Set-DeploymentLedgerResult -Result "readiness-failed"
+    Stop-Deploy "live-stt /health did not answer after restart." `
+      $script:DeployExitRestartFailed
+  }
+  $streamReady = $false
+  for ($i = 0; $i -lt 72; $i++) {
+    try {
+      $readiness = Invoke-RestMethod "http://127.0.0.1:8200/ready" -TimeoutSec 5 -ErrorAction Stop
+      if ($readiness.status -eq "ready") { $streamReady = $true; break }
+    } catch { }
+    Start-Sleep -Seconds 5
+  }
+  if (-not $streamReady) {
+    Set-DeploymentLedgerResult -Result "readiness-failed"
+    Stop-Deploy "live-stt streaming models did not reach /ready within 360s." `
+      $script:DeployExitRestartFailed
+  }
+  Write-Host "[update] live-stt streaming models ready" -ForegroundColor Green
 
-  Write-Host "[update] warming live-stt direct /ws/stream models..." -ForegroundColor Cyan
+  Write-Host "[update] verifying live-stt direct /ws/stream handshake..." -ForegroundColor Cyan
   if (Wait-LiveSttStreamReady -Url "ws://127.0.0.1:8200/ws/stream" -TimeoutSec 240) {
-    Write-Host "[update] direct /ws/stream warmup ready (live + final models loaded)" -ForegroundColor Green
+    Write-Host "[update] direct /ws/stream ready (preloaded live + final models)" -ForegroundColor Green
   } else {
-    Write-Host "[update] direct /ws/stream warmup did not reach ready (first stream may pay model load)" -ForegroundColor Yellow
+    Set-DeploymentLedgerResult -Result "readiness-failed"
+    Stop-Deploy "direct /ws/stream did not reach ready after model preload." `
+      $script:DeployExitRestartFailed
   }
 }
 
-Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8300/health ; ws://127.0.0.1:8200/ws/stream ready" -ForegroundColor Cyan
+Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8200/ready ; :8300/health ; ws://127.0.0.1:8200/ws/stream ready" -ForegroundColor Cyan
 if (-not $NoRestart) {
   Set-DeploymentLedgerResult -Result "tasks-restarted"
 }

@@ -82,11 +82,12 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn(timeout_line, script)
         self.assertLess(script.index(timeout_line), script.index("$envLocal = Join-Path"))
 
-    def test_live_stt_update_warmup_budget_matches_gpu_cold_load_timeout(self) -> None:
+    def test_live_stt_update_waits_for_stream_readiness_without_sync_gpu_warmup(self) -> None:
         script = self._read_script("update.ps1")
 
-        self.assertIn("--max-time 240", script)
-        self.assertNotIn("--max-time 120 -F", script)
+        self.assertIn('Invoke-RestMethod "http://127.0.0.1:8200/ready"', script)
+        self.assertIn('Set-DeploymentLedgerResult -Result "readiness-failed"', script)
+        self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
 
     def test_meeting_ai_launcher_uses_non_executable_dpapi_config(self) -> None:
         script = self._read_script("start-meeting-ai.ps1")

@@ -22,6 +22,18 @@ def test_health_loading_before_first_request(client) -> None:  # type: ignore[no
     assert body["device"] == "cpu"
 
 
+def test_ready_is_available_when_preload_is_intentionally_disabled(client) -> None:  # type: ignore[no-untyped-def]
+    r = client.get("/ready")
+    assert r.status_code == 200
+    assert r.json() == {
+        "status": "ready",
+        "streaming_preload_enabled": False,
+        "roles": {"live": "disabled", "final": "disabled"},
+        "attempts": {"live": 0, "final": 0},
+        "workers_healthy": True,
+    }
+
+
 def test_transcribe_happy_path(client) -> None:  # type: ignore[no-untyped-def]
     audio = b"FAKE_AUDIO_BYTES" * 100
     r = client.post(
@@ -77,6 +89,7 @@ def test_openapi_exposes_endpoints(client) -> None:  # type: ignore[no-untyped-d
     assert r.status_code == 200
     paths = r.json()["paths"]
     assert "/health" in paths
+    assert "/ready" in paths
     assert "/transcribe" in paths
 
 

@@ -1,30 +1,43 @@
-"""GET /health — liveness + readiness."""
+"""Liveness and explicit streaming-model readiness endpoints."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.core.config import Settings, get_settings
 from app.models.schemas import HealthResponse
+from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import streaming_services_healthy
 from app.services.transcribe import get_service
 
 router = APIRouter()
 
 
-@router.get("/health", response_model=HealthResponse, summary="Liveness + readiness")
+def _preload_state(request: Request, settings: Settings) -> StreamingPreloadState:
+    state = getattr(request.app.state, "streaming_preload", None)
+    if isinstance(state, StreamingPreloadState):
+        return state
+    return StreamingPreloadState(enabled=settings.stream_preload_models)
+
+
+@router.get("/health", response_model=HealthResponse, summary="Process liveness")
 async def health(
+    request: Request,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> HealthResponse:
     """Status:
-    - `loading`  → service up but model not yet loaded (first request pays cost)
-    - `ok`       → model loaded
-    - `degraded` → reserved for future failure-mode signaling
+    - `loading`  → process is up but the legacy sync model is still lazy
+    - `ok`       → legacy sync model is loaded
+    - `degraded` → streaming preload failed or a supervised worker is unhealthy
+
+    Traffic admission for the customer streaming path uses `/ready`.
     """
     service = get_service(settings)
     status = "ok" if service.model_loaded else "loading"
-    if not streaming_services_healthy():
+    preload = _preload_state(request, settings).snapshot()
+    if not streaming_services_healthy() or preload.status == "failed":
         status = "degraded"
     return HealthResponse(
         status=status,
@@ -34,4 +47,25 @@ async def health(
         model_sha256=settings.model_sha256,
         device=settings.device,
         compute_type=settings.compute_type,
+    )
+
+
+@router.get("/ready", summary="Streaming model readiness")
+async def ready(
+    request: Request,
+    settings: Settings = Depends(get_settings),  # noqa: B008
+) -> JSONResponse:
+    """Fail closed until both configured streaming models are loaded."""
+    snapshot = _preload_state(request, settings).snapshot()
+    healthy = streaming_services_healthy()
+    is_ready = snapshot.ready and healthy
+    return JSONResponse(
+        status_code=200 if is_ready else 503,
+        content={
+            "status": "ready" if is_ready else snapshot.status,
+            "streaming_preload_enabled": snapshot.enabled,
+            "roles": snapshot.roles,
+            "attempts": snapshot.attempts,
+            "workers_healthy": healthy,
+        },
     )

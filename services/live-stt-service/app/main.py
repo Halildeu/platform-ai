@@ -83,50 +83,73 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # model load"). Every attempt restarted from zero, so no session could ever
     # start. Preloading moves the cost to boot, where nothing is waiting.
     #
-    # Daemon thread: startup must not block, or health probes fail for the
+    # Daemon thread: startup must not block, or liveness probes fail for the
     # minutes the load takes and the supervisor kills the service mid-load —
     # recreating the same never-finishes loop at a different layer.
+    from app.services.model_preload import StreamingPreloadState
+
+    preload_state = StreamingPreloadState(enabled=settings.stream_preload_models)
+    app.state.streaming_preload = preload_state
     preload_thread = None
     if settings.stream_preload_models:
         import threading
 
-        def _preload_models() -> None:
-            from app.services.streaming_models import get_final_service, get_live_service
+        from app.services.streaming_models import get_final_service, get_live_service
 
-            for label, factory in (("live", get_live_service), ("final", get_final_service)):
-                started = time.monotonic()
-                try:
-                    factory(settings).ensure_model()
-                except Exception as exc:  # noqa: BLE001 - never kill the service over a preload
-                    # A failed preload is not fatal: the WS path still calls
-                    # ensure_model(), so behaviour degrades to the old lazy load
-                    # rather than taking the service down.
-                    # Role and duration go in the message, not only in `extra`:
-                    # the configured format renders just `%(message)s`, so extras
-                    # are invisible in the log an operator actually reads.
-                    logger.error(
-                        "streaming model preload failed role=%s error=%s elapsed_sec=%.1f",
+        # Construct both supervised services before the worker thread starts.
+        # shutdown_streaming_services() can then always find and stop them, even
+        # if shutdown races the first native model load.
+        preload_services = (
+            ("live", get_live_service(settings)),
+            ("final", get_final_service(settings)),
+        )
+
+        def _preload_models() -> None:
+            for label, service in preload_services:
+                for attempt in range(1, settings.stream_preload_max_attempts + 1):
+                    if preload_state.stop_event.is_set():
+                        return
+                    preload_state.begin_attempt(label)
+                    started = time.monotonic()
+                    try:
+                        service.ensure_model()
+                    except Exception as exc:  # noqa: BLE001 - readiness records the failure
+                        preload_state.mark_failed(label)
+                        logger.error(
+                            "streaming model preload failed role=%s attempt=%d error=%s "
+                            "elapsed_sec=%.1f",
+                            label,
+                            attempt,
+                            type(exc).__name__,
+                            time.monotonic() - started,
+                            extra={
+                                "correlation_id": "startup",
+                                "model_role": label,
+                                "error_class": type(exc).__name__,
+                                "attempt": attempt,
+                                "elapsed_sec": round(time.monotonic() - started, 1),
+                            },
+                        )
+                        if attempt >= settings.stream_preload_max_attempts:
+                            break
+                        delay = settings.stream_preload_retry_base_sec * (2 ** (attempt - 1))
+                        if preload_state.stop_event.wait(delay):
+                            return
+                        continue
+                    preload_state.mark_ready(label)
+                    logger.info(
+                        "streaming model preloaded role=%s attempt=%d elapsed_sec=%.1f",
                         label,
-                        type(exc).__name__,
+                        attempt,
                         time.monotonic() - started,
                         extra={
                             "correlation_id": "startup",
                             "model_role": label,
-                            "error_class": type(exc).__name__,
+                            "attempt": attempt,
                             "elapsed_sec": round(time.monotonic() - started, 1),
                         },
                     )
-                    continue
-                logger.info(
-                    "streaming model preloaded role=%s elapsed_sec=%.1f",
-                    label,
-                    time.monotonic() - started,
-                    extra={
-                        "correlation_id": "startup",
-                        "model_role": label,
-                        "elapsed_sec": round(time.monotonic() - started, 1),
-                    },
-                )
+                    break
 
         preload_thread = threading.Thread(
             target=_preload_models, name="model-preload", daemon=True
@@ -166,6 +189,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if consumer is not None and consumer_thread is not None:
         consumer.stop()
         consumer_thread.join(timeout=5)
+    preload_state.request_stop()
     from app.services.streaming_models import shutdown_streaming_services
 
     try:
@@ -175,6 +199,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "streaming worker shutdown incomplete",
             extra={"correlation_id": "shutdown", "error_class": type(exc).__name__},
         )
+    if preload_thread is not None:
+        preload_thread.join(timeout=5)
+        if preload_thread.is_alive():
+            logger.error(
+                "streaming model preload thread did not stop within shutdown budget",
+                extra={"correlation_id": "shutdown"},
+            )
     logger.info("live-stt-service stopping", extra={"correlation_id": "shutdown"})
 
 

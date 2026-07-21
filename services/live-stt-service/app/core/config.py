@@ -140,10 +140,12 @@ class Settings(BaseSettings):
     # from zero, so the model never finishes loading and no session can ever
     # start. Preloading moves that cost to boot, where nothing is waiting.
     #
-    # Runs in a background thread: startup stays non-blocking so health probes
-    # answer immediately. Disable only where the model cannot be fetched (unit
-    # tests, air-gapped CI).
-    stream_preload_models: bool = Field(default=True)
+    # Runs in a background thread: startup stays non-blocking so liveness probes
+    # answer immediately. The production launcher opts in explicitly; local and
+    # test environments must not allocate both models merely by importing the app.
+    stream_preload_models: bool = Field(default=False)
+    stream_preload_max_attempts: int = Field(default=3, ge=1, le=5)
+    stream_preload_retry_base_sec: float = Field(default=1.0, ge=0.1, le=30.0)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.
     live_infer_interval_ms: int = Field(default=700, ge=1, le=5000)
