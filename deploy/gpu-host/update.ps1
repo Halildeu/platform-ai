@@ -348,6 +348,17 @@ function Set-DeploymentLedgerResult {
   }
 }
 
+$runtimeContract = Join-Path $RepoRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
+$taskActionContract = Join-Path $RepoRoot "deploy\gpu-host\task-action-contract.ps1"
+if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf)) {
+  Set-DeploymentLedgerResult -Result "restart-failed"
+  Stop-Deploy "Pinned source is missing a GPU-host runtime/action contract." `
+    $script:DeployExitRestartFailed
+}
+. $runtimeContract
+. $taskActionContract
+
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
 #    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
 #    ScheduledTasks module is ABSENT on some hosts (this GPU host's Windows
@@ -380,24 +391,115 @@ function Invoke-SchtasksTask {
   }
 }
 
+function Get-SchtasksTaskXml {
+  param([Parameter(Mandatory = $true)][string]$TaskName)
+
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = @(& schtasks.exe /Query /TN $TaskName /XML 2> $null)
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
+function Get-TaskPythonExe {
+  param([Parameter(Mandatory = $true)][string]$TaskName)
+
+  try {
+    $query = Get-SchtasksTaskXml -TaskName $TaskName
+    if ($query.ExitCode -ne 0 -or $query.Output.Count -eq 0) { return "" }
+    [xml]$taskXml = ($query.Output -join [Environment]::NewLine)
+    $namespace = New-Object Xml.XmlNamespaceManager($taskXml.NameTable)
+    $namespace.AddNamespace("t", $taskXml.DocumentElement.NamespaceURI)
+    $exec = $taskXml.SelectSingleNode("//t:Actions/t:Exec", $namespace)
+    if ($null -eq $exec) { return "" }
+    $contract = Get-GpuHostTaskActionContract -TaskName $TaskName `
+      -Execute ([string]$exec.Command) -Arguments ([string]$exec.Arguments) `
+      -WorkingDirectory ([string]$exec.WorkingDirectory)
+    if (-not $contract.Valid -or
+        -not (Test-Path -LiteralPath $contract.PythonExe -PathType Leaf)) {
+      return ""
+    }
+    return [string]$contract.PythonExe
+  } catch {
+    return ""
+  }
+}
+
+function Get-ListeningPortOwnerIds {
+  param([Parameter(Mandatory = $true)][int]$Port)
+
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $lines = @(& netstat.exe -ano -p TCP 2> $null)
+    if ($LASTEXITCODE -ne 0) { return @() }
+    $pattern = '^\s*TCP\s+\S+:' + $Port + '\s+\S+\s+LISTENING\s+(\d+)\s*$'
+    $owners = @()
+    foreach ($line in $lines) {
+      if ([string]$line -match $pattern) { $owners += [int]$Matches[1] }
+    }
+    return @($owners | Sort-Object -Unique)
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
+function Wait-PortReleased {
+  param(
+    [Parameter(Mandatory = $true)][int]$Port,
+    [int]$TimeoutSec = 30
+  )
+
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  while ($clock.Elapsed.TotalSeconds -lt $TimeoutSec) {
+    if (@(Get-ListeningPortOwnerIds -Port $Port).Count -eq 0) { return $true }
+    Start-Sleep -Milliseconds 250
+  }
+  return $false
+}
+
+function Wait-NewPortOwner {
+  param(
+    [Parameter(Mandatory = $true)][int]$Port,
+    [int[]]$PreviousOwners = @(),
+    [int]$TimeoutSec = 60
+  )
+
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  while ($clock.Elapsed.TotalSeconds -lt $TimeoutSec) {
+    $owners = @(Get-ListeningPortOwnerIds -Port $Port)
+    $newOwners = @($owners | Where-Object { $PreviousOwners -notcontains $_ })
+    if ($newOwners.Count -gt 0 -and $newOwners.Count -eq $owners.Count) {
+      return $newOwners
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  return @()
+}
+
 function Invoke-LiveSttStreamAcceptance {
   param(
+    [Parameter(Mandatory = $true)][string]$PythonExe,
     [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1"
   )
 
   $oldEap = $ErrorActionPreference
   try {
     $ErrorActionPreference = "Continue"
-    $python = (Get-Command python -ErrorAction Stop).Source
     $smoke = Join-Path $RepoRoot "services\live-stt-service\scripts\live_stream_smoke.py"
     $wav = Join-Path $RepoRoot `
       "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.wav"
-    if (-not (Test-Path -LiteralPath $smoke -PathType Leaf) -or
+    if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $smoke -PathType Leaf) -or
         -not (Test-Path -LiteralPath $wav -PathType Leaf)) {
-      Write-Host "[update] direct stream acceptance fixture/script missing" -ForegroundColor Yellow
+      Write-Host "[update] direct stream acceptance interpreter/fixture missing" `
+        -ForegroundColor Yellow
       return $false
     }
-    $output = & $python $smoke `
+    $output = & $PythonExe $smoke `
       --url $Url `
       --wav $wav `
       --timeout-sec 30 `
@@ -421,6 +523,9 @@ function Invoke-LiveSttStreamAcceptance {
       Write-Host "[update] direct stream acceptance returned invalid summary" -ForegroundColor Yellow
       return $false
     }
+  } catch {
+    Write-Host "[update] direct stream acceptance could not be executed" -ForegroundColor Yellow
+    return $false
   } finally {
     $ErrorActionPreference = $oldEap
   }
@@ -431,6 +536,8 @@ if ($NoRestart) {
   Set-DeploymentLedgerResult -Result "pinned-no-restart"
 } else {
   $restartFailed = $false
+  $liveSttPythonExe = ""
+  $liveSttRuntimeOwners = @()
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
     if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
       Write-Host "[update] ERROR: required task '$task' is not installed" `
@@ -438,16 +545,44 @@ if ($NoRestart) {
       $restartFailed = $true
       continue
     }
+    $taskSpec = Get-GpuHostTaskSpec -TaskName $task
+    $taskPythonExe = Get-TaskPythonExe -TaskName $task
+    if ([string]::IsNullOrWhiteSpace($taskPythonExe)) {
+      Write-Host "[update] ERROR: task '$task' action contract is invalid" `
+        -ForegroundColor Red
+      $restartFailed = $true
+      continue
+    }
+    $previousOwners = @(Get-ListeningPortOwnerIds -Port ([int]$taskSpec.Port))
     # /End returns non-zero when the task is not running (benign). When it WAS
-    # running, give the process ~2s to release its listening port before /Run
-    # starts a fresh instance (live-stt/meeting-ai bind 8200/8300).
-    if ((Invoke-SchtasksTask -Action "/End" -TaskName $task) -eq 0) { Start-Sleep -Seconds 2 }
+    # running, require the listener to disappear before /Run. A fixed sleep can
+    # accept a stale child or make /Run a no-op while the previous process owns
+    # the port.
+    $null = Invoke-SchtasksTask -Action "/End" -TaskName $task
+    if (-not (Wait-PortReleased -Port ([int]$taskSpec.Port) -TimeoutSec 30)) {
+      Write-Host "[update] ERROR: stale listener remained on port $($taskSpec.Port)" `
+        -ForegroundColor Red
+      $restartFailed = $true
+      continue
+    }
     $runExit = Invoke-SchtasksTask -Action "/Run" -TaskName $task
     if ($runExit -ne 0) {
       Write-Host "[update] ERROR: schtasks /Run '$task' exit=$runExit" -ForegroundColor Red
       $restartFailed = $true
     } else {
-      Write-Host "[update] restarted $task" -ForegroundColor Green
+      $newOwners = @(Wait-NewPortOwner -Port ([int]$taskSpec.Port) `
+        -PreviousOwners $previousOwners -TimeoutSec 60)
+      if ($newOwners.Count -eq 0) {
+        Write-Host "[update] ERROR: task '$task' did not create a new listener" `
+          -ForegroundColor Red
+        $restartFailed = $true
+        continue
+      }
+      if ($task -eq "platform-ai-live-stt") {
+        $liveSttPythonExe = $taskPythonExe
+        $liveSttRuntimeOwners = $newOwners
+      }
+      Write-Host "[update] restarted $task with a new port owner" -ForegroundColor Green
     }
   }
   if ($restartFailed) {
@@ -464,33 +599,56 @@ if ($NoRestart) {
 #    direct WebSocket handshake below.
 if (-not $NoRestart -and -not $restartFailed) {
   Write-Host "[update] waiting for live-stt streaming model readiness..." -ForegroundColor Cyan
-  $up = $false
-  for ($i = 0; $i -lt 30; $i++) {
-    Start-Sleep -Seconds 5
-    try { $null = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5 -ErrorAction Stop; $up = $true; break } catch { }
-  }
-  if (-not $up) {
-    Set-DeploymentLedgerResult -Result "readiness-failed"
-    Stop-Deploy "live-stt /health did not answer after restart." `
-      $script:DeployExitRestartFailed
-  }
   $streamReady = $false
-  for ($i = 0; $i -lt 150; $i++) {
+  $readinessClock = [Diagnostics.Stopwatch]::StartNew()
+  while ($readinessClock.Elapsed.TotalSeconds -lt $script:LiveSttReadinessDeadlineSec) {
+    $remaining = $script:LiveSttReadinessDeadlineSec - $readinessClock.Elapsed.TotalSeconds
+    $requestTimeout = [Math]::Max(1, [Math]::Min(5, [Math]::Ceiling($remaining)))
     try {
-      $readiness = Invoke-RestMethod "http://127.0.0.1:8200/ready" -TimeoutSec 5 -ErrorAction Stop
-      if ($readiness.status -eq "ready") { $streamReady = $true; break }
+      $readiness = Invoke-RestMethod "http://127.0.0.1:8200/ready" `
+        -TimeoutSec $requestTimeout -ErrorAction Stop
+      $runtimeOk = (
+        $readiness.status -eq "ready" -and
+        $readiness.runtime_commit -eq $target -and
+        [int]$readiness.preload_budget_sec -eq $script:LiveSttReadinessDeadlineSec -and
+        $readiness.runtime.legacy.device -eq "cpu" -and
+        $readiness.runtime.legacy.compute_type -eq "int8" -and
+        $readiness.runtime.live.device -eq "cuda" -and
+        $readiness.runtime.live.compute_type -eq "int8" -and
+        $readiness.runtime.final.device -eq "cuda" -and
+        $readiness.runtime.final.compute_type -eq "float16"
+      )
+      if ($runtimeOk) { $streamReady = $true; break }
     } catch { }
-    Start-Sleep -Seconds 5
+    $sleepMs = [Math]::Min(5000, [Math]::Max(
+      0,
+      [int](($script:LiveSttReadinessDeadlineSec - $readinessClock.Elapsed.TotalSeconds) * 1000)
+    ))
+    if ($sleepMs -gt 0) { Start-Sleep -Milliseconds $sleepMs }
   }
   if (-not $streamReady) {
     Set-DeploymentLedgerResult -Result "readiness-failed"
-    Stop-Deploy "live-stt streaming models did not reach /ready within 750s." `
+    Stop-Deploy ("live-stt exact runtime did not reach /ready within {0}s." -f `
+      $script:LiveSttReadinessDeadlineSec) `
+      $script:DeployExitRestartFailed
+  }
+  $currentOwners = @(Get-ListeningPortOwnerIds -Port 8200)
+  $ownerDrift = (
+    $currentOwners.Count -eq 0 -or
+    $currentOwners.Count -ne $liveSttRuntimeOwners.Count -or
+    @($currentOwners | Where-Object { $liveSttRuntimeOwners -notcontains $_ }).Count -gt 0 -or
+    @($liveSttRuntimeOwners | Where-Object { $currentOwners -notcontains $_ }).Count -gt 0
+  )
+  if ($ownerDrift) {
+    Set-DeploymentLedgerResult -Result "readiness-failed"
+    Stop-Deploy "live-stt port owner changed during readiness acceptance." `
       $script:DeployExitRestartFailed
   }
   Write-Host "[update] live-stt streaming models ready" -ForegroundColor Green
 
   Write-Host "[update] verifying live-stt direct inference + EOF contract..." -ForegroundColor Cyan
-  if (Invoke-LiveSttStreamAcceptance -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1") {
+  if (Invoke-LiveSttStreamAcceptance -PythonExe $liveSttPythonExe `
+      -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1") {
     Write-Host "[update] direct /ws/stream inference + source ranges accepted" -ForegroundColor Green
   } else {
     Set-DeploymentLedgerResult -Result "readiness-failed"

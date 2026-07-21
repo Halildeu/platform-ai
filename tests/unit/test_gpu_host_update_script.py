@@ -94,7 +94,10 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("live_stream_smoke.py", script)
         self.assertIn("--min-final-events 1", script)
         self.assertIn('"eof_ack,drained"', script)
-        self.assertIn("within 750s", script)
+        self.assertIn("LiveSttReadinessDeadlineSec", script)
+        self.assertIn("[Diagnostics.Stopwatch]::StartNew()", script)
+        self.assertIn("$readiness.runtime_commit -eq $target", script)
+        self.assertIn("$readiness.runtime.live.device -eq \"cuda\"", script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
 
     def test_live_stt_production_launcher_reasserts_preload_after_local_overrides(self) -> None:
@@ -104,14 +107,52 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         env_local_line = "$envLocal = Join-Path"
         self.assertGreater(script.rindex(preload_line), script.index(env_local_line))
         self.assertGreater(
-            script.index('$env:STT_STREAM_PRELOAD_MAX_ATTEMPTS = "2"'),
+            script.index(
+                '$env:STT_STREAM_PRELOAD_MAX_ATTEMPTS = '
+                '"$script:LiveSttPreloadMaxAttempts"'
+            ),
             script.index(env_local_line),
         )
         self.assertIn("STT_LIVE_MODEL_REVISION", script)
         self.assertIn("STT_LIVE_MODEL_SHA256", script)
         self.assertIn("STT_FINAL_MODEL_REVISION", script)
         self.assertIn("STT_FINAL_MODEL_SHA256", script)
-        self.assertIn('$env:STT_DEVICE = "cpu"', script)
+        for assignment in (
+            '$env:STT_DEVICE = "cpu"',
+            '$env:STT_COMPUTE_TYPE = "int8"',
+            '$env:STT_LIVE_DEVICE = "cuda"',
+            '$env:STT_LIVE_COMPUTE_TYPE = "int8"',
+            '$env:STT_FINAL_DEVICE = "cuda"',
+            '$env:STT_FINAL_COMPUTE_TYPE = "float16"',
+            "$env:STT_RUNTIME_COMMIT",
+            "$env:STT_STREAM_MODEL_LOAD_TIMEOUT_SEC",
+            "$env:STT_STREAM_PRELOAD_READINESS_BUDGET_SEC",
+        ):
+            self.assertGreater(script.rindex(assignment), script.index(env_local_line))
+
+    def test_live_stt_runtime_contract_bounds_preload_and_is_shared(self) -> None:
+        contract = self._read_script("live-stt-runtime-contract.ps1")
+        launcher = self._read_script("start-live-stt.ps1")
+        update = self._read_script("update.ps1")
+
+        contract.encode("ascii")
+        self.assertIn("LiveSttPreloadWorstCaseSec", contract)
+        self.assertIn("LiveSttReadinessDeadlineSec = 780", contract)
+        self.assertIn("exceeds its readiness deadline", contract)
+        self.assertIn("live-stt-runtime-contract.ps1", launcher)
+        self.assertIn("live-stt-runtime-contract.ps1", update)
+
+    def test_gpu_host_restart_requires_new_port_owner_and_exact_task_interpreter(self) -> None:
+        script = self._read_script("update.ps1")
+
+        self.assertIn("function Get-ListeningPortOwnerIds", script)
+        self.assertIn("function Wait-PortReleased", script)
+        self.assertIn("function Wait-NewPortOwner", script)
+        self.assertIn("Get-GpuHostTaskActionContract", script)
+        self.assertIn("Get-SchtasksTaskXml", script)
+        self.assertIn("-PythonExe $liveSttPythonExe", script)
+        self.assertNotIn("Get-Command python", script)
+        self.assertIn("port owner changed during readiness acceptance", script)
 
     def test_meeting_ai_launcher_uses_non_executable_dpapi_config(self) -> None:
         script = self._read_script("start-meeting-ai.ps1")

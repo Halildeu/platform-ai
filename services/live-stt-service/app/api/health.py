@@ -59,13 +59,29 @@ async def ready(
     snapshot = _preload_state(request, settings).snapshot()
     healthy = streaming_services_healthy()
     is_ready = snapshot.ready and healthy
+    effective_status: str = snapshot.status
+    if snapshot.ready and not healthy:
+        effective_status = "unhealthy"
     return JSONResponse(
         status_code=200 if is_ready else 503,
         content={
-            "status": "ready" if is_ready else snapshot.status,
+            "status": "ready" if is_ready else effective_status,
+            "runtime_commit": settings.runtime_commit,
+            "preload_budget_sec": settings.stream_preload_readiness_budget_sec,
             "streaming_preload_enabled": snapshot.enabled,
             "roles": snapshot.roles,
             "attempts": snapshot.attempts,
             "workers_healthy": healthy,
+            "runtime": {
+                "legacy": {"device": settings.device, "compute_type": settings.compute_type},
+                "live": {
+                    "device": settings.live_device,
+                    "compute_type": settings.live_compute_type,
+                },
+                "final": {
+                    "device": settings.final_device,
+                    "compute_type": settings.final_compute_type,
+                },
+            },
         },
     )

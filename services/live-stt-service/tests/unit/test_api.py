@@ -27,10 +27,17 @@ def test_ready_fails_closed_when_preload_is_disabled(client) -> None:  # type: i
     assert r.status_code == 503
     assert r.json() == {
         "status": "disabled",
+        "runtime_commit": "unversioned",
+        "preload_budget_sec": 780.0,
         "streaming_preload_enabled": False,
         "roles": {"live": "disabled", "final": "disabled"},
         "attempts": {"live": 0, "final": 0},
         "workers_healthy": True,
+        "runtime": {
+            "legacy": {"device": "cpu", "compute_type": "int8"},
+            "live": {"device": "cuda", "compute_type": "int8"},
+            "final": {"device": "cuda", "compute_type": "float16"},
+        },
     }
 
 

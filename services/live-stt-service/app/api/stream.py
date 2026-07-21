@@ -716,7 +716,7 @@ async def stream_endpoint(
             *,
             retain_tail: bool,
             commit_end_sample: int,
-            committed_audio: np.ndarray,
+            committed_audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         ) -> None:
             nonlocal buffer, buffer_start_t, seg_index, last_draft, confirmed_draft
             nonlocal tentative_draft, speech_seen

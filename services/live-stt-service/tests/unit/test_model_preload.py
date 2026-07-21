@@ -25,6 +25,8 @@ class _RecordingService:
         self._label = label
         self._calls = calls
         self._blocker = blocker
+        self.healthy = True
+        self.model_loaded = False
 
     def ensure_model(self) -> None:
         if self._blocker is not None:
@@ -32,6 +34,7 @@ class _RecordingService:
             # wait for it.
             self._blocker.wait(timeout=5)
         self._calls.append(self._label)
+        self.model_loaded = True
 
 
 def _patch_factories(monkeypatch, live, final) -> None:
@@ -51,6 +54,7 @@ def _run_lifespan(monkeypatch, *, preload: bool, max_attempts: int = 1) -> FastA
     monkeypatch.setenv("STT_STREAM_PRELOAD_MODELS", "true" if preload else "false")
     monkeypatch.setenv("STT_STREAM_PRELOAD_MAX_ATTEMPTS", str(max_attempts))
     monkeypatch.setenv("STT_STREAM_PRELOAD_RETRY_BASE_SEC", "0.1")
+    monkeypatch.setenv("STT_STREAM_RECOVERY_POLL_SEC", "0.1")
     # get_settings() memoises into a module global; drop it so the env above is
     # what the lifespan actually reads.
     monkeypatch.setattr(cfg, "_settings", None, raising=False)
@@ -114,6 +118,9 @@ def test_startup_does_not_block_on_a_slow_load(monkeypatch) -> None:
 
 def test_preload_failure_keeps_liveness_but_fails_readiness(monkeypatch) -> None:
     class _Exploding:
+        healthy = True
+        model_loaded = False
+
         def ensure_model(self) -> None:
             raise RuntimeError("model weights unavailable")
 
@@ -140,11 +147,14 @@ def test_preload_failure_keeps_liveness_but_fails_readiness(monkeypatch) -> None
 def test_preload_retries_are_bounded_and_can_recover(monkeypatch) -> None:
     class _FailsOnce:
         attempts = 0
+        healthy = True
+        model_loaded = False
 
         def ensure_model(self) -> None:
             self.attempts += 1
             if self.attempts == 1:
                 raise RuntimeError("transient load failure")
+            self.model_loaded = True
 
     calls: list[str] = []
     live = _FailsOnce()
@@ -162,6 +172,56 @@ def test_preload_retries_are_bounded_and_can_recover(monkeypatch) -> None:
 
     assert live.attempts == 2
     assert calls == ["final"]
+
+
+def test_worker_loss_reloads_the_same_pinned_service_and_restores_readiness(monkeypatch) -> None:
+    calls: list[str] = []
+    live = _RecordingService("live", calls)
+    final = _RecordingService("final", calls)
+    _patch_factories(monkeypatch, live, final)
+
+    app = _run_lifespan(monkeypatch, preload=True)
+    with TestClient(app) as client:
+        for _ in range(100):
+            if client.get("/ready").status_code == 200:
+                break
+            threading.Event().wait(0.02)
+        assert client.get("/ready").status_code == 200
+
+        live.model_loaded = False
+        for _ in range(100):
+            readiness = client.get("/ready")
+            if calls.count("live") == 2 and readiness.status_code == 200:
+                break
+            threading.Event().wait(0.02)
+
+        readiness = client.get("/ready")
+        assert readiness.status_code == 200
+        assert readiness.json()["attempts"]["live"] == 2
+
+    assert calls.count("live") == 2
+    assert calls.count("final") == 1
+
+
+def test_ready_body_reports_unhealthy_when_preloaded_worker_is_lost(monkeypatch) -> None:
+    from app.api import health
+
+    calls: list[str] = []
+    _patch_factories(
+        monkeypatch, _RecordingService("live", calls), _RecordingService("final", calls)
+    )
+    app = _run_lifespan(monkeypatch, preload=True)
+    with TestClient(app) as client:
+        for _ in range(100):
+            if client.get("/ready").status_code == 200:
+                break
+            threading.Event().wait(0.02)
+        monkeypatch.setattr(health, "streaming_services_healthy", lambda: False)
+
+        readiness = client.get("/ready")
+        assert readiness.status_code == 503
+        assert readiness.json()["status"] == "unhealthy"
+        assert readiness.json()["workers_healthy"] is False
 
 
 def test_preload_can_be_disabled(monkeypatch) -> None:

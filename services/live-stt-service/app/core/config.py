@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     # bytes before Whisper can load them. Local/test keeps the historical
     # floating-name convenience, but can opt into the same contract.
     environment: str = Field(default="local", pattern="^(local|test|staging|production)$")
+    runtime_commit: str = Field(default="unversioned", min_length=1, max_length=40)
     model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
     model_sha256: str = Field(default="", max_length=71)
     model_path: Path | None = None
@@ -150,8 +151,10 @@ class Settings(BaseSettings):
     # answer immediately. The production launcher opts in explicitly; local and
     # test environments must not allocate both models merely by importing the app.
     stream_preload_models: bool = Field(default=False)
-    stream_preload_max_attempts: int = Field(default=3, ge=1, le=5)
+    stream_preload_max_attempts: int = Field(default=2, ge=1, le=5)
     stream_preload_retry_base_sec: float = Field(default=1.0, ge=0.1, le=30.0)
+    stream_preload_readiness_budget_sec: float = Field(default=780.0, ge=1.0, le=3600.0)
+    stream_recovery_poll_sec: float = Field(default=1.0, ge=0.1, le=30.0)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.
     live_infer_interval_ms: int = Field(default=700, ge=1, le=5000)
@@ -216,6 +219,31 @@ class Settings(BaseSettings):
                     raise ValueError(f"{label}_path is required in staging/production")
         if self.environment == "production" and not self.stream_preload_models:
             raise ValueError("stream_preload_models must be enabled in production")
+        if self.environment == "production" and not re.fullmatch(
+            r"[0-9a-f]{40}", self.runtime_commit
+        ):
+            raise ValueError("runtime_commit must be a lowercase 40-hex commit in production")
+        if self.environment == "production":
+            expected_runtime = {
+                "device": (self.device, "cpu"),
+                "compute_type": (self.compute_type, "int8"),
+                "live_device": (self.live_device, "cuda"),
+                "live_compute_type": (self.live_compute_type, "int8"),
+                "final_device": (self.final_device, "cuda"),
+                "final_compute_type": (self.final_compute_type, "float16"),
+            }
+            for label, (actual, expected) in expected_runtime.items():
+                if actual != expected:
+                    raise ValueError(f"{label} must be {expected} in production")
+        preload_worst_case_sec = 2 * (
+            self.stream_preload_max_attempts
+            * (self.stream_model_load_timeout_sec + (2 * self.worker_kill_grace_sec))
+            + (self.stream_preload_max_attempts - 1) * self.stream_preload_retry_base_sec
+        )
+        if preload_worst_case_sec > self.stream_preload_readiness_budget_sec:
+            raise ValueError(
+                "stream preload worst-case timeout exceeds stream_preload_readiness_budget_sec"
+            )
         if self.min_speech_rms < self.silence_rms:
             raise ValueError("min_speech_rms must be >= silence_rms")
         if self.min_infer_sec > self.live_window_sec:

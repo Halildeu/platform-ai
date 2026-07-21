@@ -38,6 +38,7 @@ jobs:
             "deploy/gpu-host/update.ps1",
             "deploy/gpu-host/drift-guard.ps1",
             "deploy/gpu-host/deployment-state.ps1",
+            "deploy/gpu-host/live-stt-runtime-contract.ps1",
             "deploy/gpu-host/start-live-stt.ps1",
             "deploy/gpu-host/start-meeting-ai.ps1",
             "deploy/gpu-host/meeting-ai-runtime-env.ps1",

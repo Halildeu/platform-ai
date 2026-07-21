@@ -25,6 +25,7 @@ def test_defaults() -> None:
     s = cfg.Settings()
     assert s.model_name == "medium"
     assert s.environment == "local"
+    assert s.runtime_commit == "unversioned"
     assert s.model_revision == "unversioned"
     assert s.model_sha256 == ""
     assert s.model_path is None
@@ -145,6 +146,7 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
             stream_final_timeout_sec=60.0,
             worker_kill_grace_sec=30.0,
             stream_transport_timeout_sec=10.0,
+            stream_preload_readiness_budget_sec=3600.0,
         )
     with pytest.raises(ValueError, match="must be process"):
         cfg.Settings(
@@ -197,6 +199,16 @@ def test_production_requires_content_addressed_local_model() -> None:
             model_sha256="b" * 64,
             model_path="/models/faster-whisper-medium",
             **STREAM_MODEL_PINS,
+            runtime_commit="a" * 40,
+        )
+    with pytest.raises(ValueError, match="runtime_commit"):
+        cfg.Settings(
+            environment="production",
+            model_revision="a" * 40,
+            model_sha256="b" * 64,
+            model_path="/models/faster-whisper-medium",
+            **STREAM_MODEL_PINS,
+            stream_preload_models=True,
         )
     settings = cfg.Settings(
         environment="production",
@@ -206,8 +218,38 @@ def test_production_requires_content_addressed_local_model() -> None:
         model_path="/models/faster-whisper-medium",
         **STREAM_MODEL_PINS,
         stream_preload_models=True,
+        runtime_commit="a" * 40,
     )
     assert settings.model_revision == "a" * 40
+
+
+def test_preload_worst_case_must_fit_the_declared_readiness_budget() -> None:
+    with pytest.raises(ValueError, match="preload worst-case timeout"):
+        cfg.Settings(
+            stream_preload_max_attempts=5,
+            stream_model_load_timeout_sec=600,
+            worker_kill_grace_sec=30,
+            stream_preload_retry_base_sec=30,
+            stream_preload_readiness_budget_sec=780,
+        )
+
+
+def test_production_runtime_profile_is_fail_closed() -> None:
+    base = {
+        "environment": "production",
+        "runtime_commit": "a" * 40,
+        "model_revision": "a" * 40,
+        "model_sha256": "b" * 64,
+        "model_path": "/models/faster-whisper-medium",
+        **STREAM_MODEL_PINS,
+        "stream_preload_models": True,
+    }
+    with pytest.raises(ValueError, match="device must be cpu"):
+        cfg.Settings(**base, device="cuda")
+    with pytest.raises(ValueError, match="live_device must be cuda"):
+        cfg.Settings(**base, live_device="cpu")
+    with pytest.raises(ValueError, match="final_compute_type must be float16"):
+        cfg.Settings(**base, final_compute_type="int8")
 
 
 def test_model_sha256_rejects_malformed_value() -> None:

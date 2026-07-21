@@ -18,6 +18,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $svc = Join-Path $RepoRoot "services\live-stt-service"
+$runtimeContract = Join-Path $RepoRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
+if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf)) {
+    throw "Missing live-stt-runtime-contract.ps1"
+}
+. $runtimeContract
 $logDir = Join-Path $RepoRoot "deploy\gpu-host\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
 $log = Join-Path $logDir ("live-stt-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
@@ -66,15 +71,32 @@ if (Test-Path $envLocal) {
     . $envLocal
 }
 
-# The synchronous ATS path uses the canonical Systran CTranslate2 medium
-# artifact. Re-assert the source-controlled identity AFTER host-local config so
-# env.local cannot silently replace an approved model. Pin the upstream
-# snapshot and verify the actual model.bin bytes; neither the floating name
-# "medium" nor the live-stt service version is a model version. Values are
-# public artifact metadata, not credentials.
+# Re-assert the complete source-controlled production profile AFTER host-local
+# config. env.local may supply secrets and explicitly allowed integration
+# switches, but it cannot move model identity, device placement, quantization,
+# preload timing, or the runtime commit accepted by the deploy ledger.
+$oldEap = $ErrorActionPreference
+try {
+    $ErrorActionPreference = "Continue"
+    $runtimeCommit = @(& git -C $RepoRoot rev-parse HEAD 2> $null)
+    $gitExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $oldEap
+}
+if ($gitExit -ne 0 -or $runtimeCommit.Count -ne 1 -or
+    "$($runtimeCommit[0])".Trim().ToLowerInvariant() -notmatch '^[0-9a-f]{40}$') {
+    throw "Live STT runtime commit could not be resolved from the deploy clone."
+}
+$env:STT_RUNTIME_COMMIT = "$($runtimeCommit[0])".Trim().ToLowerInvariant()
 $env:STT_ENVIRONMENT = "production"
 $env:STT_STREAM_PRELOAD_MODELS = "true"
-$env:STT_STREAM_PRELOAD_MAX_ATTEMPTS = "2"
+$env:STT_STREAM_PRELOAD_MAX_ATTEMPTS = "$script:LiveSttPreloadMaxAttempts"
+$env:STT_STREAM_PRELOAD_RETRY_BASE_SEC = "$script:LiveSttPreloadRetryBaseSec"
+$env:STT_STREAM_MODEL_LOAD_TIMEOUT_SEC = "$script:LiveSttModelLoadTimeoutSec"
+$env:STT_WORKER_KILL_GRACE_SEC = "$script:LiveSttWorkerKillGraceSec"
+$env:STT_STREAM_PRELOAD_READINESS_BUDGET_SEC = "$script:LiveSttReadinessDeadlineSec"
+$env:STT_DEVICE = "cpu"
+$env:STT_COMPUTE_TYPE = "int8"
 $env:STT_MODEL_NAME = "Systran/faster-whisper-medium"
 $env:STT_MODEL_REVISION = "08e178d48790749d25932bbc082711ddcfdfbc4f"
 $env:STT_MODEL_SHA256 = "sha256:9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae"
@@ -84,11 +106,15 @@ $env:STT_LIVE_MODEL_NAME = $env:STT_MODEL_NAME
 $env:STT_LIVE_MODEL_REVISION = $env:STT_MODEL_REVISION
 $env:STT_LIVE_MODEL_SHA256 = $env:STT_MODEL_SHA256
 $env:STT_LIVE_MODEL_PATH = $env:STT_MODEL_PATH
+$env:STT_LIVE_DEVICE = "cuda"
+$env:STT_LIVE_COMPUTE_TYPE = "int8"
 $env:STT_FINAL_MODEL_NAME = "deepdml/faster-whisper-large-v3-turbo-ct2"
 $env:STT_FINAL_MODEL_REVISION = "4df90f75321148c3a29a9e2351b7ddf8f5b115a8"
 $env:STT_FINAL_MODEL_SHA256 = "sha256:e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"
 $env:STT_FINAL_MODEL_PATH = Join-Path $HfHome `
     "hub\models--deepdml--faster-whisper-large-v3-turbo-ct2\snapshots\$($env:STT_FINAL_MODEL_REVISION)"
+$env:STT_FINAL_DEVICE = "cuda"
+$env:STT_FINAL_COMPUTE_TYPE = "float16"
 
 # CUDA runtime DLLs (cublas/cudnn) are resolved via the user's PATH at inference
 # time; SYSTEM's PATH lacks them ("Library cublas64_12.dll is not found").

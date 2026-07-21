@@ -104,56 +104,81 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ("final", get_final_service(settings)),
         )
 
-        def _preload_models() -> None:
-            for label, service in preload_services:
-                for attempt in range(1, settings.stream_preload_max_attempts + 1):
-                    if preload_state.stop_event.is_set():
-                        return
-                    preload_state.begin_attempt(label)
-                    started = time.monotonic()
-                    try:
-                        service.ensure_model()
-                    except Exception as exc:  # noqa: BLE001 - readiness records the failure
-                        preload_state.mark_failed(label)
-                        logger.error(
-                            "streaming model preload failed role=%s attempt=%d error=%s "
-                            "elapsed_sec=%.1f",
-                            label,
-                            attempt,
-                            type(exc).__name__,
-                            time.monotonic() - started,
-                            extra={
-                                "correlation_id": "startup",
-                                "model_role": label,
-                                "error_class": type(exc).__name__,
-                                "attempt": attempt,
-                                "elapsed_sec": round(time.monotonic() - started, 1),
-                            },
-                        )
-                        if attempt >= settings.stream_preload_max_attempts:
-                            break
-                        delay = settings.stream_preload_retry_base_sec * (2 ** (attempt - 1))
-                        if preload_state.stop_event.wait(delay):
-                            return
-                        continue
-                    preload_state.mark_ready(label)
-                    logger.info(
-                        "streaming model preloaded role=%s attempt=%d elapsed_sec=%.1f",
+        def _load_role(label: str, service: Any) -> bool:
+            for attempt in range(1, settings.stream_preload_max_attempts + 1):
+                if preload_state.stop_event.is_set():
+                    return False
+                preload_state.begin_attempt(label)
+                started = time.monotonic()
+                try:
+                    service.ensure_model()
+                except Exception as exc:  # noqa: BLE001 - readiness records the failure
+                    preload_state.mark_failed(label)
+                    logger.error(
+                        "streaming model preload failed role=%s attempt=%d error=%s "
+                        "elapsed_sec=%.1f",
                         label,
                         attempt,
+                        type(exc).__name__,
                         time.monotonic() - started,
                         extra={
                             "correlation_id": "startup",
                             "model_role": label,
+                            "error_class": type(exc).__name__,
                             "attempt": attempt,
                             "elapsed_sec": round(time.monotonic() - started, 1),
                         },
                     )
-                    break
+                    if attempt >= settings.stream_preload_max_attempts:
+                        return False
+                    delay = settings.stream_preload_retry_base_sec * (2 ** (attempt - 1))
+                    if preload_state.stop_event.wait(delay):
+                        return False
+                    continue
+                preload_state.mark_ready(label)
+                logger.info(
+                    "streaming model preloaded role=%s attempt=%d elapsed_sec=%.1f",
+                    label,
+                    attempt,
+                    time.monotonic() - started,
+                    extra={
+                        "correlation_id": "startup",
+                        "model_role": label,
+                        "attempt": attempt,
+                        "elapsed_sec": round(time.monotonic() - started, 1),
+                    },
+                )
+                return True
+            return False
 
-        preload_thread = threading.Thread(
-            target=_preload_models, name="model-preload", daemon=True
-        )
+        def _preload_models() -> None:
+            for label, service in preload_services:
+                if not _load_role(label, service) and preload_state.stop_event.is_set():
+                    return
+
+            # The startup preload is also the lifecycle owner for later worker
+            # generations. A native timeout may recycle a child into a cold state,
+            # and final EOF deliberately does not restart inline. Keep readiness
+            # fail-closed while this bounded loop reloads the same pinned service;
+            # ensure_model() will never start a replacement while an unkillable old
+            # child remains alive because the supervisor's restart_blocked guard wins.
+            while not preload_state.stop_event.wait(settings.stream_recovery_poll_sec):
+                for label, service in preload_services:
+                    healthy = bool(getattr(service, "healthy", True))
+                    loaded = bool(getattr(service, "model_loaded", False))
+                    if healthy and loaded:
+                        preload_state.mark_ready(label)
+                        continue
+                    logger.warning(
+                        "streaming model worker requires recovery role=%s",
+                        label,
+                        extra={"correlation_id": "recovery", "model_role": label},
+                    )
+                    _load_role(label, service)
+                    if preload_state.stop_event.is_set():
+                        return
+
+        preload_thread = threading.Thread(target=_preload_models, name="model-preload", daemon=True)
         preload_thread.start()
         logger.info("streaming model preload started", extra={"correlation_id": "startup"})
 
