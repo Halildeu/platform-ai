@@ -141,9 +141,15 @@ $taskXml = @"
   <Actions Context="Author"><Exec><Command>$escapedPowerShell</Command><Arguments>$escapedArguments</Arguments></Exec></Actions>
 </Task>
 "@
+$directTaskAction = Get-GpuHostTaskActionContract `
+    -TaskName "platform-ai-live-stt" -Execute (Get-GpuHostWindowsPowerShellPath) `
+    -Arguments $taskArguments
+Assert-True $directTaskAction.Valid `
+    "Canonical direct Scheduled Task action contract must pass."
 $validTaskXml = Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
     -TaskXml $taskXml -SkipPythonPathValidation
-Assert-True $validTaskXml.Valid "Canonical single SYSTEM task action must pass."
+Assert-True $validTaskXml.Valid `
+    ("Canonical single SYSTEM task action must pass: {0}" -f $validTaskXml.Reason)
 $multiActionXml = $taskXml.Replace(
     "</Actions>",
     "<Exec><Command>$escapedPowerShell</Command><Arguments>$escapedArguments</Arguments></Exec></Actions>"

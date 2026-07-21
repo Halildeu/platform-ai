@@ -327,10 +327,12 @@ function Get-GpuHostTaskXmlContract {
         $actionContract = Get-GpuHostTaskActionContract -TaskName $TaskName `
             -Execute ([string]$exec.Command) -Arguments ([string]$exec.Arguments) `
             -WorkingDirectory ([string]$exec.WorkingDirectory)
-        if (-not $actionContract.Valid -or
-            (-not $SkipPythonPathValidation -and
-                -not (Test-Path -LiteralPath $actionContract.PythonExe -PathType Leaf))) {
-            throw "action-invalid"
+        if (-not $actionContract.Valid) {
+            throw "action-contract-invalid"
+        }
+        if (-not $SkipPythonPathValidation -and
+            -not (Test-Path -LiteralPath $actionContract.PythonExe -PathType Leaf)) {
+            throw "python-path-invalid"
         }
         return [pscustomobject]@{
             Valid = $true
