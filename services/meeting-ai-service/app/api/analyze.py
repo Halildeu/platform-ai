@@ -10,7 +10,6 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from starlette.concurrency import run_in_threadpool
 
 from app.api.metrics import (
     AnalyzeResult,
@@ -25,11 +24,16 @@ from app.api.metrics import (
 )
 from app.core.config import Settings, get_settings
 from app.models.schemas import AnalyzeRequest, AnalyzeResponse
+from app.services.analysis_application import (
+    AnalysisApplicationService,
+    AnalysisCommand,
+    AnalysisTranscriptTooLargeError,
+)
 from app.services.analysis_delivery import (
     AnalysisDeliveryContractError,
     AnalysisDeliveryRuntime,
 )
-from app.services.analyze import BackendUnavailableError, MeetingAnalysisService, get_service
+from app.services.analyze import BackendUnavailableError
 from app.services.durable_outbox import OutboxError, OutboxFullError
 from app.services.live_stream_hub import LiveStreamHub
 from app.services.redact import RedactionError
@@ -62,7 +66,16 @@ async def analyze_endpoint(
             detail=f"Transcript {len(transcript)} chars > limit {settings.max_transcript_chars}",
         )
 
-    service: MeetingAnalysisService = get_service(settings)
+    application: AnalysisApplicationService = request.app.state.analysis_application
+    delivery: AnalysisDeliveryRuntime = request.app.state.analysis_delivery
+    if delivery.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Durable analysis requires the canonical transcript.ready flow; "
+                "direct transcript delivery is not accepted"
+            ),
+        )
     corr_id = _correlation_id(request)
     log_extra = {
         "correlation_id": corr_id,
@@ -73,11 +86,34 @@ async def analyze_endpoint(
     }
 
     segments = [s.model_dump() for s in body.segments] if body.segments else None
-    try:
-        result = await asyncio.wait_for(
-            run_in_threadpool(service.analyze, transcript, segments),
-            timeout=settings.request_timeout,
+
+    async def persist_result(command: AnalysisCommand, result: AnalyzeResponse) -> str | None:
+        return await delivery.enqueue_analysis(
+            meeting_id=command.meeting_id,
+            session_id=command.session_id,
+            transcript=command.transcript,
+            result=result,
+            analysis_run_id=command.analysis_run_id,
+            generated_at=command.generated_at,
         )
+
+    try:
+        execution = await application.execute(
+            AnalysisCommand(
+                transcript=transcript,
+                meeting_id=body.meeting_id,
+                session_id=body.session_id,
+                segments=segments,
+            ),
+            persist=persist_result,
+        )
+        result = execution.result
+        analysis_run_id = execution.analysis_run_id
+    except AnalysisTranscriptTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Transcript {len(transcript)} chars > limit {settings.max_transcript_chars}",
+        ) from exc
     except (asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041
         logger.warning("Analyze timeout", extra=log_extra)
         mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.TIMEOUT.value).inc()
@@ -132,32 +168,6 @@ async def analyze_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"I/O failure ({type(exc).__name__})",
         ) from exc
-
-    logger.info(
-        "Analyze success",
-        extra={
-            **log_extra,
-            "elapsed_ms": result.elapsed_ms,
-            "redaction_count": result.redaction_count,
-            "decisions": len(result.decisions),
-            "action_items": len(result.action_items),
-        },
-    )
-    mai_analyze_duration_seconds.labels(backend=settings.backend).observe(
-        result.elapsed_ms / 1000.0
-    )
-    mai_transcript_chars_total.labels(backend=settings.backend).inc(len(transcript))
-    if result.redaction_count:
-        mai_pii_redaction_total.labels(backend=settings.backend).inc(result.redaction_count)
-
-    delivery: AnalysisDeliveryRuntime = request.app.state.analysis_delivery
-    try:
-        analysis_run_id = await delivery.enqueue_analysis(
-            meeting_id=body.meeting_id,
-            session_id=body.session_id,
-            transcript=transcript,
-            result=result,
-        )
     except AnalysisDeliveryContractError as exc:
         logger.warning(
             "Durable analysis delivery contract rejected",
@@ -193,6 +203,24 @@ async def analyze_endpoint(
             detail="Durable analysis delivery is unavailable",
             headers={"Retry-After": "5"},
         ) from exc
+
+    logger.info(
+        "Analyze success",
+        extra={
+            **log_extra,
+            "elapsed_ms": result.elapsed_ms,
+            "redaction_count": result.redaction_count,
+            "decisions": len(result.decisions),
+            "action_items": len(result.action_items),
+        },
+    )
+    mai_analyze_duration_seconds.labels(backend=settings.backend).observe(
+        result.elapsed_ms / 1000.0
+    )
+    mai_transcript_chars_total.labels(backend=settings.backend).inc(len(transcript))
+    if result.redaction_count:
+        mai_pii_redaction_total.labels(backend=settings.backend).inc(result.redaction_count)
+
     if analysis_run_id is not None:
         response.headers["X-Analysis-Run-Id"] = analysis_run_id
         response.headers["X-Analysis-Delivery"] = "queued"
@@ -246,7 +274,7 @@ async def analyze_live_endpoint(
             detail=f"Transcript {len(transcript)} chars > limit {settings.max_transcript_chars}",
         )
 
-    service: MeetingAnalysisService = get_service(settings)
+    application: AnalysisApplicationService = request.app.state.analysis_application
     corr_id = _correlation_id(request)
     live_version = body.segment_seq if body.segment_seq is not None else 0
     log_extra = {
@@ -260,11 +288,32 @@ async def analyze_live_endpoint(
     }
 
     segments = [s.model_dump() for s in body.segments] if body.segments else None
+
+    # Live analysis intentionally uses a no-op persister so the durable
+    # ingestion hop is bypassed. The scaffold rationale below still applies:
+    # partial payloads must not land in the final-only column of
+    # meeting-service. This is a live-only relay path — the final analysis
+    # goes through /analyze which owns the canonical delivery contract.
+    async def _no_persist(command: AnalysisCommand, result: AnalyzeResponse) -> str | None:
+        del command, result
+        return None
+
     try:
-        result = await asyncio.wait_for(
-            run_in_threadpool(service.analyze, transcript, segments),
-            timeout=settings.request_timeout,
+        execution = await application.execute(
+            AnalysisCommand(
+                transcript=transcript,
+                meeting_id=body.meeting_id,
+                session_id=body.session_id,
+                segments=segments,
+            ),
+            persist=_no_persist,
         )
+        result = execution.result
+    except AnalysisTranscriptTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Transcript {len(transcript)} chars > limit {settings.max_transcript_chars}",
+        ) from exc
     except (asyncio.TimeoutError, TimeoutError) as exc:  # noqa: UP041
         logger.warning("Analyze/live timeout", extra=log_extra)
         mai_analyze_total.labels(backend=settings.backend, result=AnalyzeResult.TIMEOUT.value).inc()

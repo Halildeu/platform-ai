@@ -6,13 +6,17 @@ import asyncio
 import email.utils
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
+from typing import Literal, Protocol
+from uuid import UUID
 
 import httpx
+from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
 
 from app.core.config import Settings
 from app.services.durable_outbox import ClaimedMessage
@@ -32,10 +36,46 @@ class DeliveryAttempt:
     retry_after_sec: float | None = None
 
 
+class _IngestionAcknowledgment(BaseModel):
+    """Exact meeting-service success contract; response bodies are never logged."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    analysis_run_id: UUID
+    meeting_id: UUID
+    persisted: bool
+    storage_mode: Literal["persisted"]
+    idempotent_replay: bool
+    decision_count: int
+    action_count: int
+    supersedes_analysis_run_id: UUID | None = None
+    generated_at: datetime
+
+
+class AnalysisJobCapabilityProvider(Protocol):
+    """Issue one ephemeral capability for the exact outboxed analysis tuple."""
+
+    async def capability_for(
+        self, message: ClaimedMessage
+    ) -> tuple[SecretStr | None, DeliveryAttempt | None]: ...
+
+    async def aclose(self) -> None: ...
+
+
 @dataclass
 class _CachedToken:
     access_token: str
     expires_at_monotonic: float
+
+
+@dataclass(frozen=True)
+class ServiceTokenRequest:
+    token_url: str
+    client_id: str
+    client_secret: SecretStr
+    audience: str
+    permissions: tuple[str, ...]
+    timeout_sec: float
 
 
 class MeetingServiceTlsError(RuntimeError):
@@ -131,6 +171,35 @@ class ReloadingHttpClient:
         finally:
             await self._release_client(client)
 
+    async def get(self, *args: object, **kwargs: object) -> httpx.Response:
+        if self._external_client is not None:
+            return await self._external_client.get(*args, **kwargs)  # type: ignore[arg-type]
+
+        client = await self._acquire_client()
+        try:
+            return await client.get(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            await self._release_client(client)
+
+    @asynccontextmanager
+    async def stream(
+        self,
+        method: str,
+        url: str,
+        **kwargs: object,
+    ) -> AsyncIterator[httpx.Response]:
+        if self._external_client is not None:
+            async with self._external_client.stream(method, url, **kwargs) as response:  # type: ignore[arg-type]
+                yield response
+            return
+
+        client = await self._acquire_client()
+        try:
+            async with client.stream(method, url, **kwargs) as response:  # type: ignore[arg-type]
+                yield response
+        finally:
+            await self._release_client(client)
+
     async def _acquire_client(self) -> httpx.AsyncClient:
         client, close_after_unlock = await self._get_or_refresh_client(acquire=True)
         if close_after_unlock is not None:
@@ -203,8 +272,20 @@ class ReloadingHttpClient:
 class ServiceTokenClient:
     """OAuth2 client-credentials token cache; credentials are never persisted."""
 
-    def __init__(self, settings: Settings, client: ReloadingHttpClient) -> None:
-        self._settings = settings
+    def __init__(
+        self,
+        settings: Settings,
+        client: ReloadingHttpClient,
+        request: ServiceTokenRequest | None = None,
+    ) -> None:
+        self._request = request or ServiceTokenRequest(
+            token_url=settings.meeting_service_token_url,
+            client_id=settings.meeting_service_client_id,
+            client_secret=settings.meeting_service_client_secret,
+            audience=settings.meeting_service_audience,
+            permissions=tuple(settings.meeting_service_permissions),
+            timeout_sec=settings.ingestion_timeout_sec,
+        )
         self._client = client
         self._cached: _CachedToken | None = None
         self._lock = asyncio.Lock()
@@ -220,7 +301,7 @@ class ServiceTokenClient:
                 return self._cached.access_token, None
             try:
                 response = await self._client.post(
-                    self._settings.meeting_service_token_url,
+                    self._request.token_url,
                     # `permissions` is a LIST value: httpx encodes a list into a
                     # REPEATED form field (permissions=a&permissions=b), which is how
                     # auth-service binds form.get("permissions"). A scalar would emit a
@@ -229,14 +310,12 @@ class ServiceTokenClient:
                     # 400 invalid_audience — the #248 live-auth bug this fixes).
                     data={
                         "grant_type": "client_credentials",
-                        "client_id": self._settings.meeting_service_client_id,
-                        "client_secret": (
-                            self._settings.meeting_service_client_secret.get_secret_value()
-                        ),
-                        "audience": self._settings.meeting_service_audience,
-                        "permissions": self._settings.meeting_service_permissions,
+                        "client_id": self._request.client_id,
+                        "client_secret": self._request.client_secret.get_secret_value(),
+                        "audience": self._request.audience,
+                        "permissions": list(self._request.permissions),
                     },
-                    timeout=self._settings.ingestion_timeout_sec,
+                    timeout=self._request.timeout_sec,
                 )
             except (httpx.HTTPError, MeetingServiceTlsError) as exc:
                 return None, DeliveryAttempt(
@@ -289,28 +368,47 @@ class ServiceTokenClient:
 class MeetingServiceClient:
     """Classify delivery outcomes without logging response bodies or credentials."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        capability_provider: AnalysisJobCapabilityProvider | None = None,
+        owns_capability_provider: bool = False,
+    ) -> None:
         self._settings = settings
         self._client = ReloadingHttpClient(settings, client)
         self._tokens = ServiceTokenClient(settings, self._client)
+        self._capability_provider = capability_provider
+        self._owns_capability_provider = owns_capability_provider
 
     async def deliver(self, message: ClaimedMessage) -> DeliveryAttempt:
         token, token_error = await self._tokens.get_token()
         if token_error is not None:
             return token_error
         assert token is not None
+        capability: SecretStr | None = None
+        if self._capability_provider is not None:
+            capability, capability_error = await self._capability_provider.capability_for(message)
+            if capability_error is not None:
+                return capability_error
+            assert capability is not None
         url = (
             self._settings.meeting_service_base_url.rstrip("/")
             + f"/api/v1/internal/meetings/{message.meeting_id}/analysis-results"
         )
         try:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": message.analysis_run_id,
+            }
+            if capability is not None:
+                headers["X-Analysis-Job-Capability"] = capability.get_secret_value()
+            body = {key: value for key, value in message.payload.items() if not key.startswith("_")}
             response = await self._client.post(
                 url,
-                json=message.payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Idempotency-Key": message.analysis_run_id,
-                },
+                json=body,
+                headers=headers,
                 timeout=self._settings.ingestion_timeout_sec,
             )
         except (httpx.HTTPError, MeetingServiceTlsError) as exc:
@@ -320,6 +418,13 @@ class MeetingServiceClient:
             )
 
         if response.status_code in (200, 201):
+            if not _valid_ingestion_acknowledgment(response, message, body):
+                # The write may already be committed. Retry the stable run with a
+                # fresh one-use capability instead of acknowledging ambiguous data.
+                return DeliveryAttempt(
+                    DeliveryDisposition.RETRY,
+                    error_code="ingestion_invalid_acknowledgment",
+                )
             if response.status_code == 200:
                 return DeliveryAttempt(DeliveryDisposition.REPLAYED)
             return DeliveryAttempt(DeliveryDisposition.DELIVERED)
@@ -342,6 +447,63 @@ class MeetingServiceClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+        if self._owns_capability_provider and self._capability_provider is not None:
+            await self._capability_provider.aclose()
+
+
+def _valid_ingestion_acknowledgment(
+    response: httpx.Response,
+    message: ClaimedMessage,
+    request_body: dict[str, object],
+) -> bool:
+    try:
+        acknowledgment = _IngestionAcknowledgment.model_validate_json(response.content)
+        expected_run_id = UUID(message.analysis_run_id)
+        expected_meeting_id = UUID(message.meeting_id)
+        expected_generated_at = _parse_utc_instant(request_body["generated_at"])
+        expected_supersedes = _optional_uuid(request_body.get("supersedes_analysis_run_id"))
+        expected_decision_count = _collection_size(request_body.get("decisions"))
+        expected_action_count = _collection_size(request_body.get("actions"))
+    except (KeyError, TypeError, ValueError, ValidationError):
+        return False
+
+    expected_replay = response.status_code == 200
+    return (
+        acknowledgment.analysis_run_id == expected_run_id
+        and acknowledgment.meeting_id == expected_meeting_id
+        and acknowledgment.persisted is True
+        and acknowledgment.storage_mode == "persisted"
+        and acknowledgment.idempotent_replay is expected_replay
+        and acknowledgment.decision_count == expected_decision_count
+        and acknowledgment.action_count == expected_action_count
+        and acknowledgment.supersedes_analysis_run_id == expected_supersedes
+        and acknowledgment.generated_at.astimezone(UTC) == expected_generated_at
+    )
+
+
+def _collection_size(value: object) -> int:
+    if value is None:
+        return 0
+    if not isinstance(value, list):
+        raise TypeError("expected a list")
+    return len(value)
+
+
+def _optional_uuid(value: object) -> UUID | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("expected a UUID string")
+    return UUID(value)
+
+
+def _parse_utc_instant(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise TypeError("expected an ISO-8601 instant")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("instant must carry a timezone")
+    return parsed.astimezone(UTC)
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:

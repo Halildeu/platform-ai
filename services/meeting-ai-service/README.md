@@ -124,18 +124,26 @@ MAI_BACKEND=ollama python scripts/intel_eval.py \
 
 ## API
 
-- `POST /analyze` — JSON `{transcript, meeting_id?, session_id?}` → `AnalyzeResponse`
-- `GET /health`, `GET /metrics` (`mai_*`, `kvkk_*`)
+- `POST /analyze` — JSON `{transcript, meeting_id?, session_id?}` → preview
+  `AnalyzeResponse` only while durable ingestion is disabled
+- `GET /health`, `GET /ready`, `GET /metrics` (`mai_*`, `kvkk_*`)
 
 ## Durable analysis-result delivery (#247)
 
-When `MAI_INGESTION_ENABLED=true`, a successful `/analyze` call is committed to an
-encrypted local SQLite-WAL outbox before the HTTP response returns. Network delivery
-to meeting-service runs in a lifespan worker, so Keycloak/meeting-service latency is
-not added to the user-visible analysis path. The same `analysisRunId` is reused for
-every attempt and sent as `Idempotency-Key`; `200` replay and `201` create both ACK
-the local row. Retryable network/401/429/5xx results use exponential backoff and
-jitter. Terminal 4xx or the attempt limit moves the encrypted row to DLQ.
+When `MAI_INGESTION_ENABLED=true`, durable outbox writes are accepted only from the
+canonical `meeting.transcript.ready` consumer with the complete tenant, meeting,
+session, finalization, finalized-at, and analysis-spec tuple. The direct `/analyze`
+route cannot establish that trusted tuple and returns `422` instead of queueing a
+result that meeting-service must reject or allowing a caller to select another
+tenant's finalization. Network delivery to meeting-service runs in a lifespan worker.
+The producer-owned `analysisRunId` is reused for every attempt and sent as
+`Idempotency-Key`; every POST obtains a fresh, tuple-bound one-use capability from
+transcript-service. A `200` replay or `201` create ACKs the local row only when the
+response body exactly confirms the run, meeting, persisted mode, replay status,
+child counts, supersession, and generated timestamp. An ambiguous success is retried
+with the same run and a fresh capability. Retryable network/401/429/5xx results use
+exponential backoff and jitter. Terminal 4xx or the attempt limit moves the encrypted
+row to DLQ.
 
 The outbox contains no raw transcript. It stores the transcript SHA-256 and the
 already-redacted analysis payload. That payload is still sensitive and is encrypted
@@ -156,12 +164,20 @@ Required configuration when enabled:
   `MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH`
 - `MAI_INGESTION_STORE_PATH` (absolute, local persistent disk; not NFS/SMB)
 - `MAI_INGESTION_ACTIVE_KEY_ID`
+- `MAI_INGESTION_LOOKUP_KEY_ID` — a dedicated 32-byte HMAC blind-index key;
+  it must not be the active payload-encryption key
 - `MAI_INGESTION_ENCRYPTION_KEYS_JSON` — secret JSON keyring, values are base64
-  encoded 32-byte AES keys, for example `{"2026-q3":"<base64>"}`
+  encoded 32-byte keys, for example
+  `{"2026-q3":"<base64>","lookup-v1":"<base64>"}`
 
-Key rotation is additive: inject old + new keys, switch `ACTIVE_KEY_ID` to the new
-key, drain/requeue old rows, then remove the old key. Startup fails closed while any
-row references a missing key. The current SQLite adapter supports multiple worker
+Payload-DEK rotation is additive: inject old + new DEKs, switch `ACTIVE_KEY_ID` to
+the new DEK, and restart with the complete keyring. Startup transactionally
+decrypts and re-encrypts every retained outbox and ready-inbox row under the active
+DEK before serving work. Only after that restart is verified may the retired DEK be
+removed. Startup fails closed while any row references a missing key. The dedicated
+blind-index key is unchanged by normal DEK rotation; changing it requires a separate
+versioned dual-read/backfill migration and is not supported by the ordinary rotation
+command. The current SQLite adapter supports multiple worker
 processes on one local filesystem via `BEGIN IMMEDIATE` + leases; horizontal
 multi-host execution requires replacing the store adapter with shared PostgreSQL,
 Kafka, or durable Redis rather than putting SQLite on network storage.
@@ -193,12 +209,181 @@ does not tear down an active delivery. Private service traffic also ignores ambi
 HTTP proxy environment variables. Certificate/key contents and paths are not included
 in delivery error codes or logs.
 
+## Canonical transcript-ready consumer (#263)
+
+`MAI_READY_CONSUMER_ENABLED=false` is the default. When explicitly enabled, the
+service consumes only `meeting.transcript.ready` from the configured Redis Stream
+consumer group. The thin event is not an authorization grant. The worker obtains a
+dedicated auth-service client-credentials token requesting only
+`transcript:canonical:read`, then fetches a
+tenant/meeting/session/finalization-bound canonical snapshot from transcript-service.
+
+The producer stream may be shared. Records whose outer `eventType` is a different,
+well-formed event are ACKed for this consumer group as `ignored`; they are not written
+to the inbox or DLQ. Missing, malformed, or internally inconsistent ready-event fields
+remain fail-closed poison records.
+
+The consumer persists only event identity, exact payload SHA-256, state, lease, retry,
+and DLQ metadata. Event identity and the payload digest are held in an AES-256-GCM
+envelope; SQLite exposes only an HMAC-SHA-256 blind index derived with a dedicated,
+non-DEK lookup key plus operational state. SQLite, Redis DLQ metadata, and the operator
+CLI use that same opaque fingerprint. Before flipping the active DEK, every worker must
+receive the same old+new DEK union and the unchanged lookup key; startup fails while any
+encrypted row references an unavailable DEK. The v6 migration decrypts each authorized
+identity with the complete old keyring, re-encrypts it under the active DEK, and rebinds
+it to the blind index. If legacy rows collapse to one semantic identity, migration fails
+closed for explicit operator reconciliation rather than merging state silently. A v3-to-v4
+migration encrypts existing identity rows, enables SQLite secure
+deletion, vacuums the old pages, and truncates WAL frames. A durable `pending` marker
+makes that scrub resume after process/power loss; startup stays failed while a WAL
+checkpoint reports busy and marks the scrub complete only after the final truncation.
+The store never contains the event JSON or raw transcript. Redis remains pending until
+SQLite commits either
+`OUTBOXED` or `DEAD`; `OUTBOXED` and the encrypted analysis-result outbox insert are one
+`BEGIN IMMEDIATE` transaction. A stale lease reclaim increments both the recovery
+counter and the shared failure budget. Once `MAI_READY_CONSUMER_MAX_FAILURES` is
+reached, the inbox row becomes `RETRY_EXHAUSTED` before another worker can claim it;
+an audit-referenced operator redrive resets both counters. The analysis run ID is
+minted by transcript-service during canonical finalization and carried by the
+content-free ready event. The consumer never derives or chooses it.
+
+The ready event is content-free and credential-free. In particular,
+`canonicalReadGrant` is rejected rather than copied into Redis, logs, SQLite, or the
+delivery outbox. The exact snapshot GET is authorized by the service token and the
+producer-owned analysis-run binding. It returns only the validated snapshot; capability
+headers on that response are ignored. Delivery uses a separate token cache requesting
+only `transcript:analysis-job-capability:issue` and a bodyless JIT POST to the same
+tenant/meeting/session/finalization tuple plus `/analysis-capability`. The read and
+capability requests may use the same service client ID and secret, but their token forms,
+caches, invalidation, and error classifications remain separate.
+
+Retry deadlines are enforced by scanning the current consumer's own PEL separately
+from `XAUTOCLAIM` stale-owner recovery. Result-outbox capacity is backpressure, not an
+event failure: it consumes no failure attempt, keeps the Redis record pending, and
+makes readiness fail until capacity returns.
+
+`MAI_READY_REDIS_CLAIM_IDLE_MS` cannot be shorter than the processing lease, so a
+healthy long-running LLM call is not stolen by another consumer. Terminal inbox rows
+are retained for `MAI_READY_CONSUMER_RETENTION_SEC` (30 days by default), which must be
+at least the explicitly configured `MAI_READY_PRODUCER_REPLAY_HORIZON_SEC`; startup
+fails closed when that horizon is missing or exceeds retention. Cleanup never deletes
+an identity while its analysis result remains in the local delivery outbox. DLQ count
+and stale age degrade the metadata health body and metrics, but do not evict the
+synchronous API from `/ready`; worker, Redis-group, or store unavailability does.
+
+Required activation configuration, in addition to durable delivery:
+
+- `MAI_READY_REDIS_URL`, `MAI_READY_REDIS_STREAM`, `MAI_READY_REDIS_GROUP`
+- `MAI_READY_PRODUCER_REPLAY_HORIZON_SEC`
+- `MAI_TRANSCRIPT_SERVICE_BASE_URL`
+- `MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE`, containing `{tenant_id}`,
+  `{meeting_id}`, `{session_id}`, and `{finalization_version}`
+- `MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE`, containing the same exact tuple
+  placeholders (recommended: snapshot path plus `/analysis-capability`)
+- `MAI_TRANSCRIPT_SERVICE_TOKEN_URL`, `MAI_TRANSCRIPT_SERVICE_CLIENT_ID`,
+  `MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET`
+- `MAI_TRANSCRIPT_SERVICE_AUDIENCE`, `MAI_TRANSCRIPT_SERVICE_SCOPE` (exactly
+  `transcript:canonical:read`), and `MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE` (exactly
+  `transcript:analysis-job-capability:issue`)
+
+The HTTP adapter expects a bounded JSON snapshot with exact tenant, meeting, session,
+positive `finalizationVersion`, `state=FINALIZED`, `segmentCount`, raw in-memory
+`transcript`, and `transcriptSha256=sha256(UTF-8 transcript)`. The response is stopped
+at `MAI_TRANSCRIPT_SERVICE_MAX_RESPONSE_BYTES`, including chunked responses without a
+`Content-Length`. Identity, state, count, segments, reconstructed text, and hash are
+verified before analysis. The GET never parses or returns a write capability.
+
+Immediately before result delivery, the JIT capability POST carries only
+`X-Tenant-Id`, `X-Meeting-Id`, `X-Transcript-Session-Id`,
+`X-Transcript-Finalization-Version`, `X-Analysis-Run-Id`, and
+`X-Analysis-Spec-Version`, plus authorization. It sends no body, transcript, hash, or
+other PII. Exactly `204` is success. The adapter accepts the one-use capability and
+expiry only from bounded `X-Analysis-Job-Capability` and
+`X-Analysis-Job-Capability-Expires-At` headers, applies the delivery timeout plus clock
+skew guard, and never persists the capability. Capability refresh therefore does not
+transfer or parse the transcript a second time. This adapter must remain disabled until
+transcript-service freezes both internal endpoints and auth-service/transcript-service
+enforce tenant/job binding from an independent authority. An event tuple or
+caller-supplied tenant header alone is not authority.
+The persisted `generated_at` is stamped after analysis completes, not copied from the
+ready-event publication time. When the ready consumer is active, startup also requires
+the result-outbox lease to exceed two meeting-service plus two transcript-service HTTP
+timeout windows so another worker cannot reclaim an in-flight cold delivery.
+
+Only `RETRY_EXHAUSTED` ready-event DLQ rows can be operator-rearmed. Poison,
+contract-terminal, and payload-conflict rows remain permanently fail-closed. Rearming
+stores a bounded audit reference but no event body; the producer must then replay the
+exact original event:
+
+```bash
+python scripts/requeue_ready_event.py --list-dead --limit 100
+python scripts/requeue_ready_event.py \
+  --lookup-fingerprint <opaque-64-hex-value-from-list> \
+  --audit-reference <issue-or-change-reference>
+```
+
+The operator surface never prints or accepts the raw tenant, source-message, or
+event identity. The fingerprint is the stable opaque handle emitted by
+`--list-dead`; it is sufficient to select the encrypted row but cannot replace
+the producer's exact original event replay.
+
+Redis DLQ publication is at-least-once across the SQLite/Redis boundary. Every retry
+reuses the same deterministic `dlqKey` and authenticated `lookupFingerprint`; DLQ
+consumers must upsert/deduplicate on `dlqKey`. No cross-store exactly-once claim is made.
+
 The Windows host channel is non-executable and fail-closed. Use elevated
 `deploy/gpu-host/configure-meeting-ai.ps1`; it prompts with `SecureString`, stores
-the client secret and AES keyring as DPAPI LocalMachine ciphertext under a
+the client secret and payload-DEK/blind-index keyring as DPAPI LocalMachine ciphertext under a
 SYSTEM/Administrators-only ACL, writes by same-volume atomic replace, and keeps old
-encryption keys during additive rotation. Plaintext `.ps1` secret overrides are not
+payload DEKs during additive rotation while preserving the blind-index key. Plaintext `.ps1` secret overrides are not
 supported for meeting-ai ingestion.
+
+The test-host enable path additionally requires a fresh DSSE envelope containing a
+`faz24.transcriptReadyPreEnableVerdict.v2` payload produced for GitOps #2610 and an
+out-of-band `faz24.transcriptReadyPermitTrustRoot.v1` public trust root. Production
+signing is a Vault Transit Ed25519 responsibility; the host accepts no private signing
+key and pins the public trust-root file by SHA-256. The provisioner consumes the
+metadata-only permit exactly once, installs the content-addressed trust root and
+activation receipt under the hardened runtime root, and stores the Redis URL and
+transcript-service credential only as DPAPI blobs. Obtain both secrets interactively so
+they do not enter shell history:
+
+```powershell
+$redisUrl = Read-Host "ready Redis URL" -AsSecureString
+$transcriptSecret = Read-Host "transcript-service OAuth secret" -AsSecureString
+& C:\platform-ai\deploy\gpu-host\configure-meeting-ai.ps1 `
+  -ReadyConsumerEnabled true `
+  -RuntimeAppEnv test `
+  -ReadyRedisUrl $redisUrl `
+  -ReadyProducerReplayHorizonSec 2592000 `
+  -TranscriptServiceBaseUrl https://transcript-service.internal.test `
+  -TranscriptServiceSnapshotPathTemplate '/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}' `
+  -TranscriptServiceCapabilityPathTemplate '/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability' `
+  -TranscriptServiceTokenUrl https://auth-service.internal.test/oauth2/token `
+  -TranscriptServiceClientSecret $transcriptSecret `
+  -ReadyPermitSourcePath C:\operator-staging\transcript-ready-pre-enable.dsse.json `
+  -ReadyPermitTrustRootSourcePath C:\operator-staging\transcript-ready-trust-root.json `
+  -ExpectedGitopsCommit <full-40-hex-gitops-commit> `
+  -ExpectedPolicySha256 <64-hex-policy-digest> `
+  -ExpectedProducerImageDigest sha256:<64-hex-transcript-image-digest> `
+  -ExpectedPermitTrustRootSha256 <64-hex-out-of-band-trust-root-digest> `
+  -PythonExe C:\platform-ai\services\meeting-ai-service\.venv\Scripts\python.exe `
+  -Confirm:$false
+```
+
+Activation rejects a permit older than 900 seconds, any failed/pending check, an
+invalid Ed25519 signature, an unpinned/expired trust root, or a mismatch in the exact
+GitOps commit, policy digest, transcript image digest, live-pod evidence,
+platform-ai commit, and startup-script SHA-256. Every later process start re-verifies
+the signature, trust-root validity, immutable bindings, clean deployed worktree, and
+local activation receipt, but intentionally does not reapply the one-time 900-second
+activation freshness window. The scheduled task therefore cannot be enabled by writing
+`MAI_READY_CONSUMER_ENABLED=true` alone, while a valid activation can survive a normal
+restart. Rollback is an explicit provisioner call with `-ReadyConsumerEnabled false`,
+followed by a task restart; disabling removes the ready consumer credentials and active
+permit/trust-root bindings from the next runtime config. The content-addressed public
+trust-root artifact may remain for audit and rollback; its path is not exported to the
+disabled child process.
 
 ## Run (skeleton)
 
@@ -218,7 +403,8 @@ curl -X POST http://localhost:8400/analyze \
 ## Config (env, prefix `MAI_`)
 
 `MAI_BACKEND`, `MAI_MODEL_NAME`, `MAI_MAX_TRANSCRIPT_CHARS`, `MAI_REDACT_PII`,
-`MAI_REQUEST_TIMEOUT`, `MAI_SUMMARY_MAX_CHARS`. See `app/core/config.py`.
+`MAI_REQUEST_TIMEOUT`, `MAI_SUMMARY_MAX_CHARS`, `MAI_INGESTION_*`,
+`MAI_READY_*`, and `MAI_TRANSCRIPT_SERVICE_*`. See `app/core/config.py`.
 
 ## Follow-ups (out of #49 skeleton scope)
 

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from app.core import config as config_module
 from app.core.config import Settings
 
 
@@ -18,6 +19,75 @@ def test_defaults() -> None:
     assert s.redact_pii is True
     assert s.request_timeout == 60
     assert s.ingestion_enabled is False
+    assert s.ready_consumer_enabled is False
+
+
+def test_settings_never_load_dotenv_implicitly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "MAI_READY_CONSUMER_ENABLED=true\nMAI_BACKEND=ollama\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings()
+
+    assert settings.ready_consumer_enabled is False
+    assert settings.backend == "mock"
+
+
+def test_cached_settings_load_dotenv_only_for_explicit_local_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "MAI_BACKEND=ollama\nMAI_LOG_LEVEL=DOTENV_ONLY\n",
+        encoding="utf-8",
+    )
+
+    try:
+        monkeypatch.setenv("MAI_APP_ENV", "test")
+        monkeypatch.setenv("PLATFORM_AI_LOAD_LOCAL_DOTENV", "1")
+        config_module._settings = None
+        assert config_module.get_settings().backend == "ollama"
+
+        monkeypatch.setenv("MAI_APP_ENV", "stage")
+        monkeypatch.setenv("MAI_BACKEND", "ollama")
+        config_module._settings = None
+        settings = config_module.get_settings()
+        assert settings.app_env == "stage"
+        assert settings.backend == "ollama"
+        assert settings.log_level == "INFO"
+        assert settings.ready_consumer_enabled is False
+    finally:
+        config_module._settings = None
+
+
+def test_cached_settings_reject_dotenv_self_declared_deployed_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "MAI_APP_ENV=stage\n"
+        "MAI_READY_CONSUMER_ENABLED=true\n"
+        "MAI_BACKEND=ollama\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MAI_APP_ENV", raising=False)
+    monkeypatch.setenv("PLATFORM_AI_LOAD_LOCAL_DOTENV", "1")
+
+    try:
+        config_module._settings = None
+        settings = config_module.get_settings()
+        assert settings.app_env == "dev"
+        assert settings.backend == "mock"
+        assert settings.ready_consumer_enabled is False
+    finally:
+        config_module._settings = None
 
 
 def test_backend_pattern_rejects_unknown() -> None:
@@ -52,10 +122,25 @@ def _ingestion_values(tmp_path: Path) -> dict[str, object]:
         "meeting_service_token_url": "https://auth.test/token",
         "meeting_service_client_id": "meeting-ai",
         "meeting_service_client_secret": SecretStr("meeting-service-secret-value"),
+        "transcript_service_base_url": "https://transcript.test",
+        "transcript_service_capability_path_template": (
+            "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+            "/sessions/{session_id}/finalizations/{finalization_version}"
+            "/analysis-capability"
+        ),
+        "transcript_service_token_url": "https://auth.test/token",
+        "transcript_service_client_id": "meeting-ai",
+        "transcript_service_client_secret": SecretStr("transcript-secret-value"),
         "ingestion_store_path": tmp_path / "outbox.sqlite3",
         "ingestion_active_key_id": "v1",
+        "ingestion_lookup_key_id": "lookup-v1",
         "ingestion_encryption_keys_json": SecretStr(
-            json.dumps({"v1": base64.b64encode(b"K" * 32).decode()})
+            json.dumps(
+                {
+                    "v1": base64.b64encode(b"K" * 32).decode(),
+                    "lookup-v1": base64.b64encode(b"L" * 32).decode(),
+                }
+            )
         ),
         "ingestion_timeout_sec": 1.0,
         "ingestion_lease_sec": 3.0,
@@ -80,12 +165,22 @@ def test_ingestion_enabled_requires_credentials_absolute_path_and_keyring(tmp_pa
 def test_ingestion_keyring_is_aes256_and_secret_repr_is_redacted(tmp_path: Path) -> None:
     values = _ingestion_values(tmp_path)
     settings = Settings(**values)
-    assert settings.ingestion_encryption_keys() == {"v1": b"K" * 32}
+    assert settings.ingestion_encryption_keys() == {
+        "v1": b"K" * 32,
+        "lookup-v1": b"L" * 32,
+    }
+    assert settings.ingestion_lookup_key() == b"L" * 32
+    assert settings.ingestion_payload_encryption_keys() == {"v1": b"K" * 32}
     assert "meeting-service-secret-value" not in repr(settings)
     assert base64.b64encode(b"K" * 32).decode() not in repr(settings)
 
     values["ingestion_encryption_keys_json"] = SecretStr(
-        json.dumps({"v1": base64.b64encode(b"short").decode()})
+        json.dumps(
+            {
+                "v1": base64.b64encode(b"short").decode(),
+                "lookup-v1": base64.b64encode(b"L" * 32).decode(),
+            }
+        )
     )
     with pytest.raises(ValidationError):
         Settings(**values)
@@ -134,4 +229,131 @@ def test_mutual_tls_requires_readable_absolute_material(tmp_path: Path) -> None:
 
     values["meeting_service_tls_client_key_path"] = tmp_path / "missing.key"
     with pytest.raises(ValidationError, match="readable file"):
+        Settings(**values)
+
+
+def _ready_values(tmp_path: Path) -> dict[str, object]:
+    values = _ingestion_values(tmp_path)
+    values.update(
+        {
+            "ingestion_lease_sec": 25.0,
+            "ready_consumer_enabled": True,
+            "ready_producer_replay_horizon_sec": 604_800.0,
+            "ready_redis_url": SecretStr("redis://redis.test:6379/0"),
+            "transcript_service_base_url": "https://transcript.test",
+            "transcript_service_snapshot_path_template": (
+                "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+                "/sessions/{session_id}/finalizations/{finalization_version}"
+            ),
+            "transcript_service_capability_path_template": (
+                "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+                "/sessions/{session_id}/finalizations/{finalization_version}"
+                "/analysis-capability"
+            ),
+            "transcript_service_token_url": "https://auth.test/token",
+            "transcript_service_client_id": "meeting-ai",
+            "transcript_service_client_secret": SecretStr("transcript-secret-value"),
+        }
+    )
+    return values
+
+
+def test_ready_consumer_delivery_lease_covers_all_four_http_windows(tmp_path: Path) -> None:
+    values = _ready_values(tmp_path)
+    values["ingestion_timeout_sec"] = 5.0
+    values["transcript_service_timeout_sec"] = 7.0
+    values["ingestion_lease_sec"] = 24.0
+    with pytest.raises(ValidationError, match="two meeting-service and two transcript-service"):
+        Settings(**values)
+
+    values["ingestion_lease_sec"] = 25.0
+    assert Settings(**values).ingestion_lease_sec == 25.0
+
+
+def test_ready_consumer_is_default_off_and_fails_closed_on_partial_config(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValidationError, match="requires MAI_INGESTION_ENABLED"):
+        Settings(ready_consumer_enabled=True)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_snapshot_path_template"] = "/api/v1/internal/snapshot"
+    with pytest.raises(ValidationError, match="placeholders"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_capability_path_template"] = (
+        "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+        "/sessions/{session_id}/analysis-capability"
+    )
+    with pytest.raises(ValidationError, match="CAPABILITY_PATH_TEMPLATE.*placeholders"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_capability_path_template"] = (
+        "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+        "/sessions/{session_id}/finalizations/{finalization_version}"
+        "/analysis-capability?tenant={tenant_id}"
+    )
+    with pytest.raises(ValidationError, match="CAPABILITY_PATH_TEMPLATE.*placeholders"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_scope"] = (
+        "transcript:canonical:read,transcript:analysis-job-capability:issue"
+    )
+    with pytest.raises(ValidationError, match="SCOPE must request only"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["transcript_service_capability_scope"] = "transcript:canonical:read"
+    with pytest.raises(ValidationError, match="CAPABILITY_SCOPE must request only"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_consumer_lease_sec"] = 80.0
+    with pytest.raises(ValidationError, match="analysis timeout"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_redis_claim_idle_ms"] = 10_000
+    with pytest.raises(ValidationError, match="claim idle time"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_redis_block_ms"] = 10_000
+    values["ready_redis_command_timeout_sec"] = 10.0
+    with pytest.raises(ValidationError, match="must exceed the blocking read window"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_producer_replay_horizon_sec"] = 0.0
+    with pytest.raises(ValidationError, match="explicitly configured"):
+        Settings(**values)
+
+    values = _ready_values(tmp_path)
+    values["ready_producer_replay_horizon_sec"] = 3_000_000.0
+    with pytest.raises(ValidationError, match="retention must be >="):
+        Settings(**values)
+
+
+def test_ready_consumer_secret_values_are_redacted_and_prod_requires_tls_redis(
+    tmp_path: Path,
+) -> None:
+    values = _ready_values(tmp_path)
+    settings = Settings(**values)
+    assert settings.transcript_service_permissions == ["transcript:canonical:read"]
+    assert settings.transcript_service_capability_permissions == [
+        "transcript:analysis-job-capability:issue"
+    ]
+    assert settings.transcript_service_client_id == "meeting-ai"
+    assert settings.transcript_service_client_secret.get_secret_value() == (
+        "transcript-secret-value"
+    )
+    assert "transcript-secret-value" not in repr(settings)
+    assert "redis.test" not in repr(settings)
+
+    values["app_env"] = "prod"
+    values["backend"] = "ollama"
+    with pytest.raises(ValidationError, match="rediss"):
         Settings(**values)

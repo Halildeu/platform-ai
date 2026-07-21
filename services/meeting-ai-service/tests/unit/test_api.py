@@ -9,6 +9,9 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models.schemas import AnalysisDeliveryHealth, ReadyConsumerHealth
+from app.services.analysis_delivery import AnalysisDeliveryRuntime
+from app.services.ready_event_consumer import ReadyEventConsumerRuntime
 
 
 def test_analyze_mock_returns_summary() -> None:
@@ -109,6 +112,74 @@ def test_health_ok() -> None:
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert resp.json()["analysis_delivery"]["status"] == "disabled"
+    assert resp.json()["ready_consumer"]["status"] == "disabled"
+
+
+def test_readiness_is_separate_from_liveness() -> None:
+    with TestClient(app) as client:
+        resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+def test_async_dlq_degrades_health_without_evicting_sync_api(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    async def delivery_health(self):  # type: ignore[no-untyped-def]
+        return AnalysisDeliveryHealth(
+            enabled=True,
+            ready=True,
+            status="degraded",
+            worker_running=True,
+            pending=0,
+            in_flight=0,
+            dead_letter=1,
+            oldest_pending_age_sec=None,
+            error_code=None,
+        )
+
+    async def ready_health(self):  # type: ignore[no-untyped-def]
+        return ReadyConsumerHealth(
+            enabled=True,
+            ready=True,
+            status="degraded",
+            worker_running=True,
+            redis_group_ready=True,
+            received=0,
+            processing=0,
+            outboxed=1,
+            dead_letter=1,
+            oldest_unfinished_age_sec=None,
+            error_code=None,
+        )
+
+    monkeypatch.setattr(AnalysisDeliveryRuntime, "health", delivery_health)
+    monkeypatch.setattr(ReadyEventConsumerRuntime, "health", ready_health)
+    with TestClient(app) as client:
+        health_response = client.get("/health")
+        ready_response = client.get("/ready")
+    assert health_response.json()["status"] == "degraded"
+    assert ready_response.status_code == 200
+
+
+def test_readiness_fails_when_consumer_cannot_accept_work(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    async def ready_health(self):  # type: ignore[no-untyped-def]
+        return ReadyConsumerHealth(
+            enabled=True,
+            ready=False,
+            status="degraded",
+            worker_running=False,
+            redis_group_ready=False,
+            received=1,
+            processing=0,
+            outboxed=0,
+            dead_letter=0,
+            oldest_unfinished_age_sec=1.0,
+            error_code="redis_ConnectionError",
+        )
+
+    monkeypatch.setattr(ReadyEventConsumerRuntime, "health", ready_health)
+    with TestClient(app) as client:
+        response = client.get("/ready")
+    assert response.status_code == 503
 
 
 def test_metrics_endpoint() -> None:
@@ -129,14 +200,42 @@ def test_analyze_nonmock_residual_pii_blocked_422(monkeypatch) -> None:  # type:
 
 
 def _configure_ingestion(monkeypatch, tmp_path: Path, *, max_rows: int = 10) -> None:  # type: ignore[no-untyped-def]
-    keyring = json.dumps({"v1": base64.b64encode(b"K" * 32).decode()})
+    keyring = json.dumps(
+        {
+            "v1": base64.b64encode(b"K" * 32).decode(),
+            "lookup-v1": base64.b64encode(b"L" * 32).decode(),
+        }
+    )
     monkeypatch.setenv("MAI_INGESTION_ENABLED", "true")
     monkeypatch.setenv("MAI_MEETING_SERVICE_BASE_URL", "https://127.0.0.1:9")
     monkeypatch.setenv("MAI_MEETING_SERVICE_TOKEN_URL", "https://127.0.0.1:9/token")
     monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_ID", "meeting-ai")
     monkeypatch.setenv("MAI_MEETING_SERVICE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_BASE_URL", "https://127.0.0.1:9")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_TOKEN_URL", "https://127.0.0.1:9/token")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_CLIENT_ID", "meeting-ai")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv(
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+        "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/"
+        "{session_id}/finalizations/{finalization_version}/analysis-capability",
+    )
+    monkeypatch.setenv(
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE",
+        "transcript:analysis-job-capability:issue",
+    )
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_BASE_URL", "https://127.0.0.1:9")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_TOKEN_URL", "https://127.0.0.1:9/token")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_CLIENT_ID", "meeting-ai")
+    monkeypatch.setenv("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv(
+        "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+        "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+        "/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability",
+    )
     monkeypatch.setenv("MAI_INGESTION_STORE_PATH", str(tmp_path / "outbox.sqlite3"))
     monkeypatch.setenv("MAI_INGESTION_ACTIVE_KEY_ID", "v1")
+    monkeypatch.setenv("MAI_INGESTION_LOOKUP_KEY_ID", "lookup-v1")
     monkeypatch.setenv("MAI_INGESTION_ENCRYPTION_KEYS_JSON", keyring)
     monkeypatch.setenv("MAI_INGESTION_TIMEOUT_SEC", "0.1")
     monkeypatch.setenv("MAI_INGESTION_LEASE_SEC", "1")
@@ -144,7 +243,7 @@ def _configure_ingestion(monkeypatch, tmp_path: Path, *, max_rows: int = 10) -> 
     monkeypatch.setenv("MAI_INGESTION_MAX_ROWS", str(max_rows))
 
 
-def test_analyze_durably_enqueues_before_returning(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_analyze_rejects_noncanonical_durable_delivery(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     _configure_ingestion(monkeypatch, tmp_path)
     with TestClient(app) as client:
         resp = client.post(
@@ -155,9 +254,12 @@ def test_analyze_durably_enqueues_before_returning(monkeypatch, tmp_path: Path) 
                 "session_id": "session-1",
             },
         )
-    assert resp.status_code == 200
-    assert resp.headers["X-Analysis-Delivery"] == "queued"
-    assert len(resp.headers["X-Analysis-Run-Id"]) == 36
+    assert resp.status_code == 422
+    assert resp.json()["detail"].startswith(
+        "Durable analysis requires the canonical transcript.ready flow"
+    )
+    assert "X-Analysis-Delivery" not in resp.headers
+    assert "X-Analysis-Run-Id" not in resp.headers
 
 
 def test_analyze_requires_canonical_ids_when_delivery_enabled(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -172,7 +274,7 @@ def test_analyze_requires_canonical_ids_when_delivery_enabled(monkeypatch, tmp_p
     assert invalid.status_code == 422
 
 
-def test_analyze_fails_closed_when_durable_queue_is_full(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_direct_analyze_cannot_fill_canonical_delivery_outbox(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     _configure_ingestion(monkeypatch, tmp_path, max_rows=1)
     payload = {
         "transcript": "Bütçe kararlaştırıldı.",
@@ -182,9 +284,12 @@ def test_analyze_fails_closed_when_durable_queue_is_full(monkeypatch, tmp_path: 
     with TestClient(app) as client:
         first = client.post("/analyze", json=payload)
         second = client.post("/analyze", json=payload)
-    assert first.status_code == 200
-    assert second.status_code == 503
-    assert second.headers["Retry-After"] == "30"
+    # #263: direct /analyze can no longer feed the durable ingestion outbox —
+    # both responses must reject with 422 (canonical transcript.ready flow
+    # required) instead of the old 200/503 outbox-throttle pair.
+    assert first.status_code == second.status_code == 422
+    assert "Retry-After" not in first.headers
+    assert "Retry-After" not in second.headers
 
 
 # ── Faz 24 live analysis (Zeynep 2026-07-20 kapsam kararı) ─────────────────

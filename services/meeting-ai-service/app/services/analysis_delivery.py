@@ -23,6 +23,7 @@ from app.api.metrics import (
 )
 from app.core.config import Settings
 from app.models.schemas import AnalysisDeliveryHealth, AnalyzeResponse
+from app.services.canonical_transcript_client import HttpCanonicalTranscriptClient
 from app.services.durable_outbox import (
     ClaimedMessage,
     OutboxError,
@@ -41,6 +42,17 @@ from app.services.meeting_service_client import (
 logger = logging.getLogger(__name__)
 
 _GROUNDING_STATUSES = {"verified", "partial_verified", "withheld", "empty"}
+_CAPABILITY_PAYLOAD_FIELDS = frozenset(
+    {
+        "_canonical_tenant_id",
+        "analysis_spec_version",
+        "finalization_version",
+        "finalized_at",
+        "meeting_id",
+        "transcript_session_id",
+        "transcript_sha256",
+    }
+)
 
 
 class AnalysisTransport(Protocol):
@@ -55,7 +67,11 @@ def build_ingestion_payload(
     *,
     settings: Settings,
     meeting_id: str,
+    tenant_id: str,
     session_id: str,
+    finalization_version: int,
+    finalized_at: datetime,
+    analysis_spec_version: str,
     transcript: str,
     result: AnalyzeResponse,
     generated_at: datetime,
@@ -71,7 +87,7 @@ def build_ingestion_payload(
         raise AnalysisDeliveryContractError("session_id exceeds the backend contract limit")
     _validate_backend_contract(settings, result)
 
-    return {
+    payload: dict[str, object] = {
         "meeting_id": canonical_meeting_id,
         "transcript_session_id": session_id,
         "transcript_sha256": hashlib.sha256(transcript.encode("utf-8")).hexdigest(),
@@ -92,6 +108,26 @@ def build_ingestion_payload(
         "actions": [_action_payload(item.model_dump()) for item in result.action_items],
         "supersedes_analysis_run_id": None,
     }
+    try:
+        canonical_tenant_id = str(uuid.UUID(tenant_id))
+    except ValueError as exc:
+        raise AnalysisDeliveryContractError("tenant_id must be a UUID") from exc
+    if finalization_version < 1:
+        raise AnalysisDeliveryContractError("finalization_version must be positive")
+    if finalized_at.tzinfo is None or finalized_at.utcoffset() is None:
+        raise AnalysisDeliveryContractError("finalized_at must carry a timezone")
+    spec_version = analysis_spec_version.strip()
+    if not spec_version or len(spec_version) > 64:
+        raise AnalysisDeliveryContractError("analysis_spec_version exceeds backend contract")
+    payload.update(
+        {
+            "finalization_version": finalization_version,
+            "finalized_at": _utc_instant(finalized_at),
+            "analysis_spec_version": spec_version,
+            "_canonical_tenant_id": canonical_tenant_id,
+        }
+    )
+    return payload
 
 
 def _validate_backend_contract(settings: Settings, result: AnalyzeResponse) -> None:
@@ -148,6 +184,10 @@ def _strict_iso_instant(value: object) -> str | None:
     return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _utc_instant(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 class AnalysisDeliveryRuntime:
     """Own the encrypted store, delivery worker, and runtime health state."""
 
@@ -173,21 +213,38 @@ class AnalysisDeliveryRuntime:
 
         if self.enabled and self._store is None:
             cipher = PayloadCipher(
-                settings.ingestion_encryption_keys(),
+                settings.ingestion_payload_encryption_keys(),
                 settings.ingestion_active_key_id,
+                lookup_key=settings.ingestion_lookup_key(),
             )
             self._store = SqliteOutboxStore(
                 settings.ingestion_store_path,
                 cipher,
                 max_rows=settings.ingestion_max_rows,
             )
+        if self.enabled:
+            assert self._store is not None
+            self._store.assert_delivery_capability_compatible(
+                required_payload_fields=_CAPABILITY_PAYLOAD_FIELDS
+            )
         if self.enabled and self._transport is None:
-            self._transport = MeetingServiceClient(settings, http_client)
+            capability_provider = HttpCanonicalTranscriptClient(settings, http_client)
+            self._transport = MeetingServiceClient(
+                settings,
+                http_client,
+                capability_provider=capability_provider,
+                owns_capability_provider=True,
+            )
             self._owns_transport = True
 
     @property
     def worker_running(self) -> bool:
         return self._worker is not None and not self._worker.done()
+
+    @property
+    def store(self) -> SqliteOutboxStore | None:
+        """Shared store handle for the ready inbox's atomic commit boundary."""
+        return self._store
 
     async def start(self) -> None:
         if not self.enabled or self.worker_running:
@@ -217,9 +274,15 @@ class AnalysisDeliveryRuntime:
         self,
         *,
         meeting_id: str | None,
+        tenant_id: str | None = None,
         session_id: str | None,
+        finalization_version: int | None = None,
+        finalized_at: datetime | None = None,
+        analysis_spec_version: str | None = None,
         transcript: str,
         result: AnalyzeResponse,
+        analysis_run_id: str | None = None,
+        generated_at: datetime | None = None,
     ) -> str | None:
         if not self.enabled:
             return None
@@ -228,20 +291,39 @@ class AnalysisDeliveryRuntime:
             raise AnalysisDeliveryContractError(
                 "meeting_id and session_id are required when durable delivery is enabled"
             )
-        analysis_run_id = str(uuid.uuid4())
+        canonical_values = (
+            tenant_id,
+            finalization_version,
+            finalized_at,
+            analysis_spec_version,
+        )
+        if any(value is None for value in canonical_values):
+            mai_ingestion_enqueue_total.labels(outcome="invalid_contract").inc()
+            raise AnalysisDeliveryContractError(
+                "durable delivery requires a canonical transcript.ready tuple"
+            )
+        assert tenant_id is not None
+        assert finalization_version is not None
+        assert finalized_at is not None
+        assert analysis_spec_version is not None
+        run_id = analysis_run_id or str(uuid.uuid4())
         payload = build_ingestion_payload(
             settings=self.settings,
             meeting_id=meeting_id,
+            tenant_id=tenant_id,
             session_id=session_id,
+            finalization_version=finalization_version,
+            finalized_at=finalized_at,
+            analysis_spec_version=analysis_spec_version,
             transcript=transcript,
             result=result,
-            generated_at=datetime.now(UTC),
+            generated_at=generated_at or datetime.now(UTC),
         )
         assert self._store is not None
         try:
             await asyncio.to_thread(
                 self._store.enqueue,
-                analysis_run_id=analysis_run_id,
+                analysis_run_id=run_id,
                 meeting_id=str(payload["meeting_id"]),
                 payload=payload,
             )
@@ -257,12 +339,17 @@ class AnalysisDeliveryRuntime:
         mai_ingestion_enqueue_total.labels(outcome="accepted").inc()
         self._wake.set()
         await self._refresh_metrics()
-        return analysis_run_id
+        return run_id
+
+    def notify_outbox_work(self) -> None:
+        """Wake result delivery after another component commits into the shared outbox."""
+        self._wake.set()
 
     async def health(self) -> AnalysisDeliveryHealth:
         if not self.enabled:
             return AnalysisDeliveryHealth(
                 enabled=False,
+                ready=True,
                 status="disabled",
                 worker_running=False,
                 pending=0,
@@ -274,9 +361,11 @@ class AnalysisDeliveryRuntime:
         assert self._store is not None
         try:
             summary = await asyncio.to_thread(self._store.summary)
+            has_capacity = await asyncio.to_thread(self._store.has_capacity)
         except (OutboxError, sqlite3.Error, OSError) as exc:
             return AnalysisDeliveryHealth(
                 enabled=True,
+                ready=False,
                 status="degraded",
                 worker_running=self.worker_running,
                 pending=0,
@@ -287,6 +376,7 @@ class AnalysisDeliveryRuntime:
             )
         degraded = (
             not self.worker_running
+            or not has_capacity
             or summary.dead > 0
             or (
                 summary.oldest_pending_age_sec is not None
@@ -295,13 +385,14 @@ class AnalysisDeliveryRuntime:
         )
         return AnalysisDeliveryHealth(
             enabled=True,
+            ready=(self.worker_running and has_capacity),
             status="degraded" if degraded else "ok",
             worker_running=self.worker_running,
             pending=summary.pending,
             in_flight=summary.in_flight,
             dead_letter=summary.dead,
             oldest_pending_age_sec=summary.oldest_pending_age_sec,
-            error_code=None,
+            error_code=None if has_capacity else "OutboxFullError",
         )
 
     async def _worker_loop(self) -> None:

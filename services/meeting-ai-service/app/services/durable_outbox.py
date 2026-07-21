@@ -15,6 +15,7 @@ transcripts are never accepted by this module.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -23,8 +24,9 @@ import time
 from contextlib import closing
 from dataclasses import dataclass
 from enum import Enum
+from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -54,6 +56,10 @@ class OutboxKeyUnavailableError(OutboxError):
 
 class OutboxIntegrityError(OutboxError):
     """AES-GCM authentication failed for a persisted payload."""
+
+
+class OutboxMigrationRequiredError(OutboxError):
+    """Retained payloads require a safe pre-upgrade drain or authoritative backfill."""
 
 
 @dataclass(frozen=True)
@@ -87,7 +93,13 @@ class DeadLetterMetadata:
 class PayloadCipher:
     """Versioned AES-GCM keyring with per-message authenticated context."""
 
-    def __init__(self, keys: dict[str, bytes], active_key_id: str) -> None:
+    def __init__(
+        self,
+        keys: dict[str, bytes],
+        active_key_id: str,
+        *,
+        lookup_key: bytes,
+    ) -> None:
         invalid_key_ids = sorted(key_id for key_id, key in keys.items() if len(key) != 32)
         if invalid_key_ids:
             raise OutboxKeyUnavailableError(
@@ -95,12 +107,20 @@ class PayloadCipher:
             )
         if active_key_id not in keys:
             raise OutboxKeyUnavailableError("active key id is missing from the keyring")
+        if len(lookup_key) != 32:
+            raise OutboxKeyUnavailableError("blind-index key must be exactly 32 bytes")
         self._keys = dict(keys)
         self.active_key_id = active_key_id
+        self._lookup_key = bytes(lookup_key)
 
     @property
     def key_ids(self) -> frozenset[str]:
         return frozenset(self._keys)
+
+    @property
+    def lookup_key_fingerprint(self) -> str:
+        """Non-secret binding used to reject unversioned blind-index key changes."""
+        return hashlib.sha256(b"meeting-ai-lookup-key:v1\x00" + self._lookup_key).hexdigest()
 
     @staticmethod
     def _aad(analysis_run_id: str, meeting_id: str) -> bytes:
@@ -156,11 +176,79 @@ class PayloadCipher:
             raise OutboxIntegrityError("outbox payload is not a JSON object")
         return parsed
 
+    def lookup_digests(self, *, purpose: str, value: str) -> tuple[str, ...]:
+        """Return a stable blind index independent from rotating encryption DEKs."""
+        message = f"meeting-ai-lookup:v2:{purpose}:{value}".encode()
+        return (hmac.new(self._lookup_key, message, hashlib.sha256).hexdigest(),)
+
+    def encrypt_metadata(
+        self,
+        *,
+        purpose: str,
+        lookup_value: str,
+        payload: dict[str, object],
+    ) -> tuple[str, str, bytes, bytes]:
+        """Encrypt a metadata envelope and return its stable lookup digest."""
+        lookup_digest = self.lookup_digests(purpose=purpose, value=lookup_value)[0]
+        plaintext = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        nonce = secrets.token_bytes(12)
+        ciphertext = AESGCM(self._keys[self.active_key_id]).encrypt(
+            nonce,
+            plaintext,
+            self._metadata_aad(purpose, lookup_digest),
+        )
+        return self.active_key_id, lookup_digest, nonce, ciphertext
+
+    def decrypt_metadata(
+        self,
+        *,
+        purpose: str,
+        lookup_digest: str,
+        key_id: str,
+        nonce: bytes,
+        ciphertext: bytes,
+    ) -> dict[str, object]:
+        """Authenticate and decrypt one metadata envelope."""
+        key = self._keys.get(key_id)
+        if key is None:
+            raise OutboxKeyUnavailableError(f"metadata key id {key_id!r} is unavailable")
+        try:
+            plaintext = AESGCM(key).decrypt(
+                nonce,
+                ciphertext,
+                self._metadata_aad(purpose, lookup_digest),
+            )
+        except InvalidTag as exc:
+            raise OutboxIntegrityError("metadata envelope authentication failed") from exc
+        parsed: Any = json.loads(plaintext)
+        if not isinstance(parsed, dict):
+            raise OutboxIntegrityError("metadata envelope is not a JSON object")
+        return parsed
+
+    @staticmethod
+    def _metadata_aad(purpose: str, lookup_digest: str) -> bytes:
+        return f"meeting-ai-metadata:v1:{purpose}:{lookup_digest}".encode()
+
 
 class SqliteOutboxStore:
     """Process-safe local durable queue with lease-based delivery ownership."""
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 6
+    _MIGRATIONS: ClassVar[dict[int, str]] = {
+        1: "0001_analysis_delivery_outbox.sql",
+        2: "0002_ready_event_inbox.sql",
+        3: "0003_ready_event_redrive.sql",
+        4: "0004_ready_event_inbox_encryption.sql",
+        5: "0005_ready_event_lease_fencing.sql",
+        6: "0006_ready_event_stable_lookup.sql",
+    }
+    _INBOX_SCRUB_MARKER = "ready-inbox-v3-plaintext-scrub"
+    _LOOKUP_KEY_BINDING_MARKER = "ready-inbox-lookup-key-sha256-v1"
 
     def __init__(
         self,
@@ -195,40 +283,514 @@ class SqliteOutboxStore:
         with closing(self._connect()) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS analysis_delivery_outbox (
-                    analysis_run_id TEXT PRIMARY KEY,
-                    meeting_id TEXT NOT NULL,
-                    key_id TEXT NOT NULL,
-                    nonce BLOB NOT NULL,
-                    ciphertext BLOB NOT NULL,
-                    payload_sha256 TEXT NOT NULL,
-                    state TEXT NOT NULL CHECK (state IN ('PENDING', 'IN_FLIGHT', 'DEAD')),
-                    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-                    next_attempt_at REAL NOT NULL,
-                    lease_owner TEXT,
-                    lease_until REAL,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    last_error_code TEXT,
-                    CHECK (
-                        (state = 'IN_FLIGHT'
-                            AND lease_owner IS NOT NULL
-                            AND lease_until IS NOT NULL)
-                        OR state != 'IN_FLIGHT'
-                    )
-                );
-                CREATE INDEX IF NOT EXISTS idx_analysis_delivery_due
-                    ON analysis_delivery_outbox(state, next_attempt_at, lease_until, created_at);
-                """
-            )
+            connection.execute("PRAGMA secure_delete=ON")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, self._SCHEMA_VERSION):
+            if version < 0 or version > self._SCHEMA_VERSION:
                 raise OutboxError(f"unsupported outbox schema version {version}")
-            connection.execute(f"PRAGMA user_version={self._SCHEMA_VERSION}")
+            self._assert_existing_keyring_complete(connection)
+            self._apply_migrations(connection, version)
+            self._rekey_encrypted_rows(connection)
+            self._ensure_store_metadata(connection)
+            self._verify_or_record_lookup_key_binding(connection)
+            if not self._inbox_plaintext_scrub_complete(connection):
+                self._complete_inbox_plaintext_scrub(connection)
         self._restrict_database_files()
         self.assert_keyring_complete()
+
+    def _apply_migrations(self, connection: sqlite3.Connection, current_version: int) -> None:
+        for version in range(current_version + 1, self._SCHEMA_VERSION + 1):
+            resource = files("app.migrations").joinpath(self._MIGRATIONS[version])
+            try:
+                sql = resource.read_text(encoding="utf-8")
+            except (FileNotFoundError, OSError) as exc:
+                raise OutboxError(f"missing SQLite migration {version}") from exc
+            if version == 4:
+                self._encrypt_ready_inbox_migration(connection, sql)
+                continue
+            if version == 5:
+                self._lease_fence_ready_inbox_migration(connection, sql)
+                continue
+            if version == 6:
+                self._stable_lookup_ready_inbox_migration(connection)
+                continue
+            try:
+                connection.executescript(
+                    f"BEGIN IMMEDIATE;\n{sql}\nPRAGMA user_version={version};\nCOMMIT;"
+                )
+            except Exception:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
+    def _encrypt_ready_inbox_migration(
+        self,
+        connection: sqlite3.Connection,
+        create_table_sql: str,
+    ) -> None:
+        """Rebuild the v3 inbox with encrypted identity envelopes."""
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(create_table_sql.strip().rstrip(";"))
+            rows = connection.execute(
+                "SELECT * FROM meeting_transcript_ready_inbox ORDER BY created_at, event_key"
+            ).fetchall()
+            for row in rows:
+                event_key = str(row["event_key"])
+                envelope: dict[str, object] = {
+                    "eventKey": event_key,
+                    "payloadSha256": str(row["payload_sha256"]),
+                    "tenantId": row["tenant_id"],
+                    "meetingId": row["meeting_id"],
+                    "sessionId": row["session_id"],
+                    "finalizationVersion": row["finalization_version"],
+                    "analysisRunId": row["analysis_run_id"],
+                }
+                tenant_id = row["tenant_id"]
+                lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+                key_id, digest, nonce, ciphertext = self._cipher.encrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_value=lookup_value,
+                    payload=envelope,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO meeting_transcript_ready_inbox_v4 (
+                        event_key_digest, identity_key_id, identity_nonce,
+                        identity_ciphertext, state, failure_count,
+                        lease_recovery_count, next_attempt_at, lease_owner,
+                        lease_until, created_at, updated_at, last_error_code,
+                        dlq_published_at, dead_reason, redrive_count,
+                        last_redriven_at, last_redrive_reference
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        digest,
+                        key_id,
+                        nonce,
+                        ciphertext,
+                        row["state"],
+                        row["failure_count"],
+                        row["lease_recovery_count"],
+                        row["next_attempt_at"],
+                        row["lease_owner"],
+                        row["lease_until"],
+                        row["created_at"],
+                        row["updated_at"],
+                        row["last_error_code"],
+                        row["dlq_published_at"],
+                        row["dead_reason"],
+                        row["redrive_count"],
+                        row["last_redriven_at"],
+                        row["last_redrive_reference"],
+                    ),
+                )
+            connection.execute("DROP TABLE meeting_transcript_ready_inbox")
+            connection.execute(
+                "ALTER TABLE meeting_transcript_ready_inbox_v4 "
+                "RENAME TO meeting_transcript_ready_inbox"
+            )
+            connection.execute(
+                """
+                CREATE INDEX idx_meeting_transcript_ready_due
+                ON meeting_transcript_ready_inbox(
+                    state, next_attempt_at, lease_until, created_at
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX idx_meeting_transcript_ready_terminal
+                ON meeting_transcript_ready_inbox(state, updated_at)
+                """
+            )
+            self._ensure_store_metadata(connection)
+            connection.execute(
+                """
+                INSERT INTO meeting_ai_store_metadata(name, value)
+                VALUES (?, 'pending')
+                ON CONFLICT(name) DO UPDATE SET value = 'pending'
+                """,
+                (self._INBOX_SCRUB_MARKER,),
+            )
+            connection.execute("PRAGMA user_version=4")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _lease_fence_ready_inbox_migration(
+        self,
+        connection: sqlite3.Connection,
+        add_column_sql: str,
+    ) -> None:
+        """Add lease fencing and tenant-bind lookup digests from legacy v4 rows."""
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(add_column_sql.strip().rstrip(";"))
+            rows = connection.execute(
+                """
+                SELECT event_key_digest, identity_key_id, identity_nonce,
+                       identity_ciphertext
+                FROM meeting_transcript_ready_inbox
+                ORDER BY created_at, event_key_digest
+                """
+            ).fetchall()
+            for row in rows:
+                old_digest = str(row["event_key_digest"])
+                try:
+                    envelope = self._cipher.decrypt_metadata(
+                        purpose="ready-event-inbox",
+                        lookup_digest=old_digest,
+                        key_id=str(row["identity_key_id"]),
+                        nonce=bytes(row["identity_nonce"]),
+                        ciphertext=bytes(row["identity_ciphertext"]),
+                    )
+                    event_key = envelope["eventKey"]
+                    tenant_id = envelope.get("tenantId")
+                except (KeyError, TypeError, ValueError, OutboxIntegrityError) as exc:
+                    raise OutboxIntegrityError(
+                        "ready-event identity cannot be tenant-bound during migration"
+                    ) from exc
+                if not isinstance(event_key, str) or (
+                    tenant_id is not None and not isinstance(tenant_id, str)
+                ):
+                    raise OutboxIntegrityError(
+                        "ready-event identity has invalid tenant binding during migration"
+                    )
+                lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+                key_id, new_digest, nonce, ciphertext = self._cipher.encrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_value=lookup_value,
+                    payload=envelope,
+                )
+                connection.execute(
+                    """
+                    UPDATE meeting_transcript_ready_inbox
+                    SET event_key_digest = ?, identity_key_id = ?,
+                        identity_nonce = ?, identity_ciphertext = ?
+                    WHERE event_key_digest = ?
+                    """,
+                    (new_digest, key_id, nonce, ciphertext, old_digest),
+                )
+            connection.execute("PRAGMA user_version=5")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _stable_lookup_ready_inbox_migration(self, connection: sqlite3.Connection) -> None:
+        """Rebind v5 identities to the dedicated-key HMAC blind index."""
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = connection.execute(
+                """
+                SELECT event_key_digest, identity_key_id, identity_nonce,
+                       identity_ciphertext
+                FROM meeting_transcript_ready_inbox
+                ORDER BY created_at, event_key_digest
+                """
+            ).fetchall()
+            replacements: list[tuple[str, str, bytes, bytes, str]] = []
+            seen_digests: set[str] = set()
+            for row in rows:
+                old_digest = str(row["event_key_digest"])
+                try:
+                    envelope = self._cipher.decrypt_metadata(
+                        purpose="ready-event-inbox",
+                        lookup_digest=old_digest,
+                        key_id=str(row["identity_key_id"]),
+                        nonce=bytes(row["identity_nonce"]),
+                        ciphertext=bytes(row["identity_ciphertext"]),
+                    )
+                    event_key = envelope["eventKey"]
+                    tenant_id = envelope.get("tenantId")
+                except (KeyError, TypeError, ValueError, OutboxIntegrityError) as exc:
+                    raise OutboxIntegrityError(
+                        "ready-event identity cannot be rebound during stable lookup migration"
+                    ) from exc
+                if not isinstance(event_key, str) or (
+                    tenant_id is not None and not isinstance(tenant_id, str)
+                ):
+                    raise OutboxIntegrityError(
+                        "ready-event identity has invalid stable lookup binding"
+                    )
+                lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+                key_id, new_digest, nonce, ciphertext = self._cipher.encrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_value=lookup_value,
+                    payload=envelope,
+                )
+                if new_digest in seen_digests:
+                    raise OutboxIntegrityError(
+                        "duplicate semantic ready-event identities require reconciliation"
+                    )
+                seen_digests.add(new_digest)
+                replacements.append((new_digest, key_id, nonce, ciphertext, old_digest))
+
+            for new_digest, key_id, nonce, ciphertext, old_digest in replacements:
+                cursor = connection.execute(
+                    """
+                    UPDATE meeting_transcript_ready_inbox
+                    SET event_key_digest = ?, identity_key_id = ?,
+                        identity_nonce = ?, identity_ciphertext = ?
+                    WHERE event_key_digest = ?
+                    """,
+                    (new_digest, key_id, nonce, ciphertext, old_digest),
+                )
+                if cursor.rowcount != 1:
+                    raise OutboxIntegrityError(
+                        "ready-event row changed during blind-index migration"
+                    )
+            connection.execute("PRAGMA user_version=6")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _assert_existing_keyring_complete(self, connection: sqlite3.Connection) -> None:
+        """Reject a partial keyring before any migration or scrub mutates the store."""
+        key_ids: set[str] = set()
+        table_names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for table_name, key_column, table_info_sql, key_ids_sql in (
+            (
+                "analysis_delivery_outbox",
+                "key_id",
+                "PRAGMA table_info(analysis_delivery_outbox)",
+                "SELECT DISTINCT key_id FROM analysis_delivery_outbox",
+            ),
+            (
+                "meeting_transcript_ready_inbox",
+                "identity_key_id",
+                "PRAGMA table_info(meeting_transcript_ready_inbox)",
+                "SELECT DISTINCT identity_key_id FROM meeting_transcript_ready_inbox",
+            ),
+        ):
+            if table_name not in table_names:
+                continue
+            columns = {
+                str(row[1])
+                for row in connection.execute(table_info_sql).fetchall()
+            }
+            if key_column not in columns:
+                continue
+            key_ids.update(
+                str(row[0])
+                for row in connection.execute(key_ids_sql).fetchall()
+            )
+        missing = sorted(key_ids - self._cipher.key_ids)
+        if missing:
+            raise OutboxKeyUnavailableError(
+                "outbox contains rows encrypted with unavailable key ids: " + ", ".join(missing)
+            )
+
+    def _rekey_encrypted_rows(self, connection: sqlite3.Connection) -> None:
+        """Eagerly re-encrypt every retained row with the active encryption DEK."""
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            outbox_rows = connection.execute(
+                """
+                SELECT analysis_run_id, meeting_id, key_id, nonce, ciphertext,
+                       payload_sha256
+                FROM analysis_delivery_outbox
+                WHERE key_id != ?
+                ORDER BY created_at, analysis_run_id
+                """,
+                (self._cipher.active_key_id,),
+            ).fetchall()
+            for row in outbox_rows:
+                analysis_run_id = str(row["analysis_run_id"])
+                meeting_id = str(row["meeting_id"])
+                payload = self._cipher.decrypt(
+                    key_id=str(row["key_id"]),
+                    nonce=bytes(row["nonce"]),
+                    ciphertext=bytes(row["ciphertext"]),
+                    analysis_run_id=analysis_run_id,
+                    meeting_id=meeting_id,
+                )
+                key_id, nonce, ciphertext, payload_sha256 = self._cipher.encrypt(
+                    analysis_run_id,
+                    meeting_id,
+                    payload,
+                )
+                if not hmac.compare_digest(payload_sha256, str(row["payload_sha256"])):
+                    raise OutboxIntegrityError(
+                        "outbox payload hash changed during encryption-key rotation"
+                    )
+                cursor = connection.execute(
+                    """
+                    UPDATE analysis_delivery_outbox
+                    SET key_id = ?, nonce = ?, ciphertext = ?
+                    WHERE analysis_run_id = ? AND key_id != ?
+                    """,
+                    (
+                        key_id,
+                        nonce,
+                        ciphertext,
+                        analysis_run_id,
+                        self._cipher.active_key_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise OutboxIntegrityError(
+                        "outbox row changed during encryption-key rotation"
+                    )
+
+            inbox_rows = connection.execute(
+                """
+                SELECT event_key_digest, identity_key_id, identity_nonce,
+                       identity_ciphertext
+                FROM meeting_transcript_ready_inbox
+                WHERE identity_key_id != ?
+                ORDER BY created_at, event_key_digest
+                """,
+                (self._cipher.active_key_id,),
+            ).fetchall()
+            for row in inbox_rows:
+                digest = str(row["event_key_digest"])
+                envelope = self._cipher.decrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_digest=digest,
+                    key_id=str(row["identity_key_id"]),
+                    nonce=bytes(row["identity_nonce"]),
+                    ciphertext=bytes(row["identity_ciphertext"]),
+                )
+                event_key = envelope.get("eventKey")
+                tenant_id = envelope.get("tenantId")
+                if not isinstance(event_key, str) or (
+                    tenant_id is not None and not isinstance(tenant_id, str)
+                ):
+                    raise OutboxIntegrityError(
+                        "ready-event identity is invalid during encryption-key rotation"
+                    )
+                lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+                key_id, rebound_digest, nonce, ciphertext = self._cipher.encrypt_metadata(
+                    purpose="ready-event-inbox",
+                    lookup_value=lookup_value,
+                    payload=envelope,
+                )
+                if not hmac.compare_digest(rebound_digest, digest):
+                    raise OutboxIntegrityError(
+                        "ready-event blind index changed during encryption-key rotation"
+                    )
+                cursor = connection.execute(
+                    """
+                    UPDATE meeting_transcript_ready_inbox
+                    SET identity_key_id = ?, identity_nonce = ?, identity_ciphertext = ?
+                    WHERE event_key_digest = ? AND identity_key_id != ?
+                    """,
+                    (
+                        key_id,
+                        nonce,
+                        ciphertext,
+                        digest,
+                        self._cipher.active_key_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise OutboxIntegrityError(
+                        "ready-event row changed during encryption-key rotation"
+                    )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _ensure_store_metadata(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meeting_ai_store_metadata (
+                name TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+
+    def _verify_or_record_lookup_key_binding(self, connection: sqlite3.Connection) -> None:
+        """Bind the durable store to one blind-index key until a versioned migration exists."""
+        row = connection.execute(
+            "SELECT value FROM meeting_ai_store_metadata WHERE name = ?",
+            (self._LOOKUP_KEY_BINDING_MARKER,),
+        ).fetchone()
+        expected = self._cipher.lookup_key_fingerprint
+        if row is not None:
+            if not hmac.compare_digest(str(row[0]), expected):
+                raise OutboxIntegrityError(
+                    "blind-index key changed without a versioned lookup migration"
+                )
+            return
+
+        inbox_rows = connection.execute(
+            """
+            SELECT event_key_digest, identity_key_id, identity_nonce,
+                   identity_ciphertext
+            FROM meeting_transcript_ready_inbox
+            ORDER BY created_at, event_key_digest
+            """
+        ).fetchall()
+        for inbox_row in inbox_rows:
+            digest = str(inbox_row["event_key_digest"])
+            envelope = self._cipher.decrypt_metadata(
+                purpose="ready-event-inbox",
+                lookup_digest=digest,
+                key_id=str(inbox_row["identity_key_id"]),
+                nonce=bytes(inbox_row["identity_nonce"]),
+                ciphertext=bytes(inbox_row["identity_ciphertext"]),
+            )
+            event_key = envelope.get("eventKey")
+            tenant_id = envelope.get("tenantId")
+            if not isinstance(event_key, str) or (
+                tenant_id is not None and not isinstance(tenant_id, str)
+            ):
+                raise OutboxIntegrityError(
+                    "ready-event identity is invalid during blind-index key binding"
+                )
+            lookup_value = event_key if tenant_id is None else f"{tenant_id}|{event_key}"
+            rebound_digest = self._cipher.lookup_digests(
+                purpose="ready-event-inbox",
+                value=lookup_value,
+            )[0]
+            if not hmac.compare_digest(rebound_digest, digest):
+                raise OutboxIntegrityError(
+                    "blind-index key does not match retained ready-event identities"
+                )
+
+        connection.execute(
+            "INSERT INTO meeting_ai_store_metadata(name, value) VALUES (?, ?)",
+            (self._LOOKUP_KEY_BINDING_MARKER, expected),
+        )
+
+    def _inbox_plaintext_scrub_complete(self, connection: sqlite3.Connection) -> bool:
+        row = connection.execute(
+            "SELECT value FROM meeting_ai_store_metadata WHERE name = ?",
+            (self._INBOX_SCRUB_MARKER,),
+        ).fetchone()
+        return row is not None and str(row[0]) == "complete"
+
+    def _complete_inbox_plaintext_scrub(self, connection: sqlite3.Connection) -> None:
+        """Finish or resume the v3 plaintext-page scrub before startup succeeds."""
+        self._checkpoint_truncate(connection)
+        connection.execute("VACUUM")
+        self._checkpoint_truncate(connection)
+        connection.execute(
+            """
+            INSERT INTO meeting_ai_store_metadata(name, value)
+            VALUES (?, 'complete')
+            ON CONFLICT(name) DO UPDATE SET value = 'complete'
+            """,
+            (self._INBOX_SCRUB_MARKER,),
+        )
+
+    @staticmethod
+    def _checkpoint_truncate(connection: sqlite3.Connection) -> None:
+        result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if result is None or int(result[0]) != 0:
+            raise OutboxError("SQLite WAL truncation is busy; plaintext scrub remains pending")
 
     @staticmethod
     def _restrict_permissions(path: Path, mode: int) -> None:
@@ -247,10 +809,48 @@ class SqliteOutboxStore:
                     "SELECT DISTINCT key_id FROM analysis_delivery_outbox"
                 ).fetchall()
             }
+            key_ids.update(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT identity_key_id FROM meeting_transcript_ready_inbox"
+                ).fetchall()
+            )
         missing = sorted(key_ids - self._cipher.key_ids)
         if missing:
             raise OutboxKeyUnavailableError(
                 "outbox contains rows encrypted with unavailable key ids: " + ", ".join(missing)
+            )
+
+    def assert_delivery_capability_compatible(
+        self,
+        *,
+        required_payload_fields: frozenset[str],
+    ) -> None:
+        """Fail before worker activation without changing retained row state."""
+        incompatible = 0
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT analysis_run_id, meeting_id, key_id, nonce, ciphertext
+                FROM analysis_delivery_outbox
+                ORDER BY created_at, analysis_run_id
+                """
+            ).fetchall()
+            for row in rows:
+                payload = self._cipher.decrypt(
+                    key_id=str(row["key_id"]),
+                    nonce=bytes(row["nonce"]),
+                    ciphertext=bytes(row["ciphertext"]),
+                    analysis_run_id=str(row["analysis_run_id"]),
+                    meeting_id=str(row["meeting_id"]),
+                )
+                if not required_payload_fields.issubset(payload):
+                    incompatible += 1
+        if incompatible:
+            raise OutboxMigrationRequiredError(
+                "retained outbox rows predate transcript capability delivery; "
+                "drain them under the previous revision or perform an authoritative backfill "
+                "before enabling this revision"
             )
 
     def enqueue(
@@ -271,57 +871,82 @@ class SqliteOutboxStore:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                existing = connection.execute(
-                    """
-                    SELECT meeting_id, payload_sha256
-                    FROM analysis_delivery_outbox
-                    WHERE analysis_run_id = ?
-                    """,
-                    (analysis_run_id,),
-                ).fetchone()
-                if existing is not None:
-                    if (
-                        str(existing["meeting_id"]) != meeting_id
-                        or str(existing["payload_sha256"]) != payload_sha256
-                    ):
-                        raise OutboxConflictError(
-                            "analysis_run_id already exists with a different payload"
-                        )
-                    connection.commit()
-                    return False
-
-                row_count = int(
-                    connection.execute("SELECT COUNT(*) FROM analysis_delivery_outbox").fetchone()[
-                        0
-                    ]
-                )
-                if row_count >= self._max_rows:
-                    raise OutboxFullError("durable analysis delivery queue is full")
-                connection.execute(
-                    """
-                    INSERT INTO analysis_delivery_outbox (
-                        analysis_run_id, meeting_id, key_id, nonce, ciphertext,
-                        payload_sha256, state, attempt_count, next_attempt_at,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)
-                    """,
-                    (
-                        analysis_run_id,
-                        meeting_id,
-                        key_id,
-                        nonce,
-                        ciphertext,
-                        payload_sha256,
-                        timestamp,
-                        timestamp,
-                        timestamp,
-                    ),
+                inserted = self.enqueue_in_transaction(
+                    connection,
+                    analysis_run_id=analysis_run_id,
+                    meeting_id=meeting_id,
+                    encrypted=(key_id, nonce, ciphertext, payload_sha256),
+                    now=timestamp,
                 )
                 connection.commit()
             except Exception:
                 connection.rollback()
                 raise
         self._restrict_database_files()
+        return inserted
+
+    def enqueue_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        analysis_run_id: str,
+        meeting_id: str,
+        payload: dict[str, object] | None = None,
+        encrypted: tuple[str, bytes, bytes, str] | None = None,
+        now: float,
+    ) -> bool:
+        """Insert through an existing write transaction.
+
+        The ready-event inbox uses this method so the encrypted result row and
+        its ``OUTBOXED`` transition become one SQLite commit.
+        """
+        if (payload is None) == (encrypted is None):
+            raise ValueError("exactly one of payload or encrypted must be supplied")
+        if encrypted is None:
+            assert payload is not None
+            encrypted = self._cipher.encrypt(analysis_run_id, meeting_id, payload)
+        key_id, nonce, ciphertext, payload_sha256 = encrypted
+        existing = connection.execute(
+            """
+            SELECT meeting_id, payload_sha256
+            FROM analysis_delivery_outbox
+            WHERE analysis_run_id = ?
+            """,
+            (analysis_run_id,),
+        ).fetchone()
+        if existing is not None:
+            if (
+                str(existing["meeting_id"]) != meeting_id
+                or str(existing["payload_sha256"]) != payload_sha256
+            ):
+                raise OutboxConflictError("analysis_run_id already exists with a different payload")
+            return False
+
+        row_count = int(
+            connection.execute("SELECT COUNT(*) FROM analysis_delivery_outbox").fetchone()[0]
+        )
+        if row_count >= self._max_rows:
+            raise OutboxFullError("durable analysis delivery queue is full")
+        connection.execute(
+            """
+            INSERT INTO analysis_delivery_outbox (
+                analysis_run_id, meeting_id, key_id, nonce, ciphertext,
+                payload_sha256, state, attempt_count, next_attempt_at,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)
+            """,
+            (
+                analysis_run_id,
+                meeting_id,
+                key_id,
+                nonce,
+                ciphertext,
+                payload_sha256,
+                now,
+                now,
+                now,
+            ),
+        )
         return True
 
     def claim_next(
@@ -515,3 +1140,11 @@ class SqliteOutboxStore:
             dead=counts.get(OutboxState.DEAD.value, 0),
             oldest_pending_age_sec=None if oldest is None else max(0.0, timestamp - float(oldest)),
         )
+
+    def has_capacity(self) -> bool:
+        """Return whether a new result identity can be accepted."""
+        with closing(self._connect()) as connection:
+            row_count = int(
+                connection.execute("SELECT COUNT(*) FROM analysis_delivery_outbox").fetchone()[0]
+            )
+        return row_count < self._max_rows

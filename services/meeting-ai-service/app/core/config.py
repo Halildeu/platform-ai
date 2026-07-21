@@ -17,12 +17,52 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 from pathlib import Path
+from string import Formatter
 from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_TRANSCRIPT_TUPLE_PLACEHOLDERS = {
+    "tenant_id",
+    "meeting_id",
+    "session_id",
+    "finalization_version",
+}
+
+
+def _validate_transcript_path_template(name: str, value: str) -> None:
+    try:
+        parsed_fields = [
+            (field_name, format_spec, conversion)
+            for _, field_name, format_spec, conversion in Formatter().parse(value)
+            if field_name is not None
+        ]
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a valid path template") from exc
+    field_names = [field_name for field_name, _, _ in parsed_fields]
+    if (
+        not value.startswith("/")
+        or len(field_names) != len(_TRANSCRIPT_TUPLE_PLACEHOLDERS)
+        or set(field_names) != _TRANSCRIPT_TUPLE_PLACEHOLDERS
+        or any(format_spec or conversion for _, format_spec, conversion in parsed_fields)
+    ):
+        raise ValueError(
+            f"{name} must be an absolute path containing exactly the tenant_id, "
+            "meeting_id, session_id, and finalization_version placeholders"
+        )
+    rendered = value.format(
+        tenant_id="tenant",
+        meeting_id="meeting",
+        session_id="session",
+        finalization_version="1",
+    )
+    parsed = urlsplit(rendered)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        raise ValueError(f"{name} must be an absolute path without URL authority or query data")
 
 
 class Settings(BaseSettings):
@@ -47,7 +87,6 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="MAI_",
-        env_file=".env",
         extra="ignore",
         protected_namespaces=("settings_",),
     )
@@ -56,6 +95,7 @@ class Settings(BaseSettings):
     backend: str = Field(default="mock", pattern="^(mock|anthropic|openai|ollama)$")
     model_name: str = Field(default="placeholder-skeleton")
     max_transcript_chars: int = Field(default=100_000, ge=1, le=2_000_000)
+    analysis_max_concurrency: int = Field(default=2, ge=1, le=32)
     redact_pii: bool = Field(default=True)
     log_level: str = Field(default="INFO")
     request_timeout: int = Field(default=60, ge=1, le=300)
@@ -102,6 +142,7 @@ class Settings(BaseSettings):
 
     ingestion_store_path: Path = Field(default=Path("data/analysis-delivery.sqlite3"))
     ingestion_active_key_id: str = Field(default="")
+    ingestion_lookup_key_id: str = Field(default="")
     ingestion_encryption_keys_json: SecretStr = Field(default=SecretStr(""))
     ingestion_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
     ingestion_max_attempts: int = Field(default=8, ge=1, le=100)
@@ -109,7 +150,7 @@ class Settings(BaseSettings):
     ingestion_max_backoff_sec: float = Field(default=300.0, ge=1.0, le=86_400.0)
     ingestion_jitter_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
     ingestion_poll_interval_sec: float = Field(default=1.0, ge=0.05, le=60.0)
-    ingestion_lease_sec: float = Field(default=30.0, ge=1.0, le=3_600.0)
+    ingestion_lease_sec: float = Field(default=45.0, ge=1.0, le=3_600.0)
     ingestion_shutdown_grace_sec: float = Field(default=5.0, ge=0.1, le=120.0)
     ingestion_max_rows: int = Field(default=10_000, ge=1, le=1_000_000)
     ingestion_stale_after_sec: float = Field(default=300.0, ge=1.0, le=604_800.0)
@@ -136,6 +177,86 @@ class Settings(BaseSettings):
             "detection responsive. 15s balances chattiness vs staleness."
         ),
     )
+
+    # #263 — canonical transcript-ready consumer (default-off until the backend
+    # internal snapshot and tenant/job-token contract is frozen).
+    ready_consumer_enabled: bool = Field(default=False)
+    analysis_spec_version: str = Field(
+        default="meeting-intelligence-v1",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    ready_redis_url: SecretStr = Field(default=SecretStr(""))
+    ready_redis_stream: str = Field(default="meeting:events", min_length=1, max_length=256)
+    ready_redis_group: str = Field(
+        default="meeting-ai-transcript-ready-v1", min_length=1, max_length=256
+    )
+    ready_redis_consumer_name: str = Field(default="", max_length=256)
+    ready_redis_dead_letter_stream: str = Field(
+        default="meeting:events:meeting-ai:dead", min_length=1, max_length=256
+    )
+    ready_redis_dead_letter_maxlen: int = Field(default=10_000, ge=1, le=1_000_000)
+    ready_redis_block_ms: int = Field(default=1_000, ge=10, le=60_000)
+    ready_redis_connect_timeout_sec: float = Field(default=5.0, ge=0.1, le=120.0)
+    ready_redis_command_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
+    ready_redis_batch_size: int = Field(default=1, ge=1, le=100)
+    ready_redis_claim_idle_ms: int = Field(default=120_000, ge=100, le=3_600_000)
+    ready_consumer_lease_sec: float = Field(default=120.0, ge=5.0, le=7_200.0)
+    ready_consumer_max_failures: int = Field(default=8, ge=1, le=100)
+    ready_consumer_base_backoff_sec: float = Field(default=2.0, ge=0.1, le=300.0)
+    ready_consumer_max_backoff_sec: float = Field(default=300.0, ge=1.0, le=86_400.0)
+    ready_consumer_jitter_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
+    ready_consumer_shutdown_grace_sec: float = Field(default=10.0, ge=0.1, le=300.0)
+    ready_consumer_inbox_max_rows: int = Field(default=100_000, ge=1, le=10_000_000)
+    ready_consumer_stale_after_sec: float = Field(default=300.0, ge=1.0, le=604_800.0)
+    ready_consumer_retention_sec: float = Field(
+        default=2_592_000.0,
+        ge=86_400.0,
+        le=31_536_000.0,
+    )
+    ready_producer_replay_horizon_sec: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=31_536_000.0,
+    )
+    ready_consumer_prune_interval_sec: float = Field(default=3_600.0, ge=60.0, le=86_400.0)
+    ready_consumer_prune_batch_size: int = Field(default=1_000, ge=1, le=10_000)
+
+    transcript_service_base_url: str = Field(default="")
+    transcript_service_snapshot_path_template: str = Field(default="")
+    transcript_service_capability_path_template: str = Field(default="")
+    transcript_service_token_url: str = Field(default="")
+    transcript_service_client_id: str = Field(default="")
+    transcript_service_client_secret: SecretStr = Field(default=SecretStr(""))
+    transcript_service_audience: str = Field(default="transcript-service")
+    transcript_service_scope: str = Field(default="transcript:canonical:read")
+    transcript_service_capability_scope: str = Field(
+        default="transcript:analysis-job-capability:issue"
+    )
+    transcript_service_timeout_sec: float = Field(default=10.0, ge=0.1, le=120.0)
+    transcript_service_max_response_bytes: int = Field(
+        default=4_000_000,
+        ge=1_024,
+        le=64_000_000,
+    )
+    transcript_service_capability_clock_skew_sec: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+    )
+
+    @property
+    def transcript_service_permissions(self) -> list[str]:
+        return [p.strip() for p in self.transcript_service_scope.split(",") if p.strip()]
+
+    @property
+    def transcript_service_capability_permissions(self) -> list[str]:
+        return [
+            permission.strip()
+            for permission in self.transcript_service_capability_scope.split(",")
+            if permission.strip()
+        ]
 
     def ollama_options(self) -> dict[str, object]:
         """Decoding options for Ollama `/api/generate` (deterministic extraction).
@@ -197,6 +318,23 @@ class Settings(BaseSettings):
             decoded[key_id] = key
         return decoded
 
+    def ingestion_lookup_key(self) -> bytes:
+        """Return the dedicated blind-index key from the protected keyring."""
+        key = self.ingestion_encryption_keys().get(self.ingestion_lookup_key_id)
+        if key is None:
+            raise ValueError(
+                "MAI_INGESTION_LOOKUP_KEY_ID must select a key from the encrypted keyring"
+            )
+        return key
+
+    def ingestion_payload_encryption_keys(self) -> dict[str, bytes]:
+        """Return only payload DEKs, excluding the dedicated blind-index key."""
+        return {
+            key_id: key
+            for key_id, key in self.ingestion_encryption_keys().items()
+            if key_id != self.ingestion_lookup_key_id
+        }
+
     @model_validator(mode="after")
     def _enforce_ingestion_boundary(self) -> Settings:
         """Fail at startup when durable delivery cannot meet its security contract."""
@@ -246,6 +384,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "MAI_INGESTION_ACTIVE_KEY_ID must select a key from the encrypted keyring"
             )
+        if (
+            not self.ingestion_lookup_key_id
+            or self.ingestion_lookup_key_id not in keys
+            or self.ingestion_lookup_key_id == self.ingestion_active_key_id
+        ):
+            raise ValueError(
+                "MAI_INGESTION_LOOKUP_KEY_ID must select a dedicated non-active key from "
+                "the encrypted keyring"
+            )
         if self.ingestion_max_backoff_sec < self.ingestion_base_backoff_sec:
             raise ValueError("ingestion max backoff must be >= base backoff")
         # A cold delivery can spend one timeout acquiring a token and a second
@@ -253,6 +400,85 @@ class Settings(BaseSettings):
         # another worker cannot reclaim and duplicate it mid-flight.
         if self.ingestion_lease_sec <= 2 * self.ingestion_timeout_sec:
             raise ValueError("ingestion lease must be greater than two HTTP timeout windows")
+        for name, value in (
+            ("MAI_TRANSCRIPT_SERVICE_BASE_URL", self.transcript_service_base_url),
+            ("MAI_TRANSCRIPT_SERVICE_TOKEN_URL", self.transcript_service_token_url),
+        ):
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+                raise ValueError(
+                    f"{name} must be an absolute HTTPS URL without embedded credentials"
+                )
+        if not (
+            self.transcript_service_client_id
+            and self.transcript_service_client_secret.get_secret_value()
+        ):
+            raise ValueError("durable delivery requires transcript-service client credentials")
+        if self.transcript_service_capability_permissions != [
+            "transcript:analysis-job-capability:issue"
+        ]:
+            raise ValueError(
+                "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE must request only "
+                "transcript:analysis-job-capability:issue"
+            )
+        _validate_transcript_path_template(
+            "MAI_TRANSCRIPT_SERVICE_CAPABILITY_PATH_TEMPLATE",
+            self.transcript_service_capability_path_template,
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_ready_consumer_boundary(self) -> Settings:
+        if not self.ready_consumer_enabled:
+            return self
+        if not self.ingestion_enabled:
+            raise ValueError("MAI_READY_CONSUMER_ENABLED=True requires MAI_INGESTION_ENABLED=True")
+        if not self.ready_redis_url.get_secret_value():
+            raise ValueError("MAI_READY_REDIS_URL is required when the ready consumer is enabled")
+        parsed_redis = urlsplit(self.ready_redis_url.get_secret_value())
+        if parsed_redis.scheme not in {"redis", "rediss"} or not parsed_redis.hostname:
+            raise ValueError("MAI_READY_REDIS_URL must be an absolute redis:// or rediss:// URL")
+        if self.app_env in {"stage", "prod"} and parsed_redis.scheme != "rediss":
+            raise ValueError("stage/prod ready consumer requires a rediss:// Redis URL")
+
+        if self.transcript_service_permissions != ["transcript:canonical:read"]:
+            raise ValueError(
+                "MAI_TRANSCRIPT_SERVICE_SCOPE must request only transcript:canonical:read"
+            )
+        _validate_transcript_path_template(
+            "MAI_TRANSCRIPT_SERVICE_SNAPSHOT_PATH_TEMPLATE",
+            self.transcript_service_snapshot_path_template,
+        )
+        if self.ready_consumer_max_backoff_sec < self.ready_consumer_base_backoff_sec:
+            raise ValueError("ready consumer max backoff must be >= base backoff")
+        if self.transcript_service_max_response_bytes < self.max_transcript_chars * 8:
+            raise ValueError(
+                "transcript response byte limit must be at least eight times the character limit"
+            )
+        if self.ready_producer_replay_horizon_sec <= 0:
+            raise ValueError("MAI_READY_PRODUCER_REPLAY_HORIZON_SEC must be explicitly configured")
+        if self.ready_consumer_retention_sec < self.ready_producer_replay_horizon_sec:
+            raise ValueError("ready consumer retention must be >= the producer replay horizon")
+        minimum_lease = self.request_timeout + (2 * self.transcript_service_timeout_sec)
+        if self.ready_consumer_lease_sec <= minimum_lease:
+            raise ValueError(
+                "ready consumer lease must exceed analysis timeout plus two transcript "
+                "HTTP windows"
+            )
+        delivery_minimum_lease = (
+            2 * self.ingestion_timeout_sec + 2 * self.transcript_service_timeout_sec
+        )
+        if self.ingestion_lease_sec <= delivery_minimum_lease:
+            raise ValueError(
+                "ingestion lease must be greater than two meeting-service and two "
+                "transcript-service HTTP timeout windows when the ready consumer is enabled"
+            )
+        if self.ready_redis_claim_idle_ms / 1000 < self.ready_consumer_lease_sec:
+            raise ValueError(
+                "ready Redis claim idle time must be >= the ready consumer processing lease"
+            )
+        if self.ready_redis_command_timeout_sec <= self.ready_redis_block_ms / 1000:
+            raise ValueError("ready Redis command timeout must exceed the blocking read window")
         return self
 
     @model_validator(mode="after")
@@ -286,5 +512,18 @@ def get_settings() -> Settings:
     """Cached settings singleton."""
     global _settings
     if _settings is None:
-        _settings = Settings()
+        # A deployed process must have one authoritative settings source. The
+        # GPU-host launcher sets MAI_APP_ENV explicitly and imports the
+        # DPAPI-backed runtime config before Python starts. Local dotenv loading
+        # is therefore opt-in and limited to an explicit dev/test process.
+        process_env = os.environ.get("MAI_APP_ENV", "").lower()
+        local_dotenv_opt_in = os.environ.get("PLATFORM_AI_LOAD_LOCAL_DOTENV") == "1"
+        env_file = (
+            ".env"
+            if local_dotenv_opt_in and process_env in {"dev", "test"}
+            else None
+        )
+        # `_env_file` is a documented BaseSettings runtime parameter, but the
+        # generated subclass constructor exposed to mypy omits it.
+        _settings = Settings(_env_file=env_file)  # type: ignore[call-arg]
     return _settings

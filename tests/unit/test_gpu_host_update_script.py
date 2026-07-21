@@ -94,6 +94,11 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Import-MeetingAiRuntimeEnvironment", script)
         self.assertIn("meeting-ai.env", script)
         self.assertIn('MAI_INGESTION_ENABLED = "false"', script)
+        self.assertIn('MAI_READY_CONSUMER_ENABLED = "false"', script)
+        self.assertIn("Clear-MeetingAiManagedProcessEnvironment", script)
+        self.assertIn("environment does not match the launcher", script)
+        self.assertIn("requires an approved runtime config", script)
+        self.assertIn('$env:MAI_APP_ENV = $AppEnv', script)
         self.assertIn("Runtime config rejected", script)
         self.assertNotIn("env.local.ps1", script)
         self.assertNotIn("falling back to mock", script)
@@ -122,7 +127,23 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("MoveFileEx", script)
         self.assertIn("replaceExistingAndWriteThrough", script)
         self.assertIn("Clear-MeetingAiRuntimeTlsKey", script)
+        self.assertIn("MAI_READY_REDIS_URL_DPAPI", script)
+        self.assertIn("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI", script)
+        self.assertIn("Assert-TranscriptReadyPreEnablePermit", script)
+        self.assertIn("Assert-TranscriptReadyPermitFile", script)
+        self.assertIn("Assert-TranscriptReadyActivationReceiptFile", script)
+        self.assertIn("MAI_READY_ACTIVATION_RECEIPT_PATH", script)
+        self.assertIn("targetAppEnv", script)
+        self.assertIn("invalid activation time", script)
+        self.assertIn("host binding does not match", script)
+        self.assertIn("Invoke-MeetingAiGitCapture", script)
+        self.assertIn('"status", "--porcelain", "--untracked-files=no"', script)
+        self.assertIn('"ls-files", "--others", "--exclude-standard"', script)
+        self.assertIn("untracked deployed content", script)
+        self.assertIn("forbidden dotenv source", script)
         self.assertNotIn('"MAI_MEETING_SERVICE_CLIENT_SECRET" =', script)
+        self.assertNotIn('"MAI_READY_REDIS_URL" =', script)
+        self.assertNotIn('"MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET" =', script)
         self.assertNotIn("Get-Random", script)
 
     def test_meeting_ai_provisioner_preserves_keyring_and_uses_csprng(self) -> None:
@@ -138,6 +159,29 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("ShouldProcess", script)
         self.assertIn('ValidateSet("", "server", "mutual")', script)
         self.assertIn("Protect-MeetingAiSecret -PlainText $plainClientKey", script)
+        self.assertIn("Protect-SuppliedSecureValue", script)
+        self.assertIn("ReadyPermitSourcePath", script)
+        self.assertIn(
+            "requires a fresh signed permit and trust root",
+            script,
+        )
+        self.assertIn("was already consumed", script)
+        self.assertIn("faz24.transcriptReadyPermitConsumption.v1", script)
+        self.assertIn("faz24.transcriptReadyActivationReceipt.v3", script)
+        self.assertIn(
+            'transcript-service delivery capability OAuth client secret',
+            script,
+        )
+        self.assertIn(
+            '$readyConfig["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] = '
+            '$transcriptSecretBlob',
+            script,
+        )
+        self.assertIn("SkipReadyArtifactExistence", script)
+        self.assertIn("transcript-ready-pre-enable-{0}.json", script)
+        self.assertIn("Get-ReadyConfiguredValue", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_MEETING_AI_CONFIG_WRITE_FAILURE", script)
+        self.assertIn('"MAI_READY_CONSUMER_ENABLED" = $effectiveReadyEnabled', script)
         self.assertNotIn("Get-Random", script)
 
     def test_private_gateway_host_shim_is_explicit_atomic_and_test_only(self) -> None:

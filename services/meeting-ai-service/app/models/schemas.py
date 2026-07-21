@@ -183,12 +183,29 @@ class AnalysisDeliveryHealth(BaseModel):
     """Metadata-only status of the durable analysis-result delivery pipeline."""
 
     enabled: bool
+    ready: bool = Field(description="Can the delivery worker/store accept work now")
     status: str = Field(description="disabled / ok / degraded")
     worker_running: bool
     pending: int = Field(ge=0)
     in_flight: int = Field(ge=0)
     dead_letter: int = Field(ge=0)
     oldest_pending_age_sec: float | None = Field(default=None, ge=0.0)
+    error_code: str | None = None
+
+
+class ReadyConsumerHealth(BaseModel):
+    """Metadata-only status of the canonical transcript-ready consumer."""
+
+    enabled: bool
+    ready: bool = Field(description="Can the consumer safely accept stream work now")
+    status: str = Field(description="disabled / ok / degraded")
+    worker_running: bool
+    redis_group_ready: bool
+    received: int = Field(ge=0)
+    processing: int = Field(ge=0)
+    outboxed: int = Field(ge=0)
+    dead_letter: int = Field(ge=0)
+    oldest_unfinished_age_sec: float | None = Field(default=None, ge=0.0)
     error_code: str | None = None
 
 
@@ -201,6 +218,7 @@ class HealthResponse(BaseModel):
     model: str
     redact_pii: bool
     analysis_delivery: AnalysisDeliveryHealth | None = None
+    ready_consumer: ReadyConsumerHealth | None = None
 
 
 class ErrorResponse(BaseModel):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from app.services.durable_outbox import (
 
 KEY_V1 = b"1" * 32
 KEY_V2 = b"2" * 32
+LOOKUP_KEY = b"L" * 32
 
 
 def _store(
@@ -29,7 +31,7 @@ def _store(
 ) -> SqliteOutboxStore:
     return SqliteOutboxStore(
         path,
-        PayloadCipher(keys or {"v1": KEY_V1}, active),
+        PayloadCipher(keys or {"v1": KEY_V1}, active, lookup_key=LOOKUP_KEY),
         max_rows=max_rows,
     )
 
@@ -71,7 +73,9 @@ def test_enqueue_is_idempotent_but_rejects_same_id_with_different_payload(tmp_pa
 
 def test_queue_bound_is_checked_in_the_write_transaction(tmp_path: Path) -> None:
     store = _store(tmp_path / "outbox.sqlite3", max_rows=1)
+    assert store.has_capacity()
     store.enqueue(analysis_run_id="run-1", meeting_id="meeting-1", payload={"x": 1})
+    assert not store.has_capacity()
     with pytest.raises(OutboxFullError):
         store.enqueue(analysis_run_id="run-2", meeting_id="meeting-1", payload={"x": 2})
 
@@ -91,20 +95,35 @@ def test_lease_is_exclusive_and_expired_work_is_reclaimed(tmp_path: Path) -> Non
     assert store.mark_delivered(analysis_run_id="run-1", owner="worker-b")
 
 
-def test_key_rotation_reads_old_rows_and_refuses_premature_key_removal(tmp_path: Path) -> None:
+def test_key_rotation_reencrypts_retained_rows_before_old_key_removal(tmp_path: Path) -> None:
     path = tmp_path / "outbox.sqlite3"
     _store(path).enqueue(analysis_run_id="run-1", meeting_id="meeting-1", payload={"summary": "A"})
     rotated = _store(path, keys={"v1": KEY_V1, "v2": KEY_V2}, active="v2")
     rotated.enqueue(analysis_run_id="run-2", meeting_id="meeting-1", payload={"summary": "B"})
-    assert rotated.claim_next(owner="worker", lease_sec=30.0) is not None
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT DISTINCT key_id FROM analysis_delivery_outbox"
+        ).fetchall() == [("v2",)]
 
-    with pytest.raises(OutboxKeyUnavailableError):
-        _store(path, keys={"v2": KEY_V2}, active="v2")
+    retired = _store(path, keys={"v2": KEY_V2}, active="v2")
+    first = retired.claim_next(owner="worker", lease_sec=30.0)
+    assert first is not None
+    assert first.payload == {"summary": "A"}
+
+
+def test_blind_index_is_keyed_and_stable_across_dek_rotation() -> None:
+    value = "tenant|predictable-event-key"
+    first = PayloadCipher({"v1": KEY_V1}, "v1", lookup_key=LOOKUP_KEY)
+    rotated = PayloadCipher({"v1": KEY_V1, "v2": KEY_V2}, "v2", lookup_key=LOOKUP_KEY)
+    digest = first.lookup_digests(purpose="ready-event-inbox", value=value)[0]
+
+    assert digest != hashlib.sha256(value.encode()).hexdigest()
+    assert rotated.lookup_digests(purpose="ready-event-inbox", value=value) == (digest,)
 
 
 def test_cipher_rejects_non_aes256_keys() -> None:
     with pytest.raises(OutboxKeyUnavailableError, match="exactly 32 bytes"):
-        PayloadCipher({"v1": b"too-short"}, "v1")
+        PayloadCipher({"v1": b"too-short"}, "v1", lookup_key=LOOKUP_KEY)
 
 
 def test_ciphertext_tamper_moves_row_to_dead_letter(tmp_path: Path) -> None:

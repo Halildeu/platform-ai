@@ -10,6 +10,7 @@ from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
@@ -20,11 +21,20 @@ from app.services.analysis_delivery import (
     AnalysisDeliveryRuntime,
     build_ingestion_payload,
 )
-from app.services.durable_outbox import ClaimedMessage, PayloadCipher, SqliteOutboxStore
+from app.services.durable_outbox import (
+    ClaimedMessage,
+    OutboxMigrationRequiredError,
+    PayloadCipher,
+    SqliteOutboxStore,
+)
 from app.services.meeting_service_client import DeliveryAttempt, DeliveryDisposition
 
 KEY = b"K" * 32
+LOOKUP_KEY = b"L" * 32
 MEETING_ID = "11111111-1111-4111-8111-111111111111"
+TENANT_ID = "33333333-3333-4333-8333-333333333333"
+SESSION_ID = "22222222-2222-4222-8222-222222222222"
+FINALIZED_AT = datetime(2026, 7, 18, 1, 0, tzinfo=UTC)
 
 
 class FakeTransport:
@@ -55,10 +65,25 @@ def _settings(path: Path, **overrides: object) -> Settings:
         "meeting_service_token_url": "https://auth.invalid/token",
         "meeting_service_client_id": "meeting-ai",
         "meeting_service_client_secret": SecretStr("secret"),
+        "transcript_service_base_url": "https://transcript.invalid",
+        "transcript_service_capability_path_template": (
+            "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+            "/sessions/{session_id}/finalizations/{finalization_version}"
+            "/analysis-capability"
+        ),
+        "transcript_service_token_url": "https://auth.invalid/token",
+        "transcript_service_client_id": "meeting-ai",
+        "transcript_service_client_secret": SecretStr("transcript-secret"),
         "ingestion_store_path": path,
         "ingestion_active_key_id": "v1",
+        "ingestion_lookup_key_id": "lookup-v1",
         "ingestion_encryption_keys_json": SecretStr(
-            json.dumps({"v1": base64.b64encode(KEY).decode()})
+            json.dumps(
+                {
+                    "v1": base64.b64encode(KEY).decode(),
+                    "lookup-v1": base64.b64encode(LOOKUP_KEY).decode(),
+                }
+            )
         ),
         "ingestion_timeout_sec": 0.1,
         "ingestion_lease_sec": 1.0,
@@ -110,17 +135,34 @@ def _result() -> AnalyzeResponse:
     )
 
 
+def _canonical_tuple() -> dict[str, object]:
+    return {
+        "tenant_id": TENANT_ID,
+        "finalization_version": 1,
+        "finalized_at": FINALIZED_AT,
+        "analysis_spec_version": "meeting-intelligence-v1",
+    }
+
+
 def test_payload_matches_backend_contract_and_preserves_grounding(tmp_path: Path) -> None:
     payload = build_ingestion_payload(
         settings=_settings(tmp_path / "outbox.sqlite3"),
         meeting_id=MEETING_ID,
+        tenant_id=TENANT_ID,
         session_id="session-1",
+        finalization_version=4,
+        finalized_at=datetime(2026, 7, 11, 19, 55, tzinfo=UTC),
+        analysis_spec_version="meeting-intelligence-v1",
         transcript="Bütçe onaylandı.",
         result=_result(),
         generated_at=datetime(2026, 7, 11, 20, 0, tzinfo=UTC),
     )
     assert payload["meeting_id"] == MEETING_ID
     assert payload["transcript_session_id"] == "session-1"
+    assert payload["finalization_version"] == 4
+    assert payload["finalized_at"] == "2026-07-11T19:55:00Z"
+    assert payload["analysis_spec_version"] == "meeting-intelligence-v1"
+    assert payload["_canonical_tenant_id"] == TENANT_ID
     assert len(str(payload["transcript_sha256"])) == 64
     assert payload["summary_grounding_status"] == "verified"
     assert payload["summary_citations"]
@@ -132,6 +174,9 @@ def test_payload_matches_backend_contract_and_preserves_grounding(tmp_path: Path
         "meeting_id",
         "transcript_session_id",
         "transcript_sha256",
+        "finalization_version",
+        "finalized_at",
+        "analysis_spec_version",
         "analyzer_contract_version",
         "model",
         "backend",
@@ -148,6 +193,7 @@ def test_payload_matches_backend_contract_and_preserves_grounding(tmp_path: Path
         "decisions",
         "actions",
         "supersedes_analysis_run_id",
+        "_canonical_tenant_id",
     }
     assert "transcript" not in payload
 
@@ -158,6 +204,7 @@ def test_valid_iso_due_is_normalized_to_utc(tmp_path: Path) -> None:
     payload = build_ingestion_payload(
         settings=_settings(tmp_path / "outbox.sqlite3"),
         meeting_id=MEETING_ID,
+        **_canonical_tuple(),
         session_id="session-1",
         transcript="A",
         result=result,
@@ -175,6 +222,7 @@ def test_delivery_refuses_unredacted_or_backend_oversized_output(tmp_path: Path)
         build_ingestion_payload(
             settings=_settings(tmp_path / "outbox.sqlite3"),
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=result,
@@ -187,6 +235,7 @@ def test_delivery_refuses_unredacted_or_backend_oversized_output(tmp_path: Path)
         build_ingestion_payload(
             settings=_settings(tmp_path / "outbox.sqlite3"),
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=result,
@@ -198,7 +247,11 @@ def test_enqueue_survives_restart_and_is_delivered(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         first = AnalysisDeliveryRuntime(
             settings,
             store=store,
@@ -206,6 +259,7 @@ def test_enqueue_survives_restart_and_is_delivered(tmp_path: Path) -> None:
         )
         run_id = await first.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="Bütçe onaylandı.",
             result=_result(),
@@ -229,11 +283,229 @@ def test_enqueue_survives_restart_and_is_delivered(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_legacy_outbox_blocks_activation_without_dead_letter_and_allows_safe_drain(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "outbox.sqlite3"
+    settings = _settings(path)
+    store = SqliteOutboxStore(
+        path,
+        PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+        max_rows=10,
+    )
+    run_id = "44444444-4444-4444-8444-444444444444"
+    store.enqueue(
+        analysis_run_id=run_id,
+        meeting_id=MEETING_ID,
+        payload={
+            "meeting_id": MEETING_ID,
+            "transcript_session_id": SESSION_ID,
+            "transcript_sha256": "a" * 64,
+            "summary": "legacy retained result",
+        },
+        now=1.0,
+    )
+
+    with pytest.raises(
+        OutboxMigrationRequiredError,
+        match="drain them under the previous revision",
+    ):
+        AnalysisDeliveryRuntime(
+            settings,
+            store=store,
+            transport=FakeTransport([]),
+        )
+
+    blocked = store.summary(now=2.0)
+    assert blocked.pending == 1
+    assert blocked.in_flight == 0
+    assert blocked.dead == 0
+
+    legacy_message = store.claim_next(owner="previous-revision", lease_sec=30.0, now=2.0)
+    assert legacy_message is not None
+    assert store.mark_delivered(
+        analysis_run_id=legacy_message.analysis_run_id,
+        owner="previous-revision",
+    )
+    assert store.summary(now=3.0).pending == 0
+
+    upgraded = AnalysisDeliveryRuntime(
+        settings,
+        store=store,
+        transport=FakeTransport([]),
+    )
+    assert upgraded.store is store
+
+
+def test_noncanonical_analysis_is_rejected_before_outbox_write(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "outbox.sqlite3"
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
+        runtime = AnalysisDeliveryRuntime(
+            _settings(path),
+            store=store,
+            transport=FakeTransport([]),
+        )
+
+        with pytest.raises(
+            AnalysisDeliveryContractError,
+            match="canonical transcript.ready tuple",
+        ):
+            await runtime.enqueue_analysis(
+                meeting_id=MEETING_ID,
+                session_id=SESSION_ID,
+                transcript="A",
+                result=_result(),
+            )
+
+        summary = store.summary()
+        assert summary.pending == summary.in_flight == summary.dead == 0
+
+    asyncio.run(scenario())
+
+
+def test_lost_201_restart_uses_fresh_capability_for_single_run_replay(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[int, list[str], list[str], bytes]:
+        path = tmp_path / "outbox.sqlite3"
+        settings = _settings(
+            path,
+            meeting_service_base_url="https://meeting.test",
+            meeting_service_token_url="https://auth.test/token",
+            transcript_service_base_url="https://transcript.test",
+            transcript_service_snapshot_path_template=(
+                "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+                "/sessions/{session_id}/finalizations/{finalization_version}"
+            ),
+            transcript_service_capability_path_template=(
+                "/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}"
+                "/sessions/{session_id}/finalizations/{finalization_version}"
+                "/analysis-capability"
+            ),
+            transcript_service_token_url="https://auth.test/token",
+            transcript_service_client_id="meeting-ai",
+            transcript_service_client_secret=SecretStr("transcript-secret"),
+        )
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
+        transcript = "Bütçe onaylandı."
+        finalized_at = datetime(2026, 7, 18, 1, 0, tzinfo=UTC)
+        run_id = "44444444-4444-4444-8444-444444444444"
+        payload = build_ingestion_payload(
+            settings=settings,
+            meeting_id=MEETING_ID,
+            tenant_id=TENANT_ID,
+            session_id=SESSION_ID,
+            finalization_version=1,
+            finalized_at=finalized_at,
+            analysis_spec_version=settings.analysis_spec_version,
+            transcript=transcript,
+            result=_result(),
+            generated_at=datetime(2026, 7, 18, 1, 1, tzinfo=UTC),
+        )
+        store.enqueue(analysis_run_id=run_id, meeting_id=MEETING_ID, payload=payload)
+
+        capabilities: list[str] = []
+        post_outcomes: list[str] = []
+        persisted_runs: dict[str, dict[str, object]] = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "service-token"})
+            if request.url.host == "transcript.test":
+                capability = f"one-use-capability-{len(capabilities) + 1}"
+                capabilities.append(capability)
+                assert request.method == "POST"
+                assert request.content == b""
+                assert request.headers["X-Analysis-Run-Id"] == run_id
+                assert request.headers["X-Analysis-Spec-Version"] == settings.analysis_spec_version
+                assert "X-Canonical-Read-Grant" not in request.headers
+                return httpx.Response(
+                    204,
+                    headers={
+                        "X-Analysis-Job-Capability": capability,
+                        "X-Analysis-Job-Capability-Expires-At": "2099-07-18T01:15:00Z",
+                    },
+                )
+
+            body: dict[str, object] = json.loads(request.content)
+            capability = request.headers["X-Analysis-Job-Capability"]
+            assert capability == capabilities[-1]
+            assert capability not in capabilities[:-1]
+            assert request.headers["Idempotency-Key"] == run_id
+            assert body["finalization_version"] == 1
+            assert body["finalized_at"] == "2026-07-18T01:00:00Z"
+            assert body["analysis_spec_version"] == settings.analysis_spec_version
+            assert "_canonical_tenant_id" not in body
+            existing = persisted_runs.get(run_id)
+            if existing is None:
+                persisted_runs[run_id] = body
+                post_outcomes.append("201-response-lost")
+                raise httpx.ReadError("response lost after commit", request=request)
+            assert existing == body
+            post_outcomes.append("200-replay")
+            return httpx.Response(
+                200,
+                json={
+                    "analysis_run_id": run_id,
+                    "meeting_id": MEETING_ID,
+                    "persisted": True,
+                    "storage_mode": "persisted",
+                    "idempotent_replay": True,
+                    "decision_count": len(body["decisions"]),  # type: ignore[arg-type]
+                    "action_count": len(body["actions"]),  # type: ignore[arg-type]
+                    "supersedes_analysis_run_id": body["supersedes_analysis_run_id"],
+                    "generated_at": body["generated_at"],
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            first = AnalysisDeliveryRuntime(settings, store=store, http_client=client)
+            first_message = store.claim_next(owner=first._owner, lease_sec=1.0)
+            assert first_message is not None
+            await first._deliver(first_message)
+            await first.stop()
+
+            restarted = AnalysisDeliveryRuntime(settings, store=store, http_client=client)
+            replay_message = store.claim_next(
+                owner=restarted._owner,
+                lease_sec=1.0,
+                now=time.time() + settings.ingestion_max_backoff_sec + 1.0,
+            )
+            assert replay_message is not None
+            await restarted._deliver(replay_message)
+            await restarted.stop()
+
+        summary = store.summary()
+        assert summary.pending == summary.in_flight == summary.dead == 0
+        durable_bytes = path.read_bytes()
+        return len(persisted_runs), capabilities, post_outcomes, durable_bytes
+
+    run_count, capabilities, post_outcomes, durable_bytes = asyncio.run(scenario())
+    assert run_count == 1
+    assert capabilities == ["one-use-capability-1", "one-use-capability-2"]
+    assert post_outcomes == ["201-response-lost", "200-replay"]
+    assert b"one-use-capability" not in durable_bytes
+    assert "Bütçe onaylandı.".encode() not in durable_bytes
+
+
 def test_retry_then_success_reuses_same_analysis_run_id(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transport = FakeTransport(
             [
                 DeliveryAttempt(DeliveryDisposition.RETRY, "http_503"),
@@ -243,6 +515,7 @@ def test_retry_then_success_reuses_same_analysis_run_id(tmp_path: Path) -> None:
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         run_id = await runtime.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=_result(),
@@ -263,7 +536,11 @@ def test_enqueue_does_not_wait_for_blocked_network_delivery(tmp_path: Path) -> N
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transport = BlockingTransport()
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         await runtime.start()
@@ -271,6 +548,7 @@ def test_enqueue_does_not_wait_for_blocked_network_delivery(tmp_path: Path) -> N
         run_id = await asyncio.wait_for(
             runtime.enqueue_analysis(
                 meeting_id=MEETING_ID,
+                **_canonical_tuple(),
                 session_id="session-1",
                 transcript="A",
                 result=_result(),
@@ -292,11 +570,16 @@ def test_shutdown_cancellation_preserves_leased_payload_for_recovery(tmp_path: P
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path, ingestion_shutdown_grace_sec=0.1)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transport = BlockingTransport()
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         await runtime.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=_result(),
@@ -325,7 +608,11 @@ def test_retry_limit_moves_payload_to_dead_letter(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path, ingestion_max_attempts=2)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         transport = FakeTransport(
             [
                 DeliveryAttempt(DeliveryDisposition.RETRY, "ingestion_http_503"),
@@ -335,6 +622,7 @@ def test_retry_limit_moves_payload_to_dead_letter(tmp_path: Path) -> None:
         runtime = AnalysisDeliveryRuntime(settings, store=store, transport=transport)
         await runtime.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=_result(),
@@ -378,7 +666,11 @@ def test_terminal_failure_enters_dead_letter_and_degrades_health(tmp_path: Path)
     async def scenario() -> None:
         path = tmp_path / "outbox.sqlite3"
         settings = _settings(path)
-        store = SqliteOutboxStore(path, PayloadCipher({"v1": KEY}, "v1"), max_rows=10)
+        store = SqliteOutboxStore(
+            path,
+            PayloadCipher({"v1": KEY}, "v1", lookup_key=LOOKUP_KEY),
+            max_rows=10,
+        )
         runtime = AnalysisDeliveryRuntime(
             settings,
             store=store,
@@ -388,6 +680,7 @@ def test_terminal_failure_enters_dead_letter_and_degrades_health(tmp_path: Path)
         )
         await runtime.enqueue_analysis(
             meeting_id=MEETING_ID,
+            **_canonical_tuple(),
             session_id="session-1",
             transcript="A",
             result=_result(),
