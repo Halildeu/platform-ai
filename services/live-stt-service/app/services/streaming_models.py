@@ -11,6 +11,7 @@ time, so CPU/CI environments are unaffected unless `/ws/stream` is used.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import multiprocessing as mp
@@ -18,6 +19,7 @@ import queue
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -37,6 +39,25 @@ logger = logging.getLogger(__name__)
 _DEFAULT_NO_SPEECH_THRESHOLD = 0.75
 _DEFAULT_LOG_PROB_THRESHOLD = -1.0
 _DEFAULT_COMPRESSION_RATIO_THRESHOLD = 2.4
+
+
+def _resolve_stream_model_source(model_name: str, model_path: str | None, model_sha256: str) -> str:
+    """Resolve and verify the exact streaming model bytes before GPU allocation."""
+    if model_path is None:
+        return model_name
+    resolved = Path(model_path).resolve()
+    model_bin = resolved / "model.bin"
+    if not model_bin.is_file():
+        raise FileNotFoundError("pinned streaming model directory does not contain model.bin")
+    expected = model_sha256.removeprefix("sha256:").lower()
+    if expected:
+        digest = hashlib.sha256()
+        with model_bin.open("rb") as model_file:
+            for block in iter(lambda: model_file.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != expected:
+            raise ValueError("pinned streaming model SHA-256 mismatch")
+    return str(resolved)
 
 
 def _finite_float(value: object) -> float | None:
@@ -73,6 +94,8 @@ class DirectWhisperService:
         beam_size: int,
         role: str = "stream",
         *,
+        model_path: str | None = None,
+        model_sha256: str = "",
         no_speech_threshold: float = _DEFAULT_NO_SPEECH_THRESHOLD,
         log_prob_threshold: float = _DEFAULT_LOG_PROB_THRESHOLD,
         compression_ratio_threshold: float = _DEFAULT_COMPRESSION_RATIO_THRESHOLD,
@@ -84,6 +107,8 @@ class DirectWhisperService:
         self.language = language
         self.beam_size = beam_size
         self.role = role
+        self.model_path = model_path
+        self.model_sha256 = model_sha256
         self.no_speech_threshold = no_speech_threshold
         self.log_prob_threshold = log_prob_threshold
         self.compression_ratio_threshold = compression_ratio_threshold
@@ -108,7 +133,9 @@ class DirectWhisperService:
                         },
                     )
                     self._model = WhisperModel(
-                        self.model_name,
+                        _resolve_stream_model_source(
+                            self.model_name, self.model_path, self.model_sha256
+                        ),
                         device=self.device,
                         compute_type=self.compute_type,
                     )
@@ -158,6 +185,8 @@ def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_q
         cast(str, config["language"]),
         cast(int, config["beam_size"]),
         role=cast(str, config["role"]),
+        model_path=cast(str | None, config["model_path"]),
+        model_sha256=cast(str, config["model_sha256"]),
         no_speech_threshold=cast(float, config["no_speech_threshold"]),
         log_prob_threshold=cast(float, config["log_prob_threshold"]),
         compression_ratio_threshold=cast(float, config["compression_ratio_threshold"]),
@@ -194,6 +223,12 @@ class _SupervisedWhisperService:
         self._config: dict[str, object] = {
             "role": role,
             "model_name": settings.final_model_name if is_final else settings.live_model_name,
+            "model_path": (
+                str(settings.final_model_path if is_final else settings.live_model_path)
+                if (settings.final_model_path if is_final else settings.live_model_path) is not None
+                else None
+            ),
+            "model_sha256": settings.final_model_sha256 if is_final else settings.live_model_sha256,
             "device": settings.final_device if is_final else settings.live_device,
             "compute_type": (
                 settings.final_compute_type if is_final else settings.live_compute_type
@@ -365,7 +400,12 @@ class _SupervisedWhisperService:
             if response.get("job_id") != job_id:
                 continue
             if not response.get("ok"):
-                raise RuntimeError(str(response.get("error_class", "RuntimeError")))
+                error = RuntimeError(str(response.get("error_class", "RuntimeError")))
+                if operation == "load":
+                    # Native/CUDA load failures can leave a poisoned allocator or
+                    # partial VRAM state. A retry is meaningful only in a fresh child.
+                    self._terminate_and_restart()
+                raise error
             text = str(response.get("text", ""))
             if operation == "load":
                 self._model_loaded = True
@@ -508,6 +548,9 @@ def _named(
     language: str,
     beam_size: int,
     *,
+    model_revision: str,
+    model_sha256: str,
+    model_path: Path | None,
     no_speech_threshold: float,
     log_prob_threshold: float,
     compression_ratio_threshold: float,
@@ -519,6 +562,9 @@ def _named(
         [
             key,
             model_name,
+            model_revision,
+            model_sha256,
+            str(model_path) if model_path is not None else "",
             device,
             compute_type,
             language,
@@ -538,6 +584,8 @@ def _named(
                 language,
                 beam_size,
                 role=key,
+                model_path=str(model_path) if model_path is not None else None,
+                model_sha256=model_sha256,
                 no_speech_threshold=no_speech_threshold,
                 log_prob_threshold=log_prob_threshold,
                 compression_ratio_threshold=compression_ratio_threshold,
@@ -554,6 +602,9 @@ def get_live_service(
         service_key = "\u0000".join(
             [
                 settings.live_model_name,
+                settings.live_model_revision,
+                settings.live_model_sha256,
+                str(settings.live_model_path) if settings.live_model_path is not None else "",
                 settings.live_device,
                 settings.live_compute_type,
                 settings.language,
@@ -573,6 +624,9 @@ def get_live_service(
         settings.live_compute_type,
         settings.language,
         settings.live_beam_size,
+        model_revision=settings.live_model_revision,
+        model_sha256=settings.live_model_sha256,
+        model_path=settings.live_model_path,
         no_speech_threshold=settings.no_speech_threshold,
         log_prob_threshold=settings.log_prob_threshold,
         compression_ratio_threshold=settings.compression_ratio_threshold,
@@ -588,6 +642,9 @@ def get_final_service(
         service_key = "\u0000".join(
             [
                 settings.final_model_name,
+                settings.final_model_revision,
+                settings.final_model_sha256,
+                str(settings.final_model_path) if settings.final_model_path is not None else "",
                 settings.final_device,
                 settings.final_compute_type,
                 settings.language,
@@ -607,6 +664,9 @@ def get_final_service(
         settings.final_compute_type,
         settings.language,
         settings.final_beam_size,
+        model_revision=settings.final_model_revision,
+        model_sha256=settings.final_model_sha256,
+        model_path=settings.final_model_path,
         no_speech_threshold=settings.no_speech_threshold,
         log_prob_threshold=settings.log_prob_threshold,
         compression_ratio_threshold=settings.compression_ratio_threshold,
@@ -617,7 +677,7 @@ def get_final_service(
 def streaming_services_healthy() -> bool:
     with _services_lock:
         supervised = [*_supervised_live_services.values(), *_supervised_final_services.values()]
-        return all(service.healthy for service in supervised)
+        return all(service.healthy and service.model_loaded for service in supervised)
 
 
 def shutdown_streaming_services(*, timeout_sec: float = 5.0) -> None:

@@ -346,7 +346,13 @@ Approved GPU live PoC note:
 | `STT_LANGUAGE` | `tr` | ISO 639-1 veya `auto` |
 | `STT_BEAM_SIZE` | `5` | Whisper beam (1-10) |
 | `STT_LIVE_BEAM_SIZE` | `1` | Direct stream live draft beam (1-10) |
+| `STT_LIVE_MODEL_REVISION` | `unversioned` | Draft streaming model immutable revision; staging/prod'da zorunlu |
+| `STT_LIVE_MODEL_SHA256` | boş | Draft streaming `model.bin` SHA-256; staging/prod'da byte doğrulaması zorunlu |
+| `STT_LIVE_MODEL_PATH` | boş | Draft streaming pinli yerel snapshot dizini |
 | `STT_FINAL_BEAM_SIZE` | `1` | Direct stream final revision beam (1-10); `>1` rollout'u latency/WER kanıtı ister |
+| `STT_FINAL_MODEL_REVISION` | `unversioned` | Final streaming model immutable revision; staging/prod'da zorunlu |
+| `STT_FINAL_MODEL_SHA256` | boş | Final streaming `model.bin` SHA-256; staging/prod'da byte doğrulaması zorunlu |
+| `STT_FINAL_MODEL_PATH` | boş | Final streaming pinli yerel snapshot dizini |
 | `STT_VAD_FILTER` | `true` | Whisper built-in VAD |
 | `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct `/ws/stream` final pass VAD; quiet desktop speech kaybını önlemek için default kapalı |
 | `STT_MAX_AUDIO_MB` | `50` | DoS guard (1-500) |

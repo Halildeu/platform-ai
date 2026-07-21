@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import queue
 import threading
 import time
@@ -34,6 +35,7 @@ from app.services.streaming_models import (
     get_final_service,
     get_live_service,
     shutdown_streaming_services,
+    streaming_services_healthy,
 )
 from app.services.worker import WorkerCrashedError, WorkerTimeoutError
 
@@ -689,6 +691,87 @@ def test_waiting_live_call_reloads_recycled_worker_before_inference(
     assert any(isinstance(result, WorkerTimeoutError) for result in results)
     assert "recovered" in results
     assert operations == ["transcribe", "load", "transcribe"]
+
+
+def test_load_failure_recycles_worker_before_preload_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        alive = True
+        terminated = False
+        killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._load_timeout_sec = 1.0
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._closing = threading.Event()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._result_queue.put({"job_id": "load-job", "ok": False, "error_class": "RuntimeError"})
+    service._model_loaded = False
+    service._restart_blocked = False
+    service._generation = 1
+    old_process = service._process
+    starts: list[None] = []
+    monkeypatch.setattr(streaming_models_module.uuid, "uuid4", lambda: "load-job")
+    monkeypatch.setattr(service, "_start", lambda: starts.append(None))
+
+    with pytest.raises(RuntimeError, match="RuntimeError"):
+        service.ensure_model()
+
+    assert old_process.terminated is True
+    assert old_process.killed is True
+    assert starts == [None]
+
+
+def test_streaming_readiness_requires_loaded_current_workers() -> None:
+    saved_live = dict(streaming_models_module._supervised_live_services)
+    saved_final = dict(streaming_models_module._supervised_final_services)
+    streaming_models_module._supervised_live_services.clear()
+    streaming_models_module._supervised_final_services.clear()
+    try:
+        streaming_models_module._supervised_live_services["cold"] = SimpleNamespace(
+            healthy=True,
+            model_loaded=False,
+        )
+        assert streaming_services_healthy() is False
+        streaming_models_module._supervised_live_services["cold"].model_loaded = True
+        assert streaming_services_healthy() is True
+    finally:
+        streaming_models_module._supervised_live_services.clear()
+        streaming_models_module._supervised_live_services.update(saved_live)
+        streaming_models_module._supervised_final_services.clear()
+        streaming_models_module._supervised_final_services.update(saved_final)
+
+
+def test_streaming_model_pin_hashes_exact_model_bytes(tmp_path) -> None:
+    model_bin = tmp_path / "model.bin"
+    model_bin.write_bytes(b"approved-stream-model")
+    digest = hashlib.sha256(model_bin.read_bytes()).hexdigest()
+
+    assert streaming_models_module._resolve_stream_model_source(
+        "floating-name", str(tmp_path), f"sha256:{digest}"
+    ) == str(tmp_path.resolve())
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        streaming_models_module._resolve_stream_model_source(
+            "floating-name", str(tmp_path), "0" * 64
+        )
 
 
 def test_supervised_worker_close_is_bounded_while_call_lock_is_held() -> None:

@@ -91,6 +91,10 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             script,
         )
         self.assertIn('Set-DeploymentLedgerResult -Result "readiness-failed"', script)
+        self.assertIn("live_stream_smoke.py", script)
+        self.assertIn("--min-final-events 1", script)
+        self.assertIn('"eof_ack,drained"', script)
+        self.assertIn("within 750s", script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
 
     def test_live_stt_production_launcher_reasserts_preload_after_local_overrides(self) -> None:
@@ -99,6 +103,15 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         preload_line = '$env:STT_STREAM_PRELOAD_MODELS = "true"'
         env_local_line = "$envLocal = Join-Path"
         self.assertGreater(script.rindex(preload_line), script.index(env_local_line))
+        self.assertGreater(
+            script.index('$env:STT_STREAM_PRELOAD_MAX_ATTEMPTS = "2"'),
+            script.index(env_local_line),
+        )
+        self.assertIn("STT_LIVE_MODEL_REVISION", script)
+        self.assertIn("STT_LIVE_MODEL_SHA256", script)
+        self.assertIn("STT_FINAL_MODEL_REVISION", script)
+        self.assertIn("STT_FINAL_MODEL_SHA256", script)
+        self.assertIn('$env:STT_DEVICE = "cpu"', script)
 
     def test_meeting_ai_launcher_uses_non_executable_dpapi_config(self) -> None:
         script = self._read_script("start-meeting-ai.ps1")

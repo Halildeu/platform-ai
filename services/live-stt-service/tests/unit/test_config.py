@@ -6,6 +6,15 @@ import pytest
 
 from app.core import config as cfg
 
+STREAM_MODEL_PINS = {
+    "live_model_revision": "c" * 40,
+    "live_model_sha256": "d" * 64,
+    "live_model_path": "/models/live",
+    "final_model_revision": "e" * 40,
+    "final_model_sha256": "f" * 64,
+    "final_model_path": "/models/final",
+}
+
 
 @pytest.fixture(autouse=True)
 def reset_settings_cache() -> None:
@@ -143,6 +152,7 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
             model_revision="a" * 40,
             model_sha256="b" * 64,
             model_path="/models/immutable",
+            **STREAM_MODEL_PINS,
             stream_final_worker_backend="inline",
         )
     with pytest.raises(ValueError, match="stream_live_worker_backend must be process"):
@@ -151,6 +161,7 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
             model_revision="a" * 40,
             model_sha256="b" * 64,
             model_path="/models/immutable",
+            **STREAM_MODEL_PINS,
             stream_live_worker_backend="inline",
         )
 
@@ -172,12 +183,20 @@ def test_production_requires_content_addressed_local_model() -> None:
             model_revision="a" * 40,
             model_sha256="b" * 64,
         )
+    with pytest.raises(ValueError, match="live_model_revision"):
+        cfg.Settings(
+            environment="production",
+            model_revision="a" * 40,
+            model_sha256="b" * 64,
+            model_path="/models/faster-whisper-medium",
+        )
     with pytest.raises(ValueError, match="stream_preload_models must be enabled"):
         cfg.Settings(
             environment="production",
             model_revision="a" * 40,
             model_sha256="b" * 64,
             model_path="/models/faster-whisper-medium",
+            **STREAM_MODEL_PINS,
         )
     settings = cfg.Settings(
         environment="production",
@@ -185,6 +204,7 @@ def test_production_requires_content_addressed_local_model() -> None:
         model_revision="a" * 40,
         model_sha256="sha256:" + "b" * 64,
         model_path="/models/faster-whisper-medium",
+        **STREAM_MODEL_PINS,
         stream_preload_models=True,
     )
     assert settings.model_revision == "a" * 40
@@ -195,3 +215,7 @@ def test_model_sha256_rejects_malformed_value() -> None:
         cfg.Settings(model_sha256="sha256:not-a-digest")
     with pytest.raises(ValueError, match="model_sha256"):
         cfg.Settings(model_sha256="A" * 64)
+    with pytest.raises(ValueError, match="live_model_sha256"):
+        cfg.Settings(live_model_sha256="sha256:not-a-digest")
+    with pytest.raises(ValueError, match="final_model_sha256"):
+        cfg.Settings(final_model_sha256="A" * 64)

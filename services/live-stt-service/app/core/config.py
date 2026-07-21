@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     # final=large-v3-turbo fp16). Lazy-loaded only when /ws/stream is used, so
     # CPU/CI paths are unaffected by the cuda defaults.
     live_model_name: str = Field(default="medium", description="fast draft model")
+    live_model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
+    live_model_sha256: str = Field(default="", max_length=71)
+    live_model_path: Path | None = None
     live_compute_type: str = Field(default="int8")
     live_device: str = Field(default="cuda")
     live_beam_size: int = Field(default=1, ge=1, le=10)
@@ -110,6 +113,9 @@ class Settings(BaseSettings):
         default="deepdml/faster-whisper-large-v3-turbo-ct2",
         description="accurate final model (ADR-0031)",
     )
+    final_model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
+    final_model_sha256: str = Field(default="", max_length=71)
+    final_model_path: Path | None = None
     final_compute_type: str = Field(default="float16")
     final_device: str = Field(default="cuda")
     final_beam_size: int = Field(default=1, ge=1, le=10)
@@ -184,18 +190,30 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_stream_tuning(self) -> Self:
         """Keep model provenance and low-latency knobs internally consistent."""
-        if self.model_sha256 and not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", self.model_sha256):
-            raise ValueError("model_sha256 must be a lowercase full SHA-256 digest")
+        model_identities = (
+            ("model", self.model_revision, self.model_sha256, self.model_path),
+            ("live_model", self.live_model_revision, self.live_model_sha256, self.live_model_path),
+            (
+                "final_model",
+                self.final_model_revision,
+                self.final_model_sha256,
+                self.final_model_path,
+            ),
+        )
+        for label, _revision, digest, _path in model_identities:
+            if digest and not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", digest):
+                raise ValueError(f"{label}_sha256 must be a lowercase full SHA-256 digest")
         if self.environment in {"staging", "production"}:
-            if not re.fullmatch(r"[0-9a-f]{40}", self.model_revision):
-                raise ValueError(
-                    "model_revision must be a lowercase 40-hex immutable revision "
-                    "in staging/production"
-                )
-            if not self.model_sha256:
-                raise ValueError("model_sha256 is required in staging/production")
-            if self.model_path is None:
-                raise ValueError("model_path is required in staging/production")
+            for label, revision, digest, path in model_identities:
+                if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                    raise ValueError(
+                        f"{label}_revision must be a lowercase 40-hex immutable revision "
+                        "in staging/production"
+                    )
+                if not digest:
+                    raise ValueError(f"{label}_sha256 is required in staging/production")
+                if path is None:
+                    raise ValueError(f"{label}_path is required in staging/production")
         if self.environment == "production" and not self.stream_preload_models:
             raise ValueError("stream_preload_models must be enabled in production")
         if self.min_speech_rms < self.silence_rms:

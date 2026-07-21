@@ -34,11 +34,11 @@ $env:STT_LOG_LEVEL = "INFO"
 # Disabling the handler lets the runtime shut down normally instead of forrtl-abort.
 $env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"
 
-# Streaming (live_*/final_*) already defaults to cuda per ADR-0031; the legacy
-# batch /transcribe service defaults to cpu/int8, which makes /health misleading
-# on a GPU host. Align it so health reflects the real device.
-$env:STT_DEVICE = "cuda"
-$env:STT_COMPUTE_TYPE = "float16"
+# Streaming (live_*/final_*) owns the GPU customer path. Keep the legacy batch
+# /transcribe worker on CPU so an old client cannot allocate a third resident
+# CUDA model after readiness and evict the preloaded recording models.
+$env:STT_DEVICE = "cpu"
+$env:STT_COMPUTE_TYPE = "int8"
 # GPU host first transcribe includes lazy Whisper model load. Historical smoke
 # evidence uses a 180s budget; the default 60s can kill the worker before it ever
 # warms, causing every retry to cold-start again. env.local.ps1 can still override.
@@ -74,11 +74,21 @@ if (Test-Path $envLocal) {
 # public artifact metadata, not credentials.
 $env:STT_ENVIRONMENT = "production"
 $env:STT_STREAM_PRELOAD_MODELS = "true"
+$env:STT_STREAM_PRELOAD_MAX_ATTEMPTS = "2"
 $env:STT_MODEL_NAME = "Systran/faster-whisper-medium"
 $env:STT_MODEL_REVISION = "08e178d48790749d25932bbc082711ddcfdfbc4f"
 $env:STT_MODEL_SHA256 = "sha256:9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae"
 $env:STT_MODEL_PATH = Join-Path $HfHome `
     "hub\models--Systran--faster-whisper-medium\snapshots\$($env:STT_MODEL_REVISION)"
+$env:STT_LIVE_MODEL_NAME = $env:STT_MODEL_NAME
+$env:STT_LIVE_MODEL_REVISION = $env:STT_MODEL_REVISION
+$env:STT_LIVE_MODEL_SHA256 = $env:STT_MODEL_SHA256
+$env:STT_LIVE_MODEL_PATH = $env:STT_MODEL_PATH
+$env:STT_FINAL_MODEL_NAME = "deepdml/faster-whisper-large-v3-turbo-ct2"
+$env:STT_FINAL_MODEL_REVISION = "4df90f75321148c3a29a9e2351b7ddf8f5b115a8"
+$env:STT_FINAL_MODEL_SHA256 = "sha256:e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"
+$env:STT_FINAL_MODEL_PATH = Join-Path $HfHome `
+    "hub\models--deepdml--faster-whisper-large-v3-turbo-ct2\snapshots\$($env:STT_FINAL_MODEL_REVISION)"
 
 # CUDA runtime DLLs (cublas/cudnn) are resolved via the user's PATH at inference
 # time; SYSTEM's PATH lacks them ("Library cublas64_12.dll is not found").
