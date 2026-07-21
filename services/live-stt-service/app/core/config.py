@@ -195,7 +195,12 @@ class Settings(BaseSettings):
         """Keep model provenance and low-latency knobs internally consistent."""
         model_identities = (
             ("model", self.model_revision, self.model_sha256, self.model_path),
-            ("live_model", self.live_model_revision, self.live_model_sha256, self.live_model_path),
+            (
+                "live_model",
+                self.live_model_revision,
+                self.live_model_sha256,
+                self.live_model_path,
+            ),
             (
                 "final_model",
                 self.final_model_revision,
@@ -235,10 +240,13 @@ class Settings(BaseSettings):
             for label, (actual, expected) in expected_runtime.items():
                 if actual != expected:
                     raise ValueError(f"{label} must be {expected} in production")
+        retry_wait_sec = self.stream_preload_retry_base_sec * (
+            (2 ** (self.stream_preload_max_attempts - 1)) - 1
+        )
         preload_worst_case_sec = 2 * (
             self.stream_preload_max_attempts
             * (self.stream_model_load_timeout_sec + (2 * self.worker_kill_grace_sec))
-            + (self.stream_preload_max_attempts - 1) * self.stream_preload_retry_base_sec
+            + retry_wait_sec
         )
         if preload_worst_case_sec > self.stream_preload_readiness_budget_sec:
             raise ValueError(

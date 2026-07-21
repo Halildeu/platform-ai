@@ -116,8 +116,9 @@ class DirectWhisperService:
         self._model: object | None = None
         self._lock = threading.Lock()
 
-    def ensure_model(self) -> None:
+    def ensure_model(self, *, deadline: float | None = None) -> None:
         """Load the model now (first call pays download/VRAM cost)."""
+        del deadline  # Inline backend is forbidden in staging/production.
         if self._model is None:
             with self._lock:
                 if self._model is None:
@@ -222,19 +223,21 @@ class _SupervisedWhisperService:
         is_final = role == "final"
         self._config: dict[str, object] = {
             "role": role,
-            "model_name": settings.final_model_name if is_final else settings.live_model_name,
+            "model_name": (settings.final_model_name if is_final else settings.live_model_name),
             "model_path": (
                 str(settings.final_model_path if is_final else settings.live_model_path)
                 if (settings.final_model_path if is_final else settings.live_model_path) is not None
                 else None
             ),
-            "model_sha256": settings.final_model_sha256 if is_final else settings.live_model_sha256,
+            "model_sha256": (
+                settings.final_model_sha256 if is_final else settings.live_model_sha256
+            ),
             "device": settings.final_device if is_final else settings.live_device,
             "compute_type": (
                 settings.final_compute_type if is_final else settings.live_compute_type
             ),
             "language": settings.language,
-            "beam_size": settings.final_beam_size if is_final else settings.live_beam_size,
+            "beam_size": (settings.final_beam_size if is_final else settings.live_beam_size),
             "no_speech_threshold": settings.no_speech_threshold,
             "log_prob_threshold": settings.log_prob_threshold,
             "compression_ratio_threshold": settings.compression_ratio_threshold,
@@ -321,6 +324,10 @@ class _SupervisedWhisperService:
         self._process = None
         self._model_loaded = False
         if restart and not self._is_closing():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise WorkerTimeoutError(
+                    f"streaming {getattr(self, 'role', 'final')} worker restart exceeded timeout"
+                )
             self._start()
 
     def _invoke_locked(
@@ -334,6 +341,7 @@ class _SupervisedWhisperService:
         required_generation: int | None = None,
         require_loaded: bool = False,
     ) -> str:
+        cleanup_deadline = deadline if operation == "load" else None
         if self._is_closing():
             raise WorkerCrashedError(
                 f"streaming {getattr(self, 'role', 'final')} worker is shutting down"
@@ -355,7 +363,7 @@ class _SupervisedWhisperService:
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker is not alive"
                 )
-            self._terminate_and_restart()
+            self._terminate_and_restart(deadline=cleanup_deadline)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise WorkerTimeoutError(
@@ -373,7 +381,7 @@ class _SupervisedWhisperService:
                 timeout=remaining,
             )
         except queue.Full as exc:
-            self._terminate_and_restart(restart=restart_on_failure)
+            self._terminate_and_restart(restart=restart_on_failure, deadline=cleanup_deadline)
             raise WorkerTimeoutError(
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
             ) from exc
@@ -383,13 +391,13 @@ class _SupervisedWhisperService:
                     f"streaming {getattr(self, 'role', 'final')} worker is shutting down"
                 )
             if not self._is_alive():
-                self._terminate_and_restart(restart=restart_on_failure)
+                self._terminate_and_restart(restart=restart_on_failure, deadline=cleanup_deadline)
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker exited before response"
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._terminate_and_restart(restart=restart_on_failure)
+                self._terminate_and_restart(restart=restart_on_failure, deadline=cleanup_deadline)
                 raise WorkerTimeoutError(
                     f"streaming {getattr(self, 'role', 'final')} worker exceeded timeout"
                 )
@@ -404,7 +412,7 @@ class _SupervisedWhisperService:
                 if operation == "load":
                     # Native/CUDA load failures can leave a poisoned allocator or
                     # partial VRAM state. A retry is meaningful only in a fresh child.
-                    self._terminate_and_restart()
+                    self._terminate_and_restart(deadline=deadline)
                 raise error
             text = str(response.get("text", ""))
             if operation == "load":
@@ -418,19 +426,24 @@ class _SupervisedWhisperService:
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
             )
 
-    def _ensure_model_locked(self) -> None:
+    def _ensure_model_locked(self, deadline: float | None = None) -> None:
         if self._model_loaded and self._is_alive():
             return
+        effective_deadline = deadline
+        if effective_deadline is None:
+            effective_deadline = time.monotonic() + self._load_timeout_sec
         self._invoke_locked(
             "load",
-            deadline=time.monotonic() + self._load_timeout_sec,
+            deadline=effective_deadline,
         )
 
-    def ensure_model(self) -> None:
-        deadline = time.monotonic() + self._load_timeout_sec
-        self._acquire_call_lock(deadline)
+    def ensure_model(self, *, deadline: float | None = None) -> None:
+        effective_deadline = deadline
+        if effective_deadline is None:
+            effective_deadline = time.monotonic() + self._load_timeout_sec
+        self._acquire_call_lock(effective_deadline)
         try:
-            self._ensure_model_locked()
+            self._ensure_model_locked(effective_deadline)
         finally:
             self._call_lock.release()
 
@@ -461,7 +474,7 @@ class _SupervisedWhisperService:
         try:
             # Readiness is rechecked after acquiring the shared single-flight lock.
             # A preceding timeout may have recycled the process while this call waited.
-            self._ensure_model_locked()
+            self._ensure_model_locked(queue_deadline)
             ready_generation = self._generation
             return self._invoke_locked(
                 "transcribe",
@@ -604,7 +617,7 @@ def get_live_service(
                 settings.live_model_name,
                 settings.live_model_revision,
                 settings.live_model_sha256,
-                str(settings.live_model_path) if settings.live_model_path is not None else "",
+                (str(settings.live_model_path) if settings.live_model_path is not None else ""),
                 settings.live_device,
                 settings.live_compute_type,
                 settings.language,
@@ -644,7 +657,7 @@ def get_final_service(
                 settings.final_model_name,
                 settings.final_model_revision,
                 settings.final_model_sha256,
-                str(settings.final_model_path) if settings.final_model_path is not None else "",
+                (str(settings.final_model_path) if settings.final_model_path is not None else ""),
                 settings.final_device,
                 settings.final_compute_type,
                 settings.language,
@@ -676,14 +689,20 @@ def get_final_service(
 
 def streaming_services_healthy() -> bool:
     with _services_lock:
-        supervised = [*_supervised_live_services.values(), *_supervised_final_services.values()]
+        supervised = [
+            *_supervised_live_services.values(),
+            *_supervised_final_services.values(),
+        ]
         return all(service.healthy and service.model_loaded for service in supervised)
 
 
 def shutdown_streaming_services(*, timeout_sec: float = 5.0) -> None:
     deadline = time.monotonic() + timeout_sec
     with _services_lock:
-        supervised = [*_supervised_live_services.values(), *_supervised_final_services.values()]
+        supervised = [
+            *_supervised_live_services.values(),
+            *_supervised_final_services.values(),
+        ]
     closed: list[_SupervisedWhisperService] = []
     failures: list[Exception] = []
     for index, service in enumerate(supervised):

@@ -350,15 +350,18 @@ function Set-DeploymentLedgerResult {
 
 $runtimeContract = Join-Path $RepoRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
 $taskActionContract = Join-Path $RepoRoot "deploy\gpu-host\task-action-contract.ps1"
+$restartAcceptance = Join-Path $RepoRoot "deploy\gpu-host\restart-acceptance.ps1"
 if (-not $NoRestart) {
   if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
-      -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf)) {
+      -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf)) {
     Set-DeploymentLedgerResult -Result "restart-failed"
     Stop-Deploy "Pinned source is missing a GPU-host runtime/action contract." `
       $script:DeployExitRestartFailed
   }
   . $runtimeContract
   . $taskActionContract
+  . $restartAcceptance
 }
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
@@ -430,61 +433,11 @@ function Get-TaskPythonExe {
   }
 }
 
-function Get-ListeningPortOwnerIds {
-  param([Parameter(Mandatory = $true)][int]$Port)
-
-  $oldEap = $ErrorActionPreference
-  try {
-    $ErrorActionPreference = "Continue"
-    $lines = @(& netstat.exe -ano -p TCP 2> $null)
-    if ($LASTEXITCODE -ne 0) { return @() }
-    $pattern = '^\s*TCP\s+\S+:' + $Port + '\s+\S+\s+LISTENING\s+(\d+)\s*$'
-    $owners = @()
-    foreach ($line in $lines) {
-      if ([string]$line -match $pattern) { $owners += [int]$Matches[1] }
-    }
-    return @($owners | Sort-Object -Unique)
-  } finally {
-    $ErrorActionPreference = $oldEap
-  }
-}
-
-function Wait-PortReleased {
-  param(
-    [Parameter(Mandatory = $true)][int]$Port,
-    [int]$TimeoutSec = 30
-  )
-
-  $clock = [Diagnostics.Stopwatch]::StartNew()
-  while ($clock.Elapsed.TotalSeconds -lt $TimeoutSec) {
-    if (@(Get-ListeningPortOwnerIds -Port $Port).Count -eq 0) { return $true }
-    Start-Sleep -Milliseconds 250
-  }
-  return $false
-}
-
-function Wait-NewPortOwner {
-  param(
-    [Parameter(Mandatory = $true)][int]$Port,
-    [int[]]$PreviousOwners = @(),
-    [int]$TimeoutSec = 60
-  )
-
-  $clock = [Diagnostics.Stopwatch]::StartNew()
-  while ($clock.Elapsed.TotalSeconds -lt $TimeoutSec) {
-    $owners = @(Get-ListeningPortOwnerIds -Port $Port)
-    $newOwners = @($owners | Where-Object { $PreviousOwners -notcontains $_ })
-    if ($newOwners.Count -gt 0 -and $newOwners.Count -eq $owners.Count) {
-      return $newOwners
-    }
-    Start-Sleep -Milliseconds 250
-  }
-  return @()
-}
-
 function Invoke-LiveSttStreamAcceptance {
   param(
     [Parameter(Mandatory = $true)][string]$PythonExe,
+    [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
+    [Parameter(Mandatory = $true)][double]$DeadlineSec,
     [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1"
   )
 
@@ -501,21 +454,54 @@ function Invoke-LiveSttStreamAcceptance {
         -ForegroundColor Yellow
       return $false
     }
-    $output = & $PythonExe $smoke `
-      --url $Url `
-      --wav $wav `
-      --timeout-sec 30 `
-      --final-wait-sec 120 `
-      --min-final-word-coverage 0 `
-      --min-partial-events 0 `
-      --min-final-events 1 `
-      --max-transcript-gap-ms 0 2> $null
-    if ($LASTEXITCODE -ne 0) {
+    $remainingSec = $DeadlineSec - $Clock.Elapsed.TotalSeconds
+    if ($remainingSec -le 5) { return $false }
+    $connectTimeoutSec = [Math]::Max(1, [Math]::Min(30, [Math]::Floor($remainingSec / 3)))
+    $finalWaitSec = [Math]::Max(1, [Math]::Min(
+      120,
+      [Math]::Floor($remainingSec - $connectTimeoutSec - 2)
+    ))
+    $arguments = @(
+      $smoke,
+      "--url", $Url,
+      "--wav", $wav,
+      "--timeout-sec", "$connectTimeoutSec",
+      "--final-wait-sec", "$finalWaitSec",
+      "--min-final-word-coverage", "0",
+      "--min-partial-events", "0",
+      "--min-final-events", "1",
+      "--max-transcript-gap-ms", "0"
+    )
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $PythonExe
+    $startInfo.Arguments = (($arguments | ForEach-Object {
+      ConvertTo-GpuHostWindowsArgument -Value ([string]$_)
+    }) -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { return $false }
+    $remainingMs = [Math]::Max(1, [int](
+      ($DeadlineSec - $Clock.Elapsed.TotalSeconds) * 1000
+    ))
+    if (-not $process.WaitForExit($remainingMs)) {
+      try { $process.Kill() } catch { }
+      $process.Dispose()
+      return $false
+    }
+    $output = $process.StandardOutput.ReadToEnd()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    if ($exitCode -ne 0 -or
+        -not (Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec)) {
       Write-Host "[update] direct stream inference acceptance failed" -ForegroundColor Yellow
       return $false
     }
     try {
-      $summary = ($output -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop
+      $summary = $output | ConvertFrom-Json -ErrorAction Stop
       return (
         $summary.ok -eq $true -and
         [int]$summary.events.final_count -ge 1 -and
@@ -539,7 +525,11 @@ if ($NoRestart) {
 } else {
   $restartFailed = $false
   $liveSttPythonExe = ""
-  $liveSttRuntimeOwners = @()
+  $liveSttRuntimeOwner = 0
+  $liveSttTaskPids = @()
+  # One absolute monotonic budget covers both task restarts, port release,
+  # process binding, model preload readiness, direct inference, and stability.
+  $acceptanceClock = [Diagnostics.Stopwatch]::StartNew()
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
     if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
       Write-Host "[update] ERROR: required task '$task' is not installed" `
@@ -555,13 +545,27 @@ if ($NoRestart) {
       $restartFailed = $true
       continue
     }
-    $previousOwners = @(Get-ListeningPortOwnerIds -Port ([int]$taskSpec.Port))
+    $previousSnapshot = Get-GpuHostListeningPortOwnerSnapshot -Port ([int]$taskSpec.Port)
+    if (-not $previousSnapshot.Succeeded) {
+      Write-Host "[update] ERROR: listener owner query failed for '$task'" `
+        -ForegroundColor Red
+      $restartFailed = $true
+      continue
+    }
+    $previousOwners = @($previousSnapshot.Owners)
     # /End returns non-zero when the task is not running (benign). When it WAS
     # running, require the listener to disappear before /Run. A fixed sleep can
     # accept a stale child or make /Run a no-op while the previous process owns
     # the port.
-    $null = Invoke-SchtasksTask -Action "/End" -TaskName $task
-    if (-not (Wait-PortReleased -Port ([int]$taskSpec.Port) -TimeoutSec 30)) {
+    $endExit = Invoke-SchtasksTask -Action "/End" -TaskName $task
+    if ($previousOwners.Count -gt 0 -and $endExit -ne 0) {
+      Write-Host "[update] ERROR: schtasks /End '$task' exit=$endExit" -ForegroundColor Red
+      $restartFailed = $true
+      continue
+    }
+    $released = Wait-GpuHostPortReleased -Port ([int]$taskSpec.Port) `
+      -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec
+    if (-not $released.Succeeded) {
       Write-Host "[update] ERROR: stale listener remained on port $($taskSpec.Port)" `
         -ForegroundColor Red
       $restartFailed = $true
@@ -572,17 +576,32 @@ if ($NoRestart) {
       Write-Host "[update] ERROR: schtasks /Run '$task' exit=$runExit" -ForegroundColor Red
       $restartFailed = $true
     } else {
-      $newOwners = @(Wait-NewPortOwner -Port ([int]$taskSpec.Port) `
-        -PreviousOwners $previousOwners -TimeoutSec 60)
-      if ($newOwners.Count -eq 0) {
+      $newOwnerResult = Wait-GpuHostNewPortOwner -Port ([int]$taskSpec.Port) `
+        -PreviousOwners $previousOwners -Clock $acceptanceClock `
+        -DeadlineSec $script:LiveSttReadinessDeadlineSec
+      if (-not $newOwnerResult.Succeeded -or @($newOwnerResult.Owners).Count -ne 1) {
         Write-Host "[update] ERROR: task '$task' did not create a new listener" `
+          -ForegroundColor Red
+        $restartFailed = $true
+        continue
+      }
+      $newOwner = [int]$newOwnerResult.Owners[0]
+      $taskPids = @(Get-GpuHostTaskInstancePids -TaskName $task `
+        -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec)
+      if ($taskPids.Count -eq 0 -or
+          -not (Test-GpuHostListenerStable -Port ([int]$taskSpec.Port) `
+            -ExpectedOwnerId $newOwner -ExpectedPythonExe $taskPythonExe `
+            -ExpectedTaskPids $taskPids -Clock $acceptanceClock `
+            -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
+        Write-Host "[update] ERROR: task '$task' listener identity is not stable" `
           -ForegroundColor Red
         $restartFailed = $true
         continue
       }
       if ($task -eq "platform-ai-live-stt") {
         $liveSttPythonExe = $taskPythonExe
-        $liveSttRuntimeOwners = $newOwners
+        $liveSttRuntimeOwner = $newOwner
+        $liveSttTaskPids = $taskPids
       }
       Write-Host "[update] restarted $task with a new port owner" -ForegroundColor Green
     }
@@ -602,9 +621,8 @@ if ($NoRestart) {
 if (-not $NoRestart -and -not $restartFailed) {
   Write-Host "[update] waiting for live-stt streaming model readiness..." -ForegroundColor Cyan
   $streamReady = $false
-  $readinessClock = [Diagnostics.Stopwatch]::StartNew()
-  while ($readinessClock.Elapsed.TotalSeconds -lt $script:LiveSttReadinessDeadlineSec) {
-    $remaining = $script:LiveSttReadinessDeadlineSec - $readinessClock.Elapsed.TotalSeconds
+  while ($acceptanceClock.Elapsed.TotalSeconds -lt $script:LiveSttReadinessDeadlineSec) {
+    $remaining = $script:LiveSttReadinessDeadlineSec - $acceptanceClock.Elapsed.TotalSeconds
     $requestTimeout = [Math]::Max(1, [Math]::Min(5, [Math]::Ceiling($remaining)))
     try {
       $readiness = Invoke-RestMethod "http://127.0.0.1:8200/ready" `
@@ -624,7 +642,7 @@ if (-not $NoRestart -and -not $restartFailed) {
     } catch { }
     $sleepMs = [Math]::Min(5000, [Math]::Max(
       0,
-      [int](($script:LiveSttReadinessDeadlineSec - $readinessClock.Elapsed.TotalSeconds) * 1000)
+      [int](($script:LiveSttReadinessDeadlineSec - $acceptanceClock.Elapsed.TotalSeconds) * 1000)
     ))
     if ($sleepMs -gt 0) { Start-Sleep -Milliseconds $sleepMs }
   }
@@ -634,14 +652,10 @@ if (-not $NoRestart -and -not $restartFailed) {
       $script:LiveSttReadinessDeadlineSec) `
       $script:DeployExitRestartFailed
   }
-  $currentOwners = @(Get-ListeningPortOwnerIds -Port 8200)
-  $ownerDrift = (
-    $currentOwners.Count -eq 0 -or
-    $currentOwners.Count -ne $liveSttRuntimeOwners.Count -or
-    @($currentOwners | Where-Object { $liveSttRuntimeOwners -notcontains $_ }).Count -gt 0 -or
-    @($liveSttRuntimeOwners | Where-Object { $currentOwners -notcontains $_ }).Count -gt 0
-  )
-  if ($ownerDrift) {
+  if (-not (Test-GpuHostListenerStable -Port 8200 `
+      -ExpectedOwnerId $liveSttRuntimeOwner -ExpectedPythonExe $liveSttPythonExe `
+      -ExpectedTaskPids $liveSttTaskPids -Clock $acceptanceClock `
+      -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
     Set-DeploymentLedgerResult -Result "readiness-failed"
     Stop-Deploy "live-stt port owner changed during readiness acceptance." `
       $script:DeployExitRestartFailed
@@ -650,11 +664,20 @@ if (-not $NoRestart -and -not $restartFailed) {
 
   Write-Host "[update] verifying live-stt direct inference + EOF contract..." -ForegroundColor Cyan
   if (Invoke-LiveSttStreamAcceptance -PythonExe $liveSttPythonExe `
+      -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec `
       -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1") {
     Write-Host "[update] direct /ws/stream inference + source ranges accepted" -ForegroundColor Green
   } else {
     Set-DeploymentLedgerResult -Result "readiness-failed"
     Stop-Deploy "direct /ws/stream inference/source-range acceptance failed." `
+      $script:DeployExitRestartFailed
+  }
+  if (-not (Test-GpuHostListenerStable -Port 8200 `
+      -ExpectedOwnerId $liveSttRuntimeOwner -ExpectedPythonExe $liveSttPythonExe `
+      -ExpectedTaskPids $liveSttTaskPids -Clock $acceptanceClock `
+      -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
+    Set-DeploymentLedgerResult -Result "readiness-failed"
+    Stop-Deploy "live-stt listener changed during post-smoke stability acceptance." `
       $script:DeployExitRestartFailed
   }
 }

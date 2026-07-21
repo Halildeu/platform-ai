@@ -104,14 +104,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ("final", get_final_service(settings)),
         )
 
-        def _load_role(label: str, service: Any) -> bool:
+        startup_preload_deadline = time.monotonic() + settings.stream_preload_readiness_budget_sec
+
+        def _load_role(label: str, service: Any, *, deadline: float) -> bool:
             for attempt in range(1, settings.stream_preload_max_attempts + 1):
                 if preload_state.stop_event.is_set():
+                    return False
+                if time.monotonic() >= deadline:
+                    preload_state.mark_failed(label)
+                    logger.error(
+                        "streaming model preload deadline exhausted role=%s attempt=%d",
+                        label,
+                        attempt,
+                        extra={
+                            "correlation_id": "startup",
+                            "model_role": label,
+                            "attempt": attempt,
+                        },
+                    )
                     return False
                 preload_state.begin_attempt(label)
                 started = time.monotonic()
                 try:
-                    service.ensure_model()
+                    service.ensure_model(deadline=deadline)
                 except Exception as exc:  # noqa: BLE001 - readiness records the failure
                     preload_state.mark_failed(label)
                     logger.error(
@@ -132,7 +147,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     if attempt >= settings.stream_preload_max_attempts:
                         return False
                     delay = settings.stream_preload_retry_base_sec * (2 ** (attempt - 1))
-                    if preload_state.stop_event.wait(delay):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or delay > remaining:
+                        return False
+                    if preload_state.stop_event.wait(min(delay, remaining)):
                         return False
                     continue
                 preload_state.mark_ready(label)
@@ -152,9 +170,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             return False
 
         def _preload_models() -> None:
+            startup_ready = True
             for label, service in preload_services:
-                if not _load_role(label, service) and preload_state.stop_event.is_set():
+                if not _load_role(
+                    label,
+                    service,
+                    deadline=startup_preload_deadline,
+                ):
+                    startup_ready = False
+                if preload_state.stop_event.is_set():
                     return
+
+            # A startup that exhausted its single declared deadline stays
+            # fail-closed. Runtime recovery is only entered after both models
+            # proved ready within that initial acceptance window.
+            if not startup_ready:
+                return
 
             # The startup preload is also the lifecycle owner for later worker
             # generations. A native timeout may recycle a child into a cold state,
@@ -174,7 +205,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         label,
                         extra={"correlation_id": "recovery", "model_role": label},
                     )
-                    _load_role(label, service)
+                    recovery_deadline = (
+                        time.monotonic() + settings.stream_preload_readiness_budget_sec
+                    )
+                    _load_role(label, service, deadline=recovery_deadline)
                     if preload_state.stop_event.is_set():
                         return
 

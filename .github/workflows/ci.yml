@@ -40,6 +40,8 @@ jobs:
             "deploy/gpu-host/deployment-state.ps1",
             "deploy/gpu-host/live-stt-runtime-contract.ps1",
             "deploy/gpu-host/start-live-stt.ps1",
+            "deploy/gpu-host/live-stt-runtime-env.ps1",
+            "deploy/gpu-host/restart-acceptance.ps1",
             "deploy/gpu-host/start-meeting-ai.ps1",
             "deploy/gpu-host/meeting-ai-runtime-env.ps1",
             "deploy/gpu-host/configure-meeting-ai.ps1",
@@ -332,7 +334,8 @@ jobs:
             "tests/windows/test-deployment-ledger.ps1",
             "tests/windows/test-meeting-ai-runtime.ps1",
             "tests/windows/test-private-gateway-host.ps1",
-            "tests/windows/test-task-action-migration.ps1"
+            "tests/windows/test-task-action-migration.ps1",
+            "tests/windows/test-live-stt-restart-acceptance.ps1"
           )) {
             [scriptblock]::Create((Get-Content -Raw $script)) | Out-Null
           }
@@ -348,6 +351,10 @@ jobs:
       - name: Immutable commit ledger rollout rollback and drift contract
         shell: powershell
         run: .\tests\windows\test-deployment-ledger.ps1
+
+      - name: Live STT fail-closed restart and runtime environment contract
+        shell: powershell
+        run: .\tests\windows\test-live-stt-restart-acceptance.ps1
 
       - name: Scheduled Task action migration atomicity and rollback contract
         shell: powershell

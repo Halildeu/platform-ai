@@ -8,11 +8,14 @@ $script:LiveSttPreloadRetryBaseSec = 1
 $script:LiveSttPreloadRoleCount = 2
 $script:LiveSttReadinessDeadlineSec = 780
 
+$script:LiveSttPreloadRetryWorstCaseSec = $script:LiveSttPreloadRetryBaseSec * (
+    [Math]::Pow(2, $script:LiveSttPreloadMaxAttempts - 1) - 1
+)
 $script:LiveSttPreloadWorstCaseSec = $script:LiveSttPreloadRoleCount * (
     ($script:LiveSttPreloadMaxAttempts * (
         $script:LiveSttModelLoadTimeoutSec + (2 * $script:LiveSttWorkerKillGraceSec)
     )) +
-    (($script:LiveSttPreloadMaxAttempts - 1) * $script:LiveSttPreloadRetryBaseSec)
+    $script:LiveSttPreloadRetryWorstCaseSec
 )
 
 if ($script:LiveSttPreloadWorstCaseSec -gt $script:LiveSttReadinessDeadlineSec) {

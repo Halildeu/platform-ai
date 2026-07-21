@@ -17,12 +17,26 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$svc = Join-Path $RepoRoot "services\live-stt-service"
 $runtimeContract = Join-Path $RepoRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
 if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf)) {
     throw "Missing live-stt-runtime-contract.ps1"
 }
 . $runtimeContract
+$runtimeEnv = Join-Path $RepoRoot "deploy\gpu-host\live-stt-runtime-env.ps1"
+if (-not (Test-Path -LiteralPath $runtimeEnv -PathType Leaf)) {
+    throw "Missing live-stt-runtime-env.ps1"
+}
+. $runtimeEnv
+
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path
+$PythonExe = (Resolve-Path -LiteralPath $PythonExe -ErrorAction Stop).Path
+$HfHome = (Resolve-Path -LiteralPath $HfHome -ErrorAction Stop).Path
+$svc = Join-Path $RepoRoot "services\live-stt-service"
+if (-not (Test-Path -LiteralPath $svc -PathType Container) -or
+    -not (Test-Path -LiteralPath $PythonExe -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $RepoRoot ".git"))) {
+    throw "Live STT launcher paths do not resolve to the canonical deploy runtime."
+}
 $logDir = Join-Path $RepoRoot "deploy\gpu-host\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
 $log = Join-Path $logDir ("live-stt-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
@@ -44,10 +58,13 @@ $env:FOR_DISABLE_CONSOLE_CTRL_HANDLER = "1"
 # CUDA model after readiness and evict the preloaded recording models.
 $env:STT_DEVICE = "cpu"
 $env:STT_COMPUTE_TYPE = "int8"
+Clear-LiveSttManagedProcessEnvironment
+
 # GPU host first transcribe includes lazy Whisper model load. Historical smoke
 # evidence uses a 180s budget; the default 60s can kill the worker before it ever
-# warms, causing every retry to cold-start again. env.local.ps1 can still override.
+# warms, causing every retry to cold-start again.
 $env:STT_REQUEST_TIMEOUT = "180"
+$env:STT_CHUNK_CONSUMER_ENABLED = "false"
 # Customer recording startup depends on both streaming models. The generic
 # Settings default remains off for local/test imports; this production entry
 # point opts in and exposes fail-closed readiness at /ready.
@@ -60,25 +77,19 @@ if ($HfHome) {
     throw "HfHome is required for the production pinned live-stt model"
 }
 
-# Host-local overrides (SECRETS LIVE HERE, never in the repo): if
-# deploy\gpu-host\env.local.ps1 exists it is dot-sourced last, so it can set
-# or override runtime tuning/secret STT_* env (e.g. STT_CHUNK_CONSUMER_ENABLED + STT_REDIS_URL
-# with the Vault redis_password for the Stage-2 staging run, #151/#57).
-# Model identity/path pins are source-controlled and re-asserted below. The file
-# is gitignored; template: env.local.ps1.example.
-$envLocal = Join-Path (Split-Path $PSCommandPath -Parent) "env.local.ps1"
-if (Test-Path $envLocal) {
-    . $envLocal
-}
+# Optional host-local values come only from the hardened, non-executable
+# ProgramData live-stt.env file. Redis credentials are DPAPI LocalMachine blobs.
+$null = Import-LiveSttRuntimeEnvironment
 
 # Re-assert the complete source-controlled production profile AFTER host-local
-# config. env.local may supply secrets and explicitly allowed integration
-# switches, but it cannot move model identity, device placement, quantization,
-# preload timing, or the runtime commit accepted by the deploy ledger.
+# config. The data file cannot move model identity, device placement,
+# quantization, preload timing, or the runtime commit accepted by the ledger.
+$gitCommand = Get-Command git.exe -CommandType Application -ErrorAction Stop
+$gitExe = $gitCommand.Source
 $oldEap = $ErrorActionPreference
 try {
     $ErrorActionPreference = "Continue"
-    $runtimeCommit = @(& git -C $RepoRoot rev-parse HEAD 2> $null)
+    $runtimeCommit = @(& $gitExe -C $RepoRoot rev-parse HEAD 2> $null)
     $gitExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $oldEap

@@ -234,6 +234,17 @@ def test_preload_worst_case_must_fit_the_declared_readiness_budget() -> None:
         )
 
 
+def test_preload_budget_counts_exponential_retry_waits() -> None:
+    with pytest.raises(ValueError, match="preload worst-case timeout"):
+        cfg.Settings(
+            stream_preload_max_attempts=3,
+            stream_model_load_timeout_sec=1,
+            worker_kill_grace_sec=1,
+            stream_preload_retry_base_sec=10,
+            stream_preload_readiness_budget_sec=60,
+        )
+
+
 def test_production_runtime_profile_is_fail_closed() -> None:
     base = {
         "environment": "production",

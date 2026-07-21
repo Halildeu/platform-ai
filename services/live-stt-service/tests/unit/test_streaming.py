@@ -740,6 +740,30 @@ def test_load_failure_recycles_worker_before_preload_retry(
     assert starts == [None]
 
 
+def test_preload_lock_and_load_share_the_callers_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._load_timeout_sec = 180.0
+    service._call_lock = threading.Lock()
+    observed: list[tuple[str, float]] = []
+
+    def acquire(deadline: float) -> None:
+        observed.append(("lock", deadline))
+        assert service._call_lock.acquire(timeout=0)
+
+    def load(deadline: float | None = None) -> None:
+        assert deadline is not None
+        observed.append(("load", deadline))
+
+    monkeypatch.setattr(service, "_acquire_call_lock", acquire)
+    monkeypatch.setattr(service, "_ensure_model_locked", load)
+    service.ensure_model(deadline=12345.0)
+
+    assert observed == [("lock", 12345.0), ("load", 12345.0)]
+
+
 def test_streaming_readiness_requires_loaded_current_workers() -> None:
     saved_live = dict(streaming_models_module._supervised_live_services)
     saved_final = dict(streaming_models_module._supervised_final_services)

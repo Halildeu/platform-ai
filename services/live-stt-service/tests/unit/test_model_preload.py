@@ -28,7 +28,8 @@ class _RecordingService:
         self.healthy = True
         self.model_loaded = False
 
-    def ensure_model(self) -> None:
+    def ensure_model(self, *, deadline: float | None = None) -> None:
+        del deadline
         if self._blocker is not None:
             # Simulates a slow cold load so the test can assert startup did not
             # wait for it.
@@ -42,7 +43,9 @@ def _patch_factories(monkeypatch, live, final) -> None:
         "app.services.streaming_models.get_live_service", lambda _s: live, raising=False
     )
     monkeypatch.setattr(
-        "app.services.streaming_models.get_final_service", lambda _s: final, raising=False
+        "app.services.streaming_models.get_final_service",
+        lambda _s: final,
+        raising=False,
     )
 
 
@@ -90,6 +93,30 @@ def test_both_models_are_loaded_at_startup(monkeypatch) -> None:
     )
 
 
+def test_both_startup_roles_share_one_absolute_deadline(monkeypatch) -> None:
+    deadlines: list[float] = []
+
+    class _DeadlineRecorder:
+        healthy = True
+        model_loaded = False
+
+        def ensure_model(self, *, deadline: float | None = None) -> None:
+            assert deadline is not None
+            deadlines.append(deadline)
+            self.model_loaded = True
+
+    _patch_factories(monkeypatch, _DeadlineRecorder(), _DeadlineRecorder())
+    app = _run_lifespan(monkeypatch, preload=True)
+    with TestClient(app) as client:
+        for _ in range(100):
+            if client.get("/ready").status_code == 200:
+                break
+            threading.Event().wait(0.02)
+
+    assert len(deadlines) == 2
+    assert deadlines[0] == deadlines[1]
+
+
 def test_startup_does_not_block_on_a_slow_load(monkeypatch) -> None:
     calls: list[str] = []
     blocker = threading.Event()
@@ -121,7 +148,8 @@ def test_preload_failure_keeps_liveness_but_fails_readiness(monkeypatch) -> None
         healthy = True
         model_loaded = False
 
-        def ensure_model(self) -> None:
+        def ensure_model(self, *, deadline: float | None = None) -> None:
+            del deadline
             raise RuntimeError("model weights unavailable")
 
     calls: list[str] = []
@@ -150,7 +178,8 @@ def test_preload_retries_are_bounded_and_can_recover(monkeypatch) -> None:
         healthy = True
         model_loaded = False
 
-        def ensure_model(self) -> None:
+        def ensure_model(self, *, deadline: float | None = None) -> None:
+            del deadline
             self.attempts += 1
             if self.attempts == 1:
                 raise RuntimeError("transient load failure")
@@ -174,7 +203,9 @@ def test_preload_retries_are_bounded_and_can_recover(monkeypatch) -> None:
     assert calls == ["final"]
 
 
-def test_worker_loss_reloads_the_same_pinned_service_and_restores_readiness(monkeypatch) -> None:
+def test_worker_loss_reloads_the_same_pinned_service_and_restores_readiness(
+    monkeypatch,
+) -> None:
     calls: list[str] = []
     live = _RecordingService("live", calls)
     final = _RecordingService("final", calls)
@@ -203,7 +234,9 @@ def test_worker_loss_reloads_the_same_pinned_service_and_restores_readiness(monk
     assert calls.count("final") == 1
 
 
-def test_ready_body_reports_unhealthy_when_preloaded_worker_is_lost(monkeypatch) -> None:
+def test_ready_body_reports_unhealthy_when_preloaded_worker_is_lost(
+    monkeypatch,
+) -> None:
     from app.api import health
 
     calls: list[str] = []
@@ -277,7 +310,8 @@ def test_shutdown_cancels_before_starting_the_next_model(monkeypatch) -> None:
     release = threading.Event()
 
     class _BlockingLive:
-        def ensure_model(self) -> None:
+        def ensure_model(self, *, deadline: float | None = None) -> None:
+            del deadline
             entered.set()
             release.wait(timeout=5)
             calls.append("live")

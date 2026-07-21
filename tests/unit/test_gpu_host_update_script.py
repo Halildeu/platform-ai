@@ -17,7 +17,9 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         script.encode("ascii")
         self.assertIn('$originRef = "origin/{0}" -f $Branch', script)
         self.assertIn('[string]$RepoRoot = ""', script)
-        self.assertNotIn("Split-Path -Parent (Split-Path -Parent $PSScriptRoot)", script)
+        self.assertNotIn(
+            "Split-Path -Parent (Split-Path -Parent $PSScriptRoot)", script
+        )
         self.assertNotIn("$Branch..HEAD", script)
         self.assertNotIn("origin/$Branch..HEAD", script)
         self.assertNotIn('"origin/$Branch"', script)
@@ -28,7 +30,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self._assert_ps51_safe_script(script)
         self.assertIn("function Invoke-GitStream", script)
         self.assertIn('$unpushedRange = "{0}..HEAD" -f $originRef', script)
-        self.assertIn('[string]$TargetCommit', script)
+        self.assertIn("[string]$TargetCommit", script)
         self.assertIn("exactly 40 hex characters", script)
         self.assertIn('"merge-base", "--is-ancestor", $target, $originRef', script)
         self.assertIn('"checkout", "--detach", $target', script)
@@ -75,14 +77,19 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("lastAction", script)
         self.assertIn("lastResult", script)
 
-    def test_live_stt_start_sets_cold_load_timeout_before_local_overrides(self) -> None:
+    def test_live_stt_start_uses_strict_non_executable_runtime_config(self) -> None:
         script = self._read_script("start-live-stt.ps1")
 
         timeout_line = '$env:STT_REQUEST_TIMEOUT = "180"'
         self.assertIn(timeout_line, script)
-        self.assertLess(script.index(timeout_line), script.index("$envLocal = Join-Path"))
+        self.assertIn("Import-LiveSttRuntimeEnvironment", script)
+        self.assertIn("Clear-LiveSttManagedProcessEnvironment", script)
+        self.assertIn("live-stt-runtime-env.ps1", script)
+        self.assertNotIn("env.local.ps1", script)
 
-    def test_live_stt_update_waits_for_stream_readiness_without_sync_gpu_warmup(self) -> None:
+    def test_live_stt_update_waits_for_stream_readiness_without_sync_gpu_warmup(
+        self,
+    ) -> None:
         script = self._read_script("update.ps1")
 
         self.assertIn('Invoke-RestMethod "http://127.0.0.1:8200/ready"', script)
@@ -92,26 +99,30 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         )
         self.assertIn('Set-DeploymentLedgerResult -Result "readiness-failed"', script)
         self.assertIn("live_stream_smoke.py", script)
-        self.assertIn("--min-final-events 1", script)
+        self.assertIn('"--min-final-events", "1"', script)
         self.assertIn('"eof_ack,drained"', script)
         self.assertIn("LiveSttReadinessDeadlineSec", script)
         self.assertIn("[Diagnostics.Stopwatch]::StartNew()", script)
         self.assertIn("$readiness.runtime_commit -eq $target", script)
-        self.assertIn("$readiness.runtime.live.device -eq \"cuda\"", script)
+        self.assertIn('$readiness.runtime.live.device -eq "cuda"', script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
 
-    def test_live_stt_production_launcher_reasserts_preload_after_local_overrides(self) -> None:
+    def test_live_stt_production_launcher_reasserts_pinned_runtime_profile(
+        self,
+    ) -> None:
         script = self._read_script("start-live-stt.ps1")
 
         preload_line = '$env:STT_STREAM_PRELOAD_MODELS = "true"'
-        env_local_line = "$envLocal = Join-Path"
-        self.assertGreater(script.rindex(preload_line), script.index(env_local_line))
+        runtime_import_line = "Import-LiveSttRuntimeEnvironment"
+        self.assertGreater(
+            script.rindex(preload_line), script.index(runtime_import_line)
+        )
         self.assertGreater(
             script.index(
-                '$env:STT_STREAM_PRELOAD_MAX_ATTEMPTS = '
+                "$env:STT_STREAM_PRELOAD_MAX_ATTEMPTS = "
                 '"$script:LiveSttPreloadMaxAttempts"'
             ),
-            script.index(env_local_line),
+            script.index(runtime_import_line),
         )
         self.assertIn("STT_LIVE_MODEL_REVISION", script)
         self.assertIn("STT_LIVE_MODEL_SHA256", script)
@@ -128,7 +139,9 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             "$env:STT_STREAM_MODEL_LOAD_TIMEOUT_SEC",
             "$env:STT_STREAM_PRELOAD_READINESS_BUDGET_SEC",
         ):
-            self.assertGreater(script.rindex(assignment), script.index(env_local_line))
+            self.assertGreater(
+                script.rindex(assignment), script.index(runtime_import_line)
+            )
 
     def test_live_stt_runtime_contract_bounds_preload_and_is_shared(self) -> None:
         contract = self._read_script("live-stt-runtime-contract.ps1")
@@ -137,22 +150,32 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
 
         contract.encode("ascii")
         self.assertIn("LiveSttPreloadWorstCaseSec", contract)
+        self.assertIn("[Math]::Pow(2", contract)
         self.assertIn("LiveSttReadinessDeadlineSec = 780", contract)
         self.assertIn("exceeds its readiness deadline", contract)
         self.assertIn("live-stt-runtime-contract.ps1", launcher)
         self.assertIn("live-stt-runtime-contract.ps1", update)
 
-    def test_gpu_host_restart_requires_new_port_owner_and_exact_task_interpreter(self) -> None:
+    def test_gpu_host_restart_requires_new_port_owner_and_exact_task_interpreter(
+        self,
+    ) -> None:
         script = self._read_script("update.ps1")
 
-        self.assertIn("function Get-ListeningPortOwnerIds", script)
-        self.assertIn("function Wait-PortReleased", script)
-        self.assertIn("function Wait-NewPortOwner", script)
+        restart_contract = self._read_script("restart-acceptance.ps1")
+        self.assertIn("Get-GpuHostListeningPortOwnerSnapshot", restart_contract)
+        self.assertIn("Wait-GpuHostPortReleased", restart_contract)
+        self.assertIn("Wait-GpuHostNewPortOwner", restart_contract)
+        self.assertIn("Get-GpuHostListenerIdentityProof", restart_contract)
+        self.assertIn("Get-WmiObject -Class Win32_Process", restart_contract)
+        self.assertIn("ExpectedPythonExe", restart_contract)
+        self.assertIn("ExpectedTaskPids", restart_contract)
+        self.assertIn("StableSamples = 3", restart_contract)
         self.assertIn("Get-GpuHostTaskActionContract", script)
         self.assertIn("Get-SchtasksTaskXml", script)
         self.assertIn("-PythonExe $liveSttPythonExe", script)
         self.assertNotIn("Get-Command python", script)
         self.assertIn("port owner changed during readiness acceptance", script)
+        self.assertIn("post-smoke stability acceptance", script)
 
     def test_meeting_ai_launcher_uses_non_executable_dpapi_config(self) -> None:
         script = self._read_script("start-meeting-ai.ps1")
@@ -164,7 +187,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Clear-MeetingAiManagedProcessEnvironment", script)
         self.assertIn("environment does not match the launcher", script)
         self.assertIn("requires an approved runtime config", script)
-        self.assertIn('$env:MAI_APP_ENV = $AppEnv', script)
+        self.assertIn("$env:MAI_APP_ENV = $AppEnv", script)
         self.assertIn("Runtime config rejected", script)
         self.assertNotIn("env.local.ps1", script)
         self.assertNotIn("falling back to mock", script)
@@ -178,7 +201,9 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Add-Type -AssemblyName System.Security", script)
         self.assertIn("OrdinalIgnoreCase", script)
         self.assertIn("System.Security.Cryptography.ProtectedData]::Unprotect", script)
-        self.assertIn("System.Security.Cryptography.DataProtectionScope]::LocalMachine", script)
+        self.assertIn(
+            "System.Security.Cryptography.DataProtectionScope]::LocalMachine", script
+        )
         self.assertIn("must be UTF-8 without BOM", script)
         self.assertIn("must not use a UNC or device path", script)
         self.assertIn("must not resolve to a UNC or device path", script)
@@ -235,12 +260,12 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("faz24.transcriptReadyPermitConsumption.v1", script)
         self.assertIn("faz24.transcriptReadyActivationReceipt.v3", script)
         self.assertIn(
-            'transcript-service delivery capability OAuth client secret',
+            "transcript-service delivery capability OAuth client secret",
             script,
         )
         self.assertIn(
             '$readyConfig["MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI"] = '
-            '$transcriptSecretBlob',
+            "$transcriptSecretBlob",
             script,
         )
         self.assertIn("SkipReadyArtifactExistence", script)
@@ -328,7 +353,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("[Environment]::Exit(9)", script)
         self.assertIn('$env:GITHUB_ACTIONS -ne "true"', script)
         self.assertIn('$env:RUNNER_ENVIRONMENT -ne "github-hosted"', script)
-        self.assertIn('\\runneradmin$', script)
+        self.assertIn("\\runneradmin$", script)
         self.assertIn("containsTaskArguments = $false", script)
         self.assertIn("containsTaskXml = $false", script)
         self.assertNotIn("Stop-ScheduledTask", script)
