@@ -350,14 +350,16 @@ function Set-DeploymentLedgerResult {
 
 $runtimeContract = Join-Path $RepoRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
 $taskActionContract = Join-Path $RepoRoot "deploy\gpu-host\task-action-contract.ps1"
-if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
-    -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf)) {
-  Set-DeploymentLedgerResult -Result "restart-failed"
-  Stop-Deploy "Pinned source is missing a GPU-host runtime/action contract." `
-    $script:DeployExitRestartFailed
+if (-not $NoRestart) {
+  if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf)) {
+    Set-DeploymentLedgerResult -Result "restart-failed"
+    Stop-Deploy "Pinned source is missing a GPU-host runtime/action contract." `
+      $script:DeployExitRestartFailed
+  }
+  . $runtimeContract
+  . $taskActionContract
 }
-. $runtimeContract
-. $taskActionContract
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
 #    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
