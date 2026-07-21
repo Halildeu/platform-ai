@@ -287,9 +287,9 @@ Assert-True ($insecure.ExitCode -eq 2) "insecure ledger ACL must trigger drift"
 Set-Acl -LiteralPath $statePath -AclObject (New-DeploymentStateAcl)
 Assert-DeploymentStateAcl -Path $statePath
 
-# Required tasks do not exist on the CI fixture host. Both target acceptance and
-# rollback acceptance therefore fail; source must still restore to the previous
-# commit and the ledger must distinguish rollback-failed from target rejection.
+# Fault injection rejects both target and rollback acceptance. Source must still
+# restore and the ledger must distinguish rollback-failed from target rejection.
+$env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-twice"
 $restartFailure = Invoke-Update @("-TargetCommit", $commitD)
 Assert-True ($restartFailure.ExitCode -eq 4) `
     "target plus rollback acceptance failure must return exit 4"
@@ -299,8 +299,9 @@ Assert-True ($state.currentCommit -eq $commitB) `
 Assert-True ($null -eq $state.previousCommit) `
     "rejected revision must not remain as a ping-pong rollback target"
 Assert-True ($state.lastResult -eq `
-    "automatic-rollback-failed-restart-failed-task-missing") `
+    "automatic-rollback-failed-injected-acceptance-failure") `
     "rollback acceptance failure ledger result mismatch"
+Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-then-accept"
 $acceptedRollback = Invoke-Update @("-TargetCommit", $commitD)

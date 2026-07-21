@@ -354,16 +354,25 @@ $runtimeContract = Join-Path $RepoRoot "deploy\gpu-host\live-stt-runtime-contrac
 $taskActionContract = Join-Path $RepoRoot "deploy\gpu-host\task-action-contract.ps1"
 $restartAcceptance = Join-Path $RepoRoot "deploy\gpu-host\restart-acceptance.ps1"
 if (-not $NoRestart) {
-  if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
+  $testAcceptanceInjected = (
+    $script:TestFaultsEnabled -and
+    $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
+      "reject-twice", "reject-then-accept"
+    )
+  )
+  if (-not $testAcceptanceInjected -and (
+      -not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
       -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
-      -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf)) {
+      -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf))) {
     Set-DeploymentLedgerResult -Result "restart-failed"
     Stop-Deploy "Pinned source is missing a GPU-host runtime/action contract." `
       $script:DeployExitRestartFailed
   }
-  . $runtimeContract
-  . $taskActionContract
-  . $restartAcceptance
+  if (-not $testAcceptanceInjected) {
+    . $runtimeContract
+    . $taskActionContract
+    . $restartAcceptance
+  }
 }
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
@@ -523,9 +532,12 @@ function Invoke-GpuHostRevisionAcceptance {
   param([Parameter(Mandatory = $true)][string]$ExpectedCommit)
 
   if ($script:TestFaultsEnabled -and
-      $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -eq "reject-then-accept") {
+      $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
+        "reject-twice", "reject-then-accept"
+      )) {
     $script:TestAcceptanceInvocation += 1
-    if ($script:TestAcceptanceInvocation -eq 1) {
+    if ($env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -eq "reject-twice" -or
+        $script:TestAcceptanceInvocation -eq 1) {
       return New-GpuHostAcceptanceResult -Succeeded $false `
         -Reason "injected-acceptance-failure"
     }
