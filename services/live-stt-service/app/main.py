@@ -7,6 +7,7 @@ Run:
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -74,6 +75,57 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "correlation_id": "startup",
         },
     )
+    # Faz 24 Bulgu 3-F: preload both streaming models at boot.
+    #
+    # Loading them lazily on the first WebSocket deadlocks against client
+    # patience — a cold load takes minutes, the desktop recorder waits 10s for
+    # `ready`, and its disconnect cancels the load ("WS disconnected during
+    # model load"). Every attempt restarted from zero, so no session could ever
+    # start. Preloading moves the cost to boot, where nothing is waiting.
+    #
+    # Daemon thread: startup must not block, or health probes fail for the
+    # minutes the load takes and the supervisor kills the service mid-load —
+    # recreating the same never-finishes loop at a different layer.
+    preload_thread = None
+    if settings.stream_preload_models:
+        import threading
+
+        def _preload_models() -> None:
+            from app.services.streaming_models import get_final_service, get_live_service
+
+            for label, factory in (("live", get_live_service), ("final", get_final_service)):
+                started = time.monotonic()
+                try:
+                    factory(settings).ensure_model()
+                except Exception as exc:  # noqa: BLE001 - never kill the service over a preload
+                    # A failed preload is not fatal: the WS path still calls
+                    # ensure_model(), so behaviour degrades to the old lazy load
+                    # rather than taking the service down.
+                    logger.error(
+                        "streaming model preload failed",
+                        extra={
+                            "correlation_id": "startup",
+                            "model_role": label,
+                            "error_class": type(exc).__name__,
+                            "elapsed_sec": round(time.monotonic() - started, 1),
+                        },
+                    )
+                    continue
+                logger.info(
+                    "streaming model preloaded",
+                    extra={
+                        "correlation_id": "startup",
+                        "model_role": label,
+                        "elapsed_sec": round(time.monotonic() - started, 1),
+                    },
+                )
+
+        preload_thread = threading.Thread(
+            target=_preload_models, name="model-preload", daemon=True
+        )
+        preload_thread.start()
+        logger.info("streaming model preload started", extra={"correlation_id": "startup"})
+
     # PR-stt-04 (#137): gateway Redis Streams chunk consumer — opt-in only,
     # daemon thread so the HTTP/WS API stays the primary lifecycle owner.
     consumer = None
