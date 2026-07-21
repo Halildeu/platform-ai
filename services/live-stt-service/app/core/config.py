@@ -132,6 +132,18 @@ class Settings(BaseSettings):
     # hang can be terminated rather than merely abandoning a Python waiter.
     stream_final_worker_backend: str = Field(default="process", pattern="^(process|inline)$")
     stream_model_load_timeout_sec: float = Field(default=180.0, ge=1.0, le=600.0)
+    # Load both streaming models at startup instead of on the first WebSocket.
+    #
+    # Lazy loading deadlocks against client patience: a cold load takes minutes,
+    # the desktop recorder waits 10s for `ready`, and its disconnect cancels the
+    # load ("WS disconnected during model load"). Every attempt then restarts
+    # from zero, so the model never finishes loading and no session can ever
+    # start. Preloading moves that cost to boot, where nothing is waiting.
+    #
+    # Runs in a background thread: startup stays non-blocking so health probes
+    # answer immediately. Disable only where the model cannot be fetched (unit
+    # tests, air-gapped CI).
+    stream_preload_models: bool = Field(default=True)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.
     live_infer_interval_ms: int = Field(default=700, ge=1, le=5000)

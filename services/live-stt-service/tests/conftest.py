@@ -61,6 +61,21 @@ def _mock_faster_whisper(monkeypatch: pytest.MonkeyPatch) -> Generator[None, Non
     yield
 
 
+@pytest.fixture(autouse=True)
+def _disable_model_preload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep app startup from preloading models during unit tests.
+
+    Production preloads both streaming models at boot (Bulgu 3-F) so a cold
+    load cannot be cancelled by a client timeout. In unit tests that startup
+    path would load models into the shared service singletons, leaking state
+    across tests — e.g. `model_loaded` would already be True for a later test
+    asserting nothing is loaded at construction.
+
+    Tests that want to exercise preload set this variable themselves.
+    """
+    monkeypatch.setenv("STT_STREAM_PRELOAD_MODELS", "false")
+
+
 @pytest.fixture
 def reset_service_singleton() -> Generator[None, None, None]:
     """Reset the TranscribeService singleton between tests to avoid state leak."""
