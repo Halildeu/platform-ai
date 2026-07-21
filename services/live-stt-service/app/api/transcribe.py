@@ -53,6 +53,7 @@ _CORR_ID_RE = re.compile(
     r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
     re.IGNORECASE,
 )
+_LANGUAGE_RE = re.compile(r"^(auto|[a-z]{2})$")
 
 
 def _correlation_id_from_request(request: Request) -> str:
@@ -199,6 +200,11 @@ async def transcribe_endpoint(
         )
     if not raw:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty audio body")
+    if language is not None and not _LANGUAGE_RE.fullmatch(language):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="language must be ISO 639-1 or auto",
+        )
 
     service: TranscribeService = get_service(settings)
     corr_id: str = _correlation_id_from_request(request)
@@ -221,12 +227,13 @@ async def transcribe_endpoint(
                 service.transcribe,
                 BytesIO(raw),
                 settings.request_timeout,
+                language,
             )
         else:
             # Inline backend is test/dev only; keep the outer async timeout for
             # patched in-process sleeps.
             result = await asyncio.wait_for(
-                run_in_threadpool(service.transcribe, BytesIO(raw)),
+                run_in_threadpool(service.transcribe, BytesIO(raw), None, language),
                 timeout=settings.request_timeout,
             )
     except WorkerTimeoutError as exc:
