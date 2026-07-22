@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from app.core import config as cfg
@@ -15,6 +18,16 @@ STREAM_MODEL_PINS = {
     "final_model_sha256": "f" * 64,
     "final_model_tree_sha256": "2" * 64,
     "final_model_path": "/models/final",
+}
+
+PRODUCTION_SPEECH_GATE = {
+    "speech_gate_profile": "silero-balanced-v1",
+    "stream_live_vad_filter": True,
+    "stream_final_vad_filter": True,
+    "stream_vad_threshold": 0.35,
+    "stream_vad_min_speech_duration_ms": 100,
+    "stream_vad_min_silence_duration_ms": 300,
+    "stream_vad_speech_pad_ms": 100,
 }
 
 
@@ -36,7 +49,14 @@ def test_defaults() -> None:
     assert s.language == "tr"
     assert s.beam_size == 5
     assert s.vad_filter is True
+    assert s.speech_gate_profile == "development-unpinned"
+    assert s.speech_gate_rms_source == "source-baseline"
+    assert s.stream_live_vad_filter is False
     assert s.stream_final_vad_filter is False
+    assert s.stream_vad_threshold == 0.35
+    assert s.stream_vad_min_speech_duration_ms == 100
+    assert s.stream_vad_min_silence_duration_ms == 300
+    assert s.stream_vad_speech_pad_ms == 100
     assert s.stream_final_worker_backend == "process"
     assert s.stream_live_worker_backend == "process"
     assert s.stream_live_timeout_sec == 5.0
@@ -68,6 +88,7 @@ def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STT_WORKER_KILL_GRACE_SEC", "0.5")
     monkeypatch.setenv("STT_LIVE_BEAM_SIZE", "2")
     monkeypatch.setenv("STT_FINAL_BEAM_SIZE", "4")
+    monkeypatch.setenv("STT_STREAM_LIVE_VAD_FILTER", "true")
     monkeypatch.setenv("STT_STREAM_FINAL_VAD_FILTER", "true")
     monkeypatch.setenv("STT_STREAM_TRANSPORT_TIMEOUT_SEC", "0.5")
     monkeypatch.setenv("STT_LIVE_INFER_INTERVAL_MS", "250")
@@ -84,6 +105,7 @@ def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.worker_kill_grace_sec == 0.5
     assert s.live_beam_size == 2
     assert s.final_beam_size == 4
+    assert s.stream_live_vad_filter is True
     assert s.stream_final_vad_filter is True
     assert s.stream_transport_timeout_sec == 0.5
     assert s.live_infer_interval_ms == 250
@@ -131,8 +153,20 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
         cfg.Settings(live_infer_interval_ms=0)
     with pytest.raises(ValueError):
         cfg.Settings(silence_commit_sec=0.0)
+    for field in ("silence_rms", "min_speech_rms"):
+        with pytest.raises(ValueError):
+            cfg.Settings(**{field: 0.00009})
+        with pytest.raises(ValueError):
+            cfg.Settings(**{field: 0.05001})
+    for boundary in (0.0001, 0.05):
+        bounded = cfg.Settings(silence_rms=boundary, min_speech_rms=boundary)
+        assert bounded.silence_rms == boundary
+        assert bounded.min_speech_rms == boundary
     with pytest.raises(ValueError):
         cfg.Settings(min_speech_rms=0.01, silence_rms=0.02)
+    valid_rms_override = cfg.Settings(silence_rms=0.01, min_speech_rms=0.015)
+    assert valid_rms_override.silence_rms == 0.01
+    assert valid_rms_override.min_speech_rms == 0.015
     with pytest.raises(ValueError):
         cfg.Settings(min_infer_sec=2.1, live_window_sec=2.0)
     with pytest.raises(ValueError):
@@ -228,6 +262,7 @@ def test_production_requires_content_addressed_local_model() -> None:
         **STREAM_MODEL_PINS,
         stream_preload_models=True,
         runtime_commit="a" * 40,
+        **PRODUCTION_SPEECH_GATE,
     )
     assert settings.model_revision == "a" * 40
 
@@ -264,6 +299,7 @@ def test_production_runtime_profile_is_fail_closed() -> None:
         "model_path": "/models/faster-whisper-medium",
         **STREAM_MODEL_PINS,
         "stream_preload_models": True,
+        **PRODUCTION_SPEECH_GATE,
     }
     with pytest.raises(ValueError, match="device must be cpu"):
         cfg.Settings(**base, device="cuda")
@@ -271,6 +307,73 @@ def test_production_runtime_profile_is_fail_closed() -> None:
         cfg.Settings(**base, live_device="cpu")
     with pytest.raises(ValueError, match="final_compute_type must be float16"):
         cfg.Settings(**base, final_compute_type="int8")
+    with pytest.raises(ValueError, match="speech_gate_profile"):
+        cfg.Settings(**{**base, "speech_gate_profile": "development-unpinned"})
+    with pytest.raises(ValueError, match="stream_live_vad_filter"):
+        cfg.Settings(**{**base, "stream_live_vad_filter": False})
+    with pytest.raises(ValueError, match="stream_final_vad_filter"):
+        cfg.Settings(**{**base, "stream_final_vad_filter": False})
+    with pytest.raises(ValueError, match="stream_vad_threshold"):
+        cfg.Settings(**{**base, "stream_vad_threshold": 0.5})
+    with pytest.raises(ValueError, match="stream_vad_min_silence_duration_ms"):
+        cfg.Settings(**{**base, "stream_vad_min_silence_duration_ms": 2000})
+    with pytest.raises(ValueError, match="live_window_sec"):
+        cfg.Settings(**{**base, "live_window_sec": 0.1, "min_infer_sec": 0.05})
+    with pytest.raises(ValueError, match="live_infer_interval_ms"):
+        cfg.Settings(**{**base, "live_infer_interval_ms": 100})
+    for field, value in (
+        ("forced_commit_sec", 60.0),
+        ("silence_commit_sec", 5.0),
+        ("tail_overlap_sec", 5.0),
+    ):
+        with pytest.raises(ValueError, match=field):
+            cfg.Settings(**{**base, field: value})
+
+
+def test_source_controlled_speech_gate_contract_does_not_drift() -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    contract = (repo_root / "deploy/gpu-host/live-stt-runtime-contract.ps1").read_text()
+    launcher = (repo_root / "deploy/gpu-host/start-live-stt.ps1").read_text()
+    provisioner = (repo_root / "deploy/gpu-host/configure-live-stt.ps1").read_text()
+    env_example = (repo_root / "deploy/gpu-host/live-stt.env.example").read_text()
+    readme = (repo_root / "services/live-stt-service/README.md").read_text()
+
+    def contract_value(name: str) -> str:
+        match = re.search(rf"\$script:{name}\s*=\s*\"?([^\"\r\n]+)\"?", contract)
+        assert match is not None, name
+        return match.group(1).strip()
+
+    settings = cfg.Settings()
+    expected = {
+        "LiveSttSpeechGateProfile": settings.speech_gate_profile.replace(
+            "development-unpinned", "silero-balanced-v1"
+        ),
+        "LiveSttSilenceRms": str(settings.silence_rms),
+        "LiveSttMinSpeechRms": str(settings.min_speech_rms),
+        "LiveSttStreamVadThreshold": str(settings.stream_vad_threshold),
+        "LiveSttStreamVadMinSpeechDurationMs": str(
+            settings.stream_vad_min_speech_duration_ms
+        ),
+        "LiveSttStreamVadMinSilenceDurationMs": str(
+            settings.stream_vad_min_silence_duration_ms
+        ),
+        "LiveSttStreamVadSpeechPadMs": str(settings.stream_vad_speech_pad_ms),
+        "LiveSttLiveInferIntervalMs": str(settings.live_infer_interval_ms),
+        "LiveSttLiveWindowSec": str(settings.live_window_sec),
+        "LiveSttFinalWindowSec": str(settings.final_window_sec),
+        "LiveSttForcedCommitSec": str(settings.forced_commit_sec),
+        "LiveSttSilenceCommitSec": str(settings.silence_commit_sec),
+        "LiveSttTailOverlapSec": str(settings.tail_overlap_sec),
+        "LiveSttMinInferSec": str(settings.min_infer_sec),
+    }
+    for name, value in expected.items():
+        assert contract_value(name) == value
+        assert f"$script:{name}" in launcher
+
+    assert "STT_SILENCE_RMS=0.0005" in env_example
+    assert "STT_MIN_SPEECH_RMS=0.0005" in env_example
+    assert "`0.0005` / `0.0005`" in readme
+    assert '-InitialDefault "0.0005"' not in provisioner
 
 
 def test_model_sha256_rejects_malformed_value() -> None:

@@ -257,6 +257,7 @@ class DirectWhisperService:
         log_prob_threshold: float = _DEFAULT_LOG_PROB_THRESHOLD,
         compression_ratio_threshold: float = _DEFAULT_COMPRESSION_RATIO_THRESHOLD,
         condition_on_previous_text: bool = False,
+        vad_parameters: dict[str, float | int] | None = None,
     ) -> None:
         self.model_name = model_name
         self.device = device
@@ -271,6 +272,7 @@ class DirectWhisperService:
         self.log_prob_threshold = log_prob_threshold
         self.compression_ratio_threshold = compression_ratio_threshold
         self.condition_on_previous_text = condition_on_previous_text
+        self.vad_parameters = dict(vad_parameters or {})
         self._model: object | None = None
         self._lock = threading.Lock()
 
@@ -341,6 +343,7 @@ class DirectWhisperService:
                 language=self.language,
                 beam_size=self.beam_size,
                 vad_filter=vad,
+                vad_parameters=self.vad_parameters if vad else None,
                 condition_on_previous_text=self.condition_on_previous_text,
                 no_speech_threshold=self.no_speech_threshold,
                 log_prob_threshold=self.log_prob_threshold,
@@ -370,6 +373,7 @@ def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_q
         log_prob_threshold=cast(float, config["log_prob_threshold"]),
         compression_ratio_threshold=cast(float, config["compression_ratio_threshold"]),
         condition_on_previous_text=cast(bool, config["condition_on_previous_text"]),
+        vad_parameters=cast(dict[str, float | int], config["vad_parameters"]),
     )
     while True:
         task = task_queue.get()
@@ -425,6 +429,12 @@ class _SupervisedWhisperService:
             "log_prob_threshold": settings.log_prob_threshold,
             "compression_ratio_threshold": settings.compression_ratio_threshold,
             "condition_on_previous_text": settings.condition_on_previous_text,
+            "vad_parameters": {
+                "threshold": settings.stream_vad_threshold,
+                "min_speech_duration_ms": settings.stream_vad_min_speech_duration_ms,
+                "min_silence_duration_ms": settings.stream_vad_min_silence_duration_ms,
+                "speech_pad_ms": settings.stream_vad_speech_pad_ms,
+            },
         }
         self._timeout_sec = (
             settings.stream_final_timeout_sec if is_final else settings.stream_live_timeout_sec
@@ -782,6 +792,7 @@ def _named(
     log_prob_threshold: float,
     compression_ratio_threshold: float,
     condition_on_previous_text: bool,
+    vad_parameters: dict[str, float | int],
 ) -> DirectWhisperService:
     # Decode thresholds are part of the cache identity so a settings change
     # yields a fresh service rather than a stale cached one (#237).
@@ -801,6 +812,7 @@ def _named(
             str(log_prob_threshold),
             str(compression_ratio_threshold),
             str(condition_on_previous_text),
+            repr(sorted(vad_parameters.items())),
         ]
     )
     with _services_lock:
@@ -819,6 +831,7 @@ def _named(
                 log_prob_threshold=log_prob_threshold,
                 compression_ratio_threshold=compression_ratio_threshold,
                 condition_on_previous_text=condition_on_previous_text,
+                vad_parameters=vad_parameters,
             )
         return _services[service_key]
 
@@ -841,6 +854,14 @@ def get_live_service(
                 str(settings.live_beam_size),
                 str(settings.stream_live_timeout_sec),
                 str(settings.stream_model_load_timeout_sec),
+                str(settings.no_speech_threshold),
+                str(settings.log_prob_threshold),
+                str(settings.compression_ratio_threshold),
+                str(settings.condition_on_previous_text),
+                str(settings.stream_vad_threshold),
+                str(settings.stream_vad_min_speech_duration_ms),
+                str(settings.stream_vad_min_silence_duration_ms),
+                str(settings.stream_vad_speech_pad_ms),
             ]
         )
         with _services_lock:
@@ -862,6 +883,12 @@ def get_live_service(
         log_prob_threshold=settings.log_prob_threshold,
         compression_ratio_threshold=settings.compression_ratio_threshold,
         condition_on_previous_text=settings.condition_on_previous_text,
+        vad_parameters={
+            "threshold": settings.stream_vad_threshold,
+            "min_speech_duration_ms": settings.stream_vad_min_speech_duration_ms,
+            "min_silence_duration_ms": settings.stream_vad_min_silence_duration_ms,
+            "speech_pad_ms": settings.stream_vad_speech_pad_ms,
+        },
     )
 
 
@@ -883,6 +910,14 @@ def get_final_service(
                 str(settings.final_beam_size),
                 str(settings.stream_final_timeout_sec),
                 str(settings.stream_model_load_timeout_sec),
+                str(settings.no_speech_threshold),
+                str(settings.log_prob_threshold),
+                str(settings.compression_ratio_threshold),
+                str(settings.condition_on_previous_text),
+                str(settings.stream_vad_threshold),
+                str(settings.stream_vad_min_speech_duration_ms),
+                str(settings.stream_vad_min_silence_duration_ms),
+                str(settings.stream_vad_speech_pad_ms),
             ]
         )
         with _services_lock:
@@ -904,6 +939,12 @@ def get_final_service(
         log_prob_threshold=settings.log_prob_threshold,
         compression_ratio_threshold=settings.compression_ratio_threshold,
         condition_on_previous_text=settings.condition_on_previous_text,
+        vad_parameters={
+            "threshold": settings.stream_vad_threshold,
+            "min_speech_duration_ms": settings.stream_vad_min_speech_duration_ms,
+            "min_silence_duration_ms": settings.stream_vad_min_silence_duration_ms,
+            "speech_pad_ms": settings.stream_vad_speech_pad_ms,
+        },
     )
 
 

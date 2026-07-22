@@ -75,6 +75,55 @@ $env:STT_DEVICE = "cpu"
 $env:STT_COMPUTE_TYPE = "int8"
 Clear-LiveSttManagedProcessEnvironment
 
+# Remove inherited machine/task values for immutable speech-gate policy before
+# loading the source contract. The ProgramData schema never admits these keys.
+foreach ($policyKey in @(
+        "STT_SPEECH_GATE_PROFILE",
+        "STT_SPEECH_GATE_RMS_SOURCE",
+        "STT_STREAM_LIVE_VAD_FILTER",
+        "STT_STREAM_FINAL_VAD_FILTER",
+        "STT_STREAM_VAD_THRESHOLD",
+        "STT_STREAM_VAD_MIN_SPEECH_DURATION_MS",
+        "STT_STREAM_VAD_MIN_SILENCE_DURATION_MS",
+        "STT_STREAM_VAD_SPEECH_PAD_MS",
+        "STT_LIVE_INFER_INTERVAL_MS",
+        "STT_LIVE_WINDOW_SEC",
+        "STT_FINAL_WINDOW_SEC",
+        "STT_FORCED_COMMIT_SEC",
+        "STT_SILENCE_COMMIT_SEC",
+        "STT_TAIL_OVERLAP_SEC",
+        "STT_MIN_INFER_SEC"
+    )) {
+    [Environment]::SetEnvironmentVariable(
+        $policyKey,
+        $null,
+        [EnvironmentVariableTarget]::Process
+    )
+}
+
+# Load the mandatory source profile before optional host-local RMS overrides.
+# This ordering prevents inherited Scheduled Task or machine environment from
+# bypassing the profile while keeping the two bounded RMS knobs operational.
+$env:STT_SPEECH_GATE_PROFILE = "$script:LiveSttSpeechGateProfile"
+$env:STT_SPEECH_GATE_RMS_SOURCE = "source-baseline"
+$env:STT_SILENCE_RMS = "$script:LiveSttSilenceRms"
+$env:STT_MIN_SPEECH_RMS = "$script:LiveSttMinSpeechRms"
+$env:STT_STREAM_LIVE_VAD_FILTER = "true"
+$env:STT_STREAM_FINAL_VAD_FILTER = "true"
+$env:STT_STREAM_VAD_THRESHOLD = "$script:LiveSttStreamVadThreshold"
+$env:STT_STREAM_VAD_MIN_SPEECH_DURATION_MS = `
+    "$script:LiveSttStreamVadMinSpeechDurationMs"
+$env:STT_STREAM_VAD_MIN_SILENCE_DURATION_MS = `
+    "$script:LiveSttStreamVadMinSilenceDurationMs"
+$env:STT_STREAM_VAD_SPEECH_PAD_MS = "$script:LiveSttStreamVadSpeechPadMs"
+$env:STT_LIVE_INFER_INTERVAL_MS = "$script:LiveSttLiveInferIntervalMs"
+$env:STT_LIVE_WINDOW_SEC = "$script:LiveSttLiveWindowSec"
+$env:STT_FINAL_WINDOW_SEC = "$script:LiveSttFinalWindowSec"
+$env:STT_FORCED_COMMIT_SEC = "$script:LiveSttForcedCommitSec"
+$env:STT_SILENCE_COMMIT_SEC = "$script:LiveSttSilenceCommitSec"
+$env:STT_TAIL_OVERLAP_SEC = "$script:LiveSttTailOverlapSec"
+$env:STT_MIN_INFER_SEC = "$script:LiveSttMinInferSec"
+
 # GPU host first transcribe includes lazy Whisper model load. Historical smoke
 # evidence uses a 180s budget; the default 60s can kill the worker before it ever
 # warms, causing every retry to cold-start again.
@@ -135,6 +184,25 @@ $env:STT_STREAM_PRELOAD_RETRY_BASE_SEC = "$script:LiveSttPreloadRetryBaseSec"
 $env:STT_STREAM_MODEL_LOAD_TIMEOUT_SEC = "$script:LiveSttModelLoadTimeoutSec"
 $env:STT_WORKER_KILL_GRACE_SEC = "$script:LiveSttWorkerKillGraceSec"
 $env:STT_STREAM_PRELOAD_READINESS_BUDGET_SEC = "$script:LiveSttReadinessDeadlineSec"
+# Profile identity, VAD roles and VAD parameters are immutable production
+# policy. Do not re-assert the RMS pair here: the validated ProgramData override
+# is intentionally allowed to replace only those two source baseline values.
+$env:STT_SPEECH_GATE_PROFILE = "$script:LiveSttSpeechGateProfile"
+$env:STT_STREAM_LIVE_VAD_FILTER = "true"
+$env:STT_STREAM_FINAL_VAD_FILTER = "true"
+$env:STT_STREAM_VAD_THRESHOLD = "$script:LiveSttStreamVadThreshold"
+$env:STT_STREAM_VAD_MIN_SPEECH_DURATION_MS = `
+    "$script:LiveSttStreamVadMinSpeechDurationMs"
+$env:STT_STREAM_VAD_MIN_SILENCE_DURATION_MS = `
+    "$script:LiveSttStreamVadMinSilenceDurationMs"
+$env:STT_STREAM_VAD_SPEECH_PAD_MS = "$script:LiveSttStreamVadSpeechPadMs"
+$env:STT_LIVE_INFER_INTERVAL_MS = "$script:LiveSttLiveInferIntervalMs"
+$env:STT_LIVE_WINDOW_SEC = "$script:LiveSttLiveWindowSec"
+$env:STT_FINAL_WINDOW_SEC = "$script:LiveSttFinalWindowSec"
+$env:STT_FORCED_COMMIT_SEC = "$script:LiveSttForcedCommitSec"
+$env:STT_SILENCE_COMMIT_SEC = "$script:LiveSttSilenceCommitSec"
+$env:STT_TAIL_OVERLAP_SEC = "$script:LiveSttTailOverlapSec"
+$env:STT_MIN_INFER_SEC = "$script:LiveSttMinInferSec"
 $env:STT_DEVICE = "cpu"
 $env:STT_COMPUTE_TYPE = "int8"
 $env:STT_MODEL_NAME = [string]$liveModel.repository

@@ -25,6 +25,8 @@ function Get-LiveSttRuntimeConfigPath {
 function Get-LiveSttRuntimeConfigSchema {
     return @{
         "STT_REQUEST_TIMEOUT" = @{ Target = "STT_REQUEST_TIMEOUT"; Kind = "integer"; Min = 1; Max = 600 }
+        "STT_SILENCE_RMS" = @{ Target = "STT_SILENCE_RMS"; Kind = "decimal"; Min = 0.0001; Max = 0.05 }
+        "STT_MIN_SPEECH_RMS" = @{ Target = "STT_MIN_SPEECH_RMS"; Kind = "decimal"; Min = 0.0001; Max = 0.05 }
         "STT_CHUNK_CONSUMER_ENABLED" = @{ Target = "STT_CHUNK_CONSUMER_ENABLED"; Kind = "boolean" }
         "STT_REDIS_URL_DPAPI" = @{ Target = "STT_REDIS_URL"; Kind = "redis-secret" }
         "STT_CHUNK_STREAM_PREFIX" = @{ Target = "STT_CHUNK_STREAM_PREFIX"; Kind = "name" }
@@ -173,6 +175,23 @@ function ConvertFrom-LiveSttRuntimeValue {
             }
             return "$number"
         }
+        "decimal" {
+            if ($Value -notmatch '^0\.[0-9]{1,6}$') {
+                throw "$Key must use canonical invariant decimal notation."
+            }
+            $number = [decimal]0
+            $style = [Globalization.NumberStyles]::AllowDecimalPoint
+            $culture = [Globalization.CultureInfo]::InvariantCulture
+            if (-not [decimal]::TryParse($Value, $style, $culture, [ref]$number) -or
+                $number -lt [decimal]$Spec.Min -or $number -gt [decimal]$Spec.Max) {
+                throw "$Key is outside its allowed decimal range."
+            }
+            $canonical = $number.ToString("0.######", $culture)
+            if ($canonical -cne $Value) {
+                throw "$Key must use canonical invariant decimal notation."
+            }
+            return $canonical
+        }
         "name" {
             if ($Value -notmatch '^[A-Za-z0-9._:-]{1,128}$') {
                 throw "$Key contains unsupported characters."
@@ -201,6 +220,49 @@ function ConvertFrom-LiveSttRuntimeValue {
             }
         }
         default { throw "$Key has an unsupported schema kind." }
+    }
+}
+
+function Assert-LiveSttEffectiveRmsPair {
+    param(
+        [Parameter(Mandatory = $true)]$Values,
+        $FallbackValues = $null
+    )
+
+    $hasSilenceOverride = $Values.ContainsKey("STT_SILENCE_RMS")
+    $hasMinimumOverride = $Values.ContainsKey("STT_MIN_SPEECH_RMS")
+    if ($hasSilenceOverride -xor $hasMinimumOverride) {
+        throw "An RMS override must provide STT_SILENCE_RMS and STT_MIN_SPEECH_RMS together."
+    }
+
+    $silence = if ($hasSilenceOverride) {
+        [string]$Values["STT_SILENCE_RMS"]
+    } elseif ($null -ne $FallbackValues -and $FallbackValues.ContainsKey("STT_SILENCE_RMS")) {
+        [string]$FallbackValues["STT_SILENCE_RMS"]
+    } else { [string]$env:STT_SILENCE_RMS }
+    $minimum = if ($hasMinimumOverride) {
+        [string]$Values["STT_MIN_SPEECH_RMS"]
+    } elseif ($null -ne $FallbackValues -and
+        $FallbackValues.ContainsKey("STT_MIN_SPEECH_RMS")) {
+        [string]$FallbackValues["STT_MIN_SPEECH_RMS"]
+    } else { [string]$env:STT_MIN_SPEECH_RMS }
+
+    if ([string]::IsNullOrWhiteSpace($silence) -and
+        [string]::IsNullOrWhiteSpace($minimum)) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($silence) -or
+        [string]::IsNullOrWhiteSpace($minimum)) {
+        throw "An RMS override requires a complete source or runtime RMS pair."
+    }
+
+    $schema = Get-LiveSttRuntimeConfigSchema
+    $silence = ConvertFrom-LiveSttRuntimeValue -Key "STT_SILENCE_RMS" `
+        -Value $silence -Spec $schema["STT_SILENCE_RMS"]
+    $minimum = ConvertFrom-LiveSttRuntimeValue -Key "STT_MIN_SPEECH_RMS" `
+        -Value $minimum -Spec $schema["STT_MIN_SPEECH_RMS"]
+    if ([decimal]$minimum -lt [decimal]$silence) {
+        throw "STT_MIN_SPEECH_RMS must be greater than or equal to STT_SILENCE_RMS."
     }
 }
 
@@ -250,6 +312,18 @@ function Import-LiveSttRuntimeEnvironment {
         if ($values.ContainsKey($key)) { throw "Live STT runtime config contains a duplicate key." }
         if ($value -match '[\x00-\x1f]') { throw "$key contains a control character." }
         $values[$key] = ConvertFrom-LiveSttRuntimeValue -Key $key -Value $value -Spec $schema[$key]
+    }
+
+    # Validate the effective pair before mutating any process environment value.
+    Assert-LiveSttEffectiveRmsPair -Values $values
+
+    if ($values.ContainsKey("STT_SILENCE_RMS") -and
+        $values.ContainsKey("STT_MIN_SPEECH_RMS")) {
+        [Environment]::SetEnvironmentVariable(
+            "STT_SPEECH_GATE_RMS_SOURCE",
+            "host-override",
+            [EnvironmentVariableTarget]::Process
+        )
     }
 
     foreach ($key in $values.Keys) {

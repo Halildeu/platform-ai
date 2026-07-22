@@ -47,7 +47,8 @@ class Settings(BaseSettings):
       STT_CHUNK_CONSUMER_GROUP    live-stt-v1
       STT_LIVE_BEAM_SIZE          1 (default; low-latency draft)
       STT_FINAL_BEAM_SIZE         1 (default; ADR-0031 final revision)
-      STT_STREAM_FINAL_VAD_FILTER False (default; direct-stream final uses RMS gate)
+      STT_STREAM_LIVE_VAD_FILTER  False (default; production profile enables it)
+      STT_STREAM_FINAL_VAD_FILTER False (default; production profile enables it)
       STT_STREAM_TRANSPORT_TIMEOUT_SEC 2.0 (default; per-WebSocket-write cap)
     """
 
@@ -125,10 +126,20 @@ class Settings(BaseSettings):
     final_beam_size: int = Field(default=1, ge=1, le=10)
     # Transcript-free verbose debug events over WS (KVKK: default off, #30).
     stream_debug: bool = Field(default=False)
-    # Direct stream already has an RMS gate and active-audio trimming. Faster-
-    # whisper VAD can drop quiet desktop microphone speech, so the WS final pass
-    # keeps it off by default; sync /transcribe still uses `vad_filter`.
+    # Local/test imports keep VAD opt-in. The source-controlled GPU production
+    # profile pins both roles and the Silero parameters below; production cannot
+    # silently inherit faster-whisper defaults or disable either role.
+    speech_gate_profile: str = Field(default="development-unpinned", max_length=64)
+    speech_gate_rms_source: str = Field(
+        default="source-baseline",
+        pattern="^(source-baseline|host-override)$",
+    )
+    stream_live_vad_filter: bool = Field(default=False)
     stream_final_vad_filter: bool = Field(default=False)
+    stream_vad_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
+    stream_vad_min_speech_duration_ms: int = Field(default=100, ge=32, le=2000)
+    stream_vad_min_silence_duration_ms: int = Field(default=300, ge=32, le=2000)
+    stream_vad_speech_pad_ms: int = Field(default=100, ge=0, le=1000)
     # A final decode must have a bounded terminal time. The gateway keeps a
     # bounded source-audio history until the final's absolute sample range is
     # acknowledged; an unbounded model call would otherwise make that contract
@@ -168,8 +179,8 @@ class Settings(BaseSettings):
     tail_overlap_sec: float = Field(default=0.25, ge=0.0, le=5.0)
     # Electron/WebAudio microphone frames are much quieter than the original GPU
     # demo fixtures: real desktop speech commonly lands around RMS 0.002-0.005.
-    silence_rms: float = Field(default=0.0005, ge=0.0, le=1.0)
-    min_speech_rms: float = Field(default=0.0005, gt=0.0, le=1.0)
+    silence_rms: float = Field(default=0.0005, ge=0.0001, le=0.05)
+    min_speech_rms: float = Field(default=0.0005, ge=0.0001, le=0.05)
     min_infer_sec: float = Field(default=0.35, ge=0.01, le=5.0)
     debug_every_sec: float = Field(default=1.0, ge=0.1, le=10.0)
     # Comma-separated allowed origins for the browser streaming demo; empty =
@@ -255,6 +266,38 @@ class Settings(BaseSettings):
             for label, (actual, expected) in expected_runtime.items():
                 if actual != expected:
                     raise ValueError(f"{label} must be {expected} in production")
+            if self.speech_gate_profile != "silero-balanced-v1":
+                raise ValueError("speech_gate_profile must be silero-balanced-v1 in production")
+            if not self.stream_live_vad_filter:
+                raise ValueError("stream_live_vad_filter must be enabled in production")
+            if not self.stream_final_vad_filter:
+                raise ValueError("stream_final_vad_filter must be enabled in production")
+            expected_speech_gate = {
+                "live_infer_interval_ms": (self.live_infer_interval_ms, 700),
+                "live_window_sec": (self.live_window_sec, 2.0),
+                "final_window_sec": (self.final_window_sec, 6.0),
+                "forced_commit_sec": (self.forced_commit_sec, 5.0),
+                "silence_commit_sec": (self.silence_commit_sec, 0.7),
+                "tail_overlap_sec": (self.tail_overlap_sec, 0.25),
+                "min_infer_sec": (self.min_infer_sec, 0.35),
+                "stream_vad_threshold": (self.stream_vad_threshold, 0.35),
+                "stream_vad_min_speech_duration_ms": (
+                    self.stream_vad_min_speech_duration_ms,
+                    100,
+                ),
+                "stream_vad_min_silence_duration_ms": (
+                    self.stream_vad_min_silence_duration_ms,
+                    300,
+                ),
+                "stream_vad_speech_pad_ms": (self.stream_vad_speech_pad_ms, 100),
+            }
+            for gate_label, (gate_actual, gate_expected) in expected_speech_gate.items():
+                if gate_actual != gate_expected:
+                    raise ValueError(f"{gate_label} must be {gate_expected} in production")
+            if self.stream_vad_min_silence_duration_ms >= int(self.live_window_sec * 1000):
+                raise ValueError(
+                    "stream_vad_min_silence_duration_ms must be shorter than live_window_sec"
+                )
         retry_wait_sec = self.stream_preload_retry_base_sec * (
             (2 ** (self.stream_preload_max_attempts - 1)) - 1
         )

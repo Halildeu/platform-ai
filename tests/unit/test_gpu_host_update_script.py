@@ -386,6 +386,16 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("[Diagnostics.Stopwatch]::StartNew()", script)
         self.assertIn("$readiness.runtime_commit -eq $ExpectedCommit", script)
         self.assertIn('$readiness.runtime.live.device -eq "cuda"', script)
+        self.assertIn(
+            "$readiness.speech_gate.profile -eq $script:LiveSttSpeechGateProfile",
+            script,
+        )
+        self.assertIn("$readiness.speech_gate.rms_source", script)
+        self.assertIn("$readiness.speech_gate.forced_commit_sec", script)
+        self.assertIn("$readiness.speech_gate.silence_commit_sec", script)
+        self.assertIn("$readiness.speech_gate.tail_overlap_sec", script)
+        self.assertIn("$readiness.speech_gate.vad.live_enabled", script)
+        self.assertIn("$readiness.speech_gate.vad.final_enabled", script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
 
     def test_live_stt_production_launcher_reasserts_pinned_runtime_profile(
@@ -395,6 +405,12 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
 
         preload_line = '$env:STT_STREAM_PRELOAD_MODELS = "true"'
         runtime_import_line = "Import-LiveSttRuntimeEnvironment"
+        for policy_key in (
+            '"STT_FORCED_COMMIT_SEC"',
+            '"STT_SILENCE_COMMIT_SEC"',
+            '"STT_TAIL_OVERLAP_SEC"',
+        ):
+            self.assertLess(script.index(policy_key), script.index(runtime_import_line))
         self.assertGreater(
             script.rindex(preload_line), script.index(runtime_import_line)
         )
@@ -419,6 +435,9 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             "$env:STT_RUNTIME_COMMIT",
             "$env:STT_STREAM_MODEL_LOAD_TIMEOUT_SEC",
             "$env:STT_STREAM_PRELOAD_READINESS_BUDGET_SEC",
+            "$env:STT_FORCED_COMMIT_SEC",
+            "$env:STT_SILENCE_COMMIT_SEC",
+            "$env:STT_TAIL_OVERLAP_SEC",
         ):
             self.assertGreater(
                 script.rindex(assignment), script.index(runtime_import_line)

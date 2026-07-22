@@ -477,7 +477,9 @@ def test_streaming_defaults_follow_adr_0031() -> None:
     assert s.final_compute_type == "float16"
     assert s.final_beam_size == 1
     assert s.stream_debug is False  # KVKK: verbose debug opt-in only
+    assert s.stream_live_vad_filter is False
     assert s.stream_final_vad_filter is False
+    assert s.stream_vad_min_silence_duration_ms < int(s.live_window_sec * 1000)
     assert s.stream_final_worker_backend == "process"
     assert s.stream_live_worker_backend == "process"
     assert s.stream_live_timeout_sec == 5.0
@@ -1339,6 +1341,12 @@ def test_direct_stream_service_passes_role_specific_beam_size() -> None:
         compute_type="int8",
         language="tr",
         beam_size=5,
+        vad_parameters={
+            "threshold": 0.35,
+            "min_speech_duration_ms": 100,
+            "min_silence_duration_ms": 300,
+            "speech_pad_ms": 100,
+        },
     )
 
     class FakeModel:
@@ -1358,6 +1366,51 @@ def test_direct_stream_service_passes_role_specific_beam_size() -> None:
     assert fake_model.kwargs["beam_size"] == 5
     assert fake_model.kwargs["language"] == "tr"
     assert fake_model.kwargs["condition_on_previous_text"] is False
+    assert fake_model.kwargs["vad_filter"] is True
+    assert fake_model.kwargs["vad_parameters"] == {
+        "threshold": 0.35,
+        "min_speech_duration_ms": 100,
+        "min_silence_duration_ms": 300,
+        "speech_pad_ms": 100,
+    }
+
+    service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=False)
+    assert fake_model.kwargs["vad_filter"] is False
+    assert fake_model.kwargs["vad_parameters"] is None
+
+
+@pytest.mark.parametrize(
+    "service_type",
+    (SupervisedLiveWhisperService, SupervisedFinalWhisperService),
+)
+def test_supervised_worker_receives_pinned_vad_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+    service_type: type[SupervisedLiveWhisperService] | type[SupervisedFinalWhisperService],
+) -> None:
+    monkeypatch.setattr(
+        streaming_models_module._SupervisedWhisperService,
+        "_start",
+        lambda self: None,
+    )
+    service = service_type(Settings())
+
+    assert service._config["vad_parameters"] == {
+        "threshold": 0.35,
+        "min_speech_duration_ms": 100,
+        "min_silence_duration_ms": 300,
+        "speech_pad_ms": 100,
+    }
+
+
+def test_vad_parameters_are_part_of_direct_service_cache_identity() -> None:
+    first = get_live_service(Settings(stream_live_worker_backend="inline"))
+    same = get_live_service(Settings(stream_live_worker_backend="inline"))
+    changed = get_live_service(
+        Settings(stream_live_worker_backend="inline", stream_vad_threshold=0.4)
+    )
+
+    assert same is first
+    assert changed is not first
 
 
 def test_direct_stream_service_filters_low_confidence_silence_decode() -> None:

@@ -38,7 +38,51 @@ def test_ready_fails_closed_when_preload_is_disabled(client) -> None:  # type: i
             "live": {"device": "cuda", "compute_type": "int8"},
             "final": {"device": "cuda", "compute_type": "float16"},
         },
+        "speech_gate": {
+            "profile": "development-unpinned",
+            "rms_source": "source-baseline",
+            "silence_rms": 0.0005,
+            "min_speech_rms": 0.0005,
+            "live_infer_interval_ms": 700,
+            "live_window_sec": 2.0,
+            "final_window_sec": 6.0,
+            "forced_commit_sec": 5.0,
+            "silence_commit_sec": 0.7,
+            "tail_overlap_sec": 0.25,
+            "min_infer_sec": 0.35,
+            "vad": {
+                "live_enabled": False,
+                "final_enabled": False,
+                "threshold": 0.35,
+                "min_speech_duration_ms": 100,
+                "min_silence_duration_ms": 300,
+                "speech_pad_ms": 100,
+            },
+        },
     }
+
+
+def test_ready_exposes_only_public_speech_gate_policy(client) -> None:  # type: ignore[no-untyped-def]
+    body = client.get("/ready").json()
+    gate = body["speech_gate"]
+
+    assert set(gate) == {
+        "profile",
+        "rms_source",
+        "silence_rms",
+        "min_speech_rms",
+        "live_infer_interval_ms",
+        "live_window_sec",
+        "final_window_sec",
+        "forced_commit_sec",
+        "silence_commit_sec",
+        "tail_overlap_sec",
+        "min_infer_sec",
+        "vad",
+    }
+    serialized = str(gate).lower()
+    for forbidden in ("redis", "token", "secret", "transcript", "audio"):
+        assert forbidden not in serialized
 
 
 def test_transcribe_happy_path(client) -> None:  # type: ignore[no-untyped-def]

@@ -975,7 +975,7 @@ async def stream_endpoint(
                 _transcribe_with_stream_generation,
                 live_service,
                 live_audio,
-                False,
+                settings.stream_live_vad_filter,
                 live_worker_generation,
             )
             draft = (

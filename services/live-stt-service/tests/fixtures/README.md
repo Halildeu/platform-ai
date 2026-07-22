@@ -8,6 +8,7 @@ Bu dizin canonical test ses dosyaları için ayrılmıştır.
 |---|---|---|---|---|---|---|
 | `sample-tr-cv17-001.wav` | CC0 1.0 | Mozilla Common Voice 17.0 (TR test split) | ~6 sn | Hafif anonim | ✅ | Integration test smoke |
 | `sample-tr-cv17-002.wav` | CC0 1.0 | Mozilla Common Voice 17.0 (TR test split) | ~8 sn | Hafif anonim | ✅ | Integration test smoke (varyans) |
+| `silero-gate-fixtures.json` | Repo-generated | CC0 WAV slice + deterministic sine recipe | 3.0-3.2 sn | PII yok | ✅ | Pinned production Silero quiet-speech / non-speech counter-evidence |
 
 **Kaynak**: https://commonvoice.mozilla.org/tr/datasets
 **Lisans**: CC0 1.0 Public Domain — herhangi bir amaçla kullanılabilir, atıf gerekmez (ama bu manifest atıf yapar)
@@ -17,6 +18,13 @@ Bu dizin canonical test ses dosyaları için ayrılmıştır.
 
 `sample-tr-cv17-001.txt`: Beklenen transkript (smoke assertion için)
 `sample-tr-cv17-002.txt`: Beklenen transkript
+
+`silero-gate-fixtures.json`, production speech gate davranış testinin iki girdisini
+pinler. Quiet-speech girdisi `sample-tr-cv17-001.wav` dosyasının sabit zaman
+aralığını RMS `0.002` seviyesine ölçekler. Above-floor non-speech girdisi sabit
+frekans, süre ve RMS ile üretilen sinüs sinyalidir. İki girdi de gerçek
+`faster_whisper.vad.get_speech_timestamps` yolundan geçer; yalnız Whisper decoder
+test stub'ıdır. Bu test GPU/model kalite veya geniş WER iddiası üretmez.
 
 Bunlar genel bir WER/model-kalite claim'i üretmez. Production rollout smoke'u
 iki fixture'ı da ayrı ayrı source-controlled dar toleranslarla doğrular; geniş

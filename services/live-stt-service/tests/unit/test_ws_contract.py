@@ -11,13 +11,16 @@ import asyncio
 import json
 import threading
 import time
+import wave
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -31,6 +34,10 @@ SCHEMA_PATH = (
 )
 VALIDATOR = Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
 STREAM_PATH = "/ws/stream?protocol=source-ranges-v1"
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures"
+SILERO_FIXTURES = json.loads(
+    (FIXTURE_DIR / "silero-gate-fixtures.json").read_text(encoding="utf-8")
+)
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +62,7 @@ def receive_terminal_ack(ws: Any) -> dict[str, Any]:
         event = ws.receive_json()
         assert_valid(event)
         if event["type"] == "eof_ack":
-            return event
+            return cast(dict[str, Any], event)
         assert event["type"] == "partial"
     raise AssertionError("eof_ack was not emitted within the bounded terminal sequence")
 
@@ -633,6 +640,79 @@ def _silence_frame() -> bytes:
     return np.zeros(1024, dtype=np.float32).tobytes()
 
 
+def _fixture_audio(name: str) -> np.ndarray[tuple[int, ...], np.dtype[np.float32]]:
+    spec = SILERO_FIXTURES[name]
+    target_rms = float(spec["target_rms"])
+    if spec.get("kind") == "sine":
+        sample_count = int(16_000 * float(spec["duration_sec"]))
+        timeline = np.arange(sample_count, dtype=np.float32) / 16_000
+        audio = np.sin(2 * np.pi * float(spec["frequency_hz"]) * timeline)
+    else:
+        with wave.open(str(FIXTURE_DIR / str(spec["source"])), "rb") as fixture:
+            assert fixture.getnchannels() == 1
+            assert fixture.getsampwidth() == 2
+            source_rate = fixture.getframerate()
+            audio = np.frombuffer(
+                fixture.readframes(fixture.getnframes()),
+                dtype="<i2",
+            ).astype(np.float32) / 32768.0
+        assert source_rate == 48_000
+        audio = audio[::3]
+        start = int(float(spec["start_sec"]) * 16_000)
+        end = start + int(float(spec["duration_sec"]) * 16_000)
+        audio = audio[start:end]
+
+    rms = float(np.sqrt(np.mean(np.square(audio))))
+    assert rms > 0
+    return np.asarray(audio * (target_rms / rms), dtype=np.float32)
+
+
+def _audio_frames(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> Iterator[bytes]:
+    for offset in range(0, audio.size, 1024):
+        yield audio[offset : offset + 1024].tobytes()
+
+
+class _SileroBackedDecoderStub:
+    """Run the real pinned VAD and stub only the expensive Whisper decode."""
+
+    def __init__(self, role: str, calls: list[dict[str, object]]) -> None:
+        self.role = role
+        self.calls = calls
+
+    def transcribe(
+        self,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        **kwargs: object,
+    ) -> tuple[list[object], object]:
+        assert kwargs["vad_filter"] is True
+        raw_parameters = kwargs["vad_parameters"]
+        assert isinstance(raw_parameters, dict)
+        options = VadOptions(**raw_parameters)
+        timestamps = get_speech_timestamps(audio, options)
+        decoder_audio = collect_chunks(audio, timestamps)
+        self.calls.append(
+            {
+                "role": self.role,
+                "parameters": raw_parameters,
+                "input_samples": audio.size,
+                "decoder_samples": decoder_audio.size,
+            }
+        )
+        if decoder_audio.size == 0:
+            return [], object()
+        return [SimpleNamespace(text="Sessiz masaustu konusmasi")], object()
+
+
+def _install_silero_decoder_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[dict[str, object]],
+) -> None:
+    def install(self: streaming_models.DirectWhisperService) -> None:
+        self._model = _SileroBackedDecoderStub(self.role, calls)
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", install)
+
+
 def _patch_fast_stream_timing(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -711,15 +791,22 @@ def test_stream_default_gate_accepts_quiet_desktop_microphone(
         final_window_sec=5.0,
         forced_commit_sec=60.0,
         silence_commit_sec=0.1,
+        speech_gate_profile="silero-balanced-v1",
+        stream_live_vad_filter=True,
+        stream_final_vad_filter=True,
     )
     app.dependency_overrides[get_settings] = lambda: settings
     monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
+
+    live_vad_flags: list[bool] = []
 
     def fake_transcribe(
         self: streaming_models.DirectWhisperService,
         _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
     ) -> str:
+        if not _is_final_service(self):
+            live_vad_flags.append(vad)
         return (
             "Sessiz olmayan konuşma."
             if _is_final_service(self)
@@ -742,52 +829,102 @@ def test_stream_default_gate_accepts_quiet_desktop_microphone(
     assert partial["seq"] == 0
     assert partial["tentative"] == "Sessiz olmayan masaüstü konuşması"
     assert partial["rms"] == pytest.approx(0.002, abs=0.0001)
+    assert live_vad_flags == [True]
 
 
-def test_stream_final_pass_bypasses_whisper_vad_after_rms_gate(
+def test_stream_production_gate_suppresses_above_floor_pause_noise_with_vad(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Direct WS finalization must not let Whisper VAD cut quiet desktop speech."""
+    """Real pinned Silero rejects above-floor non-speech in both WS roles."""
     settings = Settings(
-        live_infer_interval_ms=5_000,
-        final_window_sec=5.0,
-        forced_commit_sec=0.1,
+        live_infer_interval_ms=1,
+        live_window_sec=2.0,
+        final_window_sec=6.0,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+        min_infer_sec=0.01,
+        speech_gate_profile="silero-balanced-v1",
+        stream_live_vad_filter=True,
+        stream_final_vad_filter=True,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    decode_calls: list[dict[str, object]] = []
+    _install_silero_decoder_stub(monkeypatch, decode_calls)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+        for frame in _audio_frames(_fixture_audio("above_floor_non_speech")):
+            ws.send_bytes(frame)
+            time.sleep(0.002)
+        time.sleep(0.05)
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        drained = ws.receive_json()
+
+    assert [eof_ack["type"], drained["type"]] == ["eof_ack", "drained"]
+    expected_vad = {
+        "threshold": 0.35,
+        "min_speech_duration_ms": 100,
+        "min_silence_duration_ms": 300,
+        "speech_pad_ms": 100,
+    }
+    assert {call["role"] for call in decode_calls} == {"live", "final"}
+    assert all(call["parameters"] == expected_vad for call in decode_calls)
+    assert all(
+        isinstance(call["input_samples"], int) and call["input_samples"] > 0
+        for call in decode_calls
+    )
+    assert all(call["decoder_samples"] == 0 for call in decode_calls)
+
+
+def test_stream_production_gate_keeps_quiet_speech_with_pinned_final_vad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real pinned Silero passes quiet speech to both WS decoder roles."""
+    settings = Settings(
+        live_infer_interval_ms=1,
+        live_window_sec=2.0,
+        final_window_sec=6.0,
+        forced_commit_sec=60.0,
         silence_commit_sec=5.0,
         silence_rms=0.0005,
         min_speech_rms=0.0005,
         min_infer_sec=0.01,
+        speech_gate_profile="silero-balanced-v1",
+        stream_live_vad_filter=True,
+        stream_final_vad_filter=True,
     )
     app.dependency_overrides[get_settings] = lambda: settings
-    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
-    final_vad_flags: list[bool] = []
-
-    def fake_transcribe(
-        self: streaming_models.DirectWhisperService,
-        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
-        vad: bool,
-    ) -> str:
-        if _is_final_service(self):
-            final_vad_flags.append(vad)
-            return "Sessiz konuşmanın tamamı korunuyor."
-        return ""
-
-    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+    decode_calls: list[dict[str, object]] = []
+    _install_silero_decoder_stub(monkeypatch, decode_calls)
 
     with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
             assert_valid(ws.receive_json())
 
-        for _ in range(4):
-            ws.send_bytes(_speech_frame_with_level(0.002))
-            time.sleep(0.005)
-        time.sleep(0.11)
-        ws.send_bytes(_speech_frame_with_level(0.002))
+        for frame in _audio_frames(_fixture_audio("quiet_speech")):
+            ws.send_bytes(frame)
+            time.sleep(0.002)
+        partial = ws.receive_json()
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
         final = ws.receive_json()
+        drained = ws.receive_json()
 
+    assert_valid(partial)
+    assert partial["type"] == "partial"
+    assert partial["tentative"] == "Sessiz masaustu konusmasi"
+    assert eof_ack["type"] == "eof_ack"
     assert_valid(final)
     assert final["type"] == "final"
-    assert final["text"] == "Sessiz konuşmanın tamamı korunuyor."
-    assert final_vad_flags == [False]
+    assert final["text"] == "Sessiz masaustu konusmasi"
+    assert drained["type"] == "drained"
+    assert {call["role"] for call in decode_calls} == {"live", "final"}
+    assert all(
+        isinstance(call["decoder_samples"], int) and call["decoder_samples"] > 0
+        for call in decode_calls
+    )
 
 
 def test_stream_keeps_receiving_audio_while_live_model_is_busy(
