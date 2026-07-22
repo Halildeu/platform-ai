@@ -195,10 +195,18 @@ function Assert-LiveSttModelTreeAcl {
 function Read-LiveSttModelPolicy {
     param([Parameter(Mandatory = $true)][string]$PolicyPath)
 
-    $raw = [IO.File]::ReadAllText($PolicyPath, (New-Object Text.UTF8Encoding($false, $true)))
-    if ($raw.Length -gt 32768 -or $raw.StartsWith([char]0xFEFF)) {
+    $bytes = [IO.File]::ReadAllBytes($PolicyPath)
+    $hasUtf8Bom = (
+        $bytes.Length -ge 3 -and
+        $bytes[0] -eq 0xEF -and
+        $bytes[1] -eq 0xBB -and
+        $bytes[2] -eq 0xBF
+    )
+    if ($bytes.Length -eq 0 -or $bytes.Length -gt 32768 -or $hasUtf8Bom) {
         throw "Live STT model policy encoding or size is invalid."
     }
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    $raw = $strictUtf8.GetString($bytes)
     $policy = $raw | ConvertFrom-Json -ErrorAction Stop
     if ($policy.schema -ne $script:LiveSttModelPolicySchema -or
         @($policy.models).Count -ne 2) {
