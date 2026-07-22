@@ -373,7 +373,7 @@ try {
         "Explicit public config rotation was not persisted."
     Assert-True (-not (Test-Path -LiteralPath "$configuredPath.bak")) `
         "A successful atomic rotation retained its temporary backup."
-    Assert-True ((Get-ChildItem -LiteralPath (Split-Path -Parent $configuredPath) `
+    Assert-True (@(Get-ChildItem -LiteralPath (Split-Path -Parent $configuredPath) `
         -Filter ".live-stt-*.tmp" -Force).Count -eq 0) `
         "A successful atomic rotation retained a staging file."
     Clear-LiveSttManagedProcessEnvironment
