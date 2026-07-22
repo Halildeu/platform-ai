@@ -15,6 +15,7 @@ import math
 import re
 import sys
 import time
+import unicodedata
 import wave
 from itertools import pairwise
 from pathlib import Path
@@ -35,7 +36,9 @@ DEFAULT_FRAME_MS = 200
 DEFAULT_TAIL_SILENCE_SEC = 1.2
 DEFAULT_TIMEOUT_SEC = 90.0
 DEFAULT_FINAL_WAIT_SEC = 90.0
-DEFAULT_MIN_FINAL_WORD_COVERAGE = 0.5
+DEFAULT_MIN_FINAL_WORD_COVERAGE = 0.8
+DEFAULT_MIN_REFERENCE_TOKEN_COVERAGE = 0.8
+DEFAULT_MAX_WORD_ERROR_RATE = 0.25
 DEFAULT_MIN_PARTIAL_EVENTS = 1
 DEFAULT_MIN_FINAL_EVENTS = 1
 DEFAULT_MAX_TRANSCRIPT_GAP_MS = 6000
@@ -129,11 +132,16 @@ def validate_transcript_event(
 ) -> None:
     event_type = event.get("type")
     if event_type == "partial":
+        partial_text = (
+            f"{event.get('confirmed', '')} {event.get('tentative', '')}".strip()
+        )
         valid = (
             set(event) == PARTIAL_EVENT_KEYS
             and _is_non_negative_int(event.get("seq"))
             and isinstance(event.get("confirmed"), str)
             and isinstance(event.get("tentative"), str)
+            and bool(_normalized_words(partial_text))
+            and not _is_hallucination(partial_text)
             and _is_non_negative_int(event.get("elapsed_ms"))
             and _is_non_negative_number(event.get("rms"))
             and isinstance(event.get("source"), str)
@@ -171,13 +179,71 @@ def validate_transcript_event(
 
 
 def _word_count(text: str) -> int:
-    return len(text.split())
+    return len(_normalized_words(text))
 
 
 def _safe_ratio(numerator: int, denominator: int | None) -> float | None:
     if denominator is None or denominator <= 0:
         return None
     return round(numerator / denominator, 3)
+
+
+def _normalized_words(text: str) -> list[str]:
+    folded = unicodedata.normalize("NFKD", text.casefold()).replace("i\u0307", "i")
+    without_marks = "".join(char for char in folded if not unicodedata.combining(char))
+    return re.findall(r"[a-z0-9çğıöşü]+", without_marks)
+
+
+def _edit_distance(reference: list[str], candidate: list[str]) -> int:
+    previous = list(range(len(candidate) + 1))
+    for ref_index, ref_word in enumerate(reference, start=1):
+        current = [ref_index]
+        for candidate_index, candidate_word in enumerate(candidate, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[candidate_index] + 1,
+                    previous[candidate_index - 1] + (ref_word != candidate_word),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _lcs_length(reference: list[str], candidate: list[str]) -> int:
+    previous = [0] * (len(candidate) + 1)
+    for ref_word in reference:
+        current = [0]
+        for candidate_index, candidate_word in enumerate(candidate, start=1):
+            if ref_word == candidate_word:
+                current.append(previous[candidate_index - 1] + 1)
+            else:
+                current.append(max(previous[candidate_index], current[-1]))
+        previous = current
+    return previous[-1]
+
+
+def reference_transcript_quality(
+    reference_path: Path | None,
+    transcript: str | None,
+) -> dict[str, Any]:
+    """Return content-based scores without retaining transcript or reference text."""
+    if reference_path is None or transcript is None:
+        return {"reference_token_coverage": None, "word_error_rate": None}
+    reference_words = _normalized_words(reference_path.read_text(encoding="utf-8"))
+    candidate_words = _normalized_words(transcript)
+    if not reference_words:
+        return {"reference_token_coverage": None, "word_error_rate": None}
+    return {
+        "reference_token_coverage": round(
+            _lcs_length(reference_words, candidate_words) / len(reference_words),
+            3,
+        ),
+        "word_error_rate": round(
+            _edit_distance(reference_words, candidate_words) / len(reference_words),
+            3,
+        ),
+    }
 
 
 def _max_event_gap_ms(events: list[dict[str, Any]]) -> int | None:
@@ -310,6 +376,9 @@ def build_summary(
     min_final_events: int = DEFAULT_MIN_FINAL_EVENTS,
     max_transcript_gap_ms: int | None = DEFAULT_MAX_TRANSCRIPT_GAP_MS,
     streamed_samples: int | None = None,
+    final_transcript_text: str | None = None,
+    min_reference_token_coverage: float = DEFAULT_MIN_REFERENCE_TOKEN_COVERAGE,
+    max_word_error_rate: float = DEFAULT_MAX_WORD_ERROR_RATE,
 ) -> dict[str, Any]:
     final_events = [event for event in transcript_events if event["type"] == "final"]
     partial_events = [event for event in transcript_events if event["type"] == "partial"]
@@ -318,6 +387,9 @@ def build_summary(
     reference = reference_metadata(reference_text_path)
     reference_words = reference["words"] if isinstance(reference["words"], int) else None
     final_word_coverage = _safe_ratio(final_word_count, reference_words)
+    content_quality = reference_transcript_quality(reference_text_path, final_transcript_text)
+    reference_token_coverage = content_quality["reference_token_coverage"]
+    word_error_rate = content_quality["word_error_rate"]
     max_gap_ms = _max_event_gap_ms(transcript_events)
     first_partial_at_ms = partial_events[0]["received_at_ms"] if partial_events else None
     first_final_at_ms = final_events[0]["received_at_ms"] if final_events else None
@@ -339,6 +411,15 @@ def build_summary(
         failures.append("final_hallucination_detected")
     if final_word_coverage is not None and final_word_coverage < min_final_word_coverage:
         failures.append("final_word_coverage_below_min")
+    if reference_words is not None and reference_token_coverage is None:
+        failures.append("reference_quality_unavailable")
+    elif (
+        reference_token_coverage is not None
+        and reference_token_coverage < min_reference_token_coverage
+    ):
+        failures.append("reference_token_coverage_below_min")
+    if word_error_rate is not None and word_error_rate > max_word_error_rate:
+        failures.append("word_error_rate_above_max")
     if (
         max_transcript_gap_ms is not None
         and max_gap_ms is not None
@@ -380,11 +461,15 @@ def build_summary(
             "final_words": final_word_count,
             "reference_words": reference_words,
             "final_word_coverage": final_word_coverage,
+            "reference_token_coverage": reference_token_coverage,
+            "word_error_rate": word_error_rate,
         },
         "quality_gate": {
             "min_final_events": min_final_events,
             "min_partial_events": min_partial_events,
             "min_final_word_coverage": min_final_word_coverage,
+            "min_reference_token_coverage": min_reference_token_coverage,
+            "max_word_error_rate": max_word_error_rate,
             "max_transcript_gap_ms": max_transcript_gap_ms,
             "failures": failures,
         },
@@ -419,6 +504,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     transcript_events: list[dict[str, Any]] = []
     terminal_events: list[str] = []
     errors: list[str] = []
+    final_transcript_parts: list[str] = []
     ready_at: float | None = None
     samples_sent = 0
     last_final_seq: int | None = None
@@ -467,6 +553,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                         )
                         transcript_events.append(redacted_transcript_event(event, received_at_ms))
                         if event_type == "final":
+                            final_transcript_parts.append(str(event["text"]))
                             last_final_seq = int(cast(int, event["seq"]))
                             last_final_source_end = int(cast(int, event["source_end_sample"]))
                     elif event_type == "eof_ack":
@@ -539,6 +626,9 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             args.max_transcript_gap_ms if args.max_transcript_gap_ms > 0 else None
         ),
         streamed_samples=samples_sent,
+        final_transcript_text=" ".join(final_transcript_parts),
+        min_reference_token_coverage=args.min_reference_token_coverage,
+        max_word_error_rate=args.max_word_error_rate,
     )
 
 
@@ -568,6 +658,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--min-partial-events", type=int, default=DEFAULT_MIN_PARTIAL_EVENTS)
     parser.add_argument("--min-final-events", type=int, default=DEFAULT_MIN_FINAL_EVENTS)
+    parser.add_argument(
+        "--min-reference-token-coverage",
+        type=float,
+        default=DEFAULT_MIN_REFERENCE_TOKEN_COVERAGE,
+    )
+    parser.add_argument(
+        "--max-word-error-rate",
+        type=float,
+        default=DEFAULT_MAX_WORD_ERROR_RATE,
+    )
     parser.add_argument(
         "--max-transcript-gap-ms",
         type=int,

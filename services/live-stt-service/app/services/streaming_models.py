@@ -11,13 +11,17 @@ time, so CPU/CI environments are unaffected unless `/ws/stream` is used.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import multiprocessing as mp
+import os
 import queue
+import stat
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -37,6 +41,179 @@ logger = logging.getLogger(__name__)
 _DEFAULT_NO_SPEECH_THRESHOLD = 0.75
 _DEFAULT_LOG_PROB_THRESHOLD = -1.0
 _DEFAULT_COMPRESSION_RATIO_THRESHOLD = 2.4
+_MODEL_DIRECTORY_HASH_DOMAIN = b"platform-live-stt-model-directory-v1\0"
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_link_or_reparse(file_stat: os.stat_result) -> bool:
+    """Detect Unix links and Windows reparse points without following them."""
+    attributes = int(getattr(file_stat, "st_file_attributes", 0))
+    return stat.S_ISLNK(file_stat.st_mode) or bool(
+        attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _stable_stat_identity(file_stat: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _assert_path_components_are_directories(path: Path) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        current_stat = current.lstat()
+        if _is_link_or_reparse(current_stat):
+            raise ValueError("pinned streaming model path contains a link or reparse point")
+        if current != path and not stat.S_ISDIR(current_stat.st_mode):
+            raise ValueError("pinned streaming model path contains a non-directory component")
+
+
+def _regular_model_files(root: Path) -> list[tuple[str, Path, os.stat_result]]:
+    files: list[tuple[str, Path, os.stat_result]] = []
+
+    def visit(directory: Path, relative_directory: Path) -> None:
+        before = directory.lstat()
+        if _is_link_or_reparse(before) or not stat.S_ISDIR(before.st_mode):
+            raise ValueError("pinned streaming model directory contains a link or reparse point")
+        with os.scandir(directory) as iterator:
+            entries = sorted(iterator, key=lambda item: item.name)
+        for entry in entries:
+            entry_path = Path(entry.path)
+            entry_stat = entry.stat(follow_symlinks=False)
+            if _is_link_or_reparse(entry_stat):
+                raise ValueError(
+                    "pinned streaming model directory contains a link or reparse point"
+                )
+            relative_path = relative_directory / entry.name
+            if stat.S_ISDIR(entry_stat.st_mode):
+                visit(entry_path, relative_path)
+            elif stat.S_ISREG(entry_stat.st_mode):
+                files.append((relative_path.as_posix(), entry_path, entry_stat))
+            else:
+                raise ValueError("pinned streaming model directory contains a non-regular file")
+        after = directory.lstat()
+        if _is_link_or_reparse(after) or _stable_stat_identity(before) != _stable_stat_identity(
+            after
+        ):
+            raise ValueError("pinned streaming model directory mutated during verification")
+
+    visit(root, Path())
+    return sorted(files, key=lambda item: item[0])
+
+
+def _stream_model_directory_sha256(model_path: str | Path) -> str:
+    """Hash a stable manifest of every regular file under a link-free model root."""
+    root = Path(os.path.abspath(os.fspath(model_path)))
+    _assert_path_components_are_directories(root)
+    if not root.is_dir():
+        raise FileNotFoundError("pinned streaming model directory does not exist")
+
+    digest = hashlib.sha256(_MODEL_DIRECTORY_HASH_DOMAIN)
+    for relative_path, file_path, listed_stat in _regular_model_files(root):
+        encoded_path = relative_path.encode("utf-8")
+        digest.update(len(encoded_path).to_bytes(8, "big"))
+        digest.update(encoded_path)
+        digest.update(listed_stat.st_size.to_bytes(8, "big"))
+
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(file_path, flags)
+        try:
+            opened_stat = os.fstat(descriptor)
+            if _is_link_or_reparse(opened_stat) or not stat.S_ISREG(opened_stat.st_mode):
+                raise ValueError("pinned streaming model manifest member is not a regular file")
+            if _stable_stat_identity(listed_stat) != _stable_stat_identity(opened_stat):
+                raise ValueError("pinned streaming model file mutated during verification")
+            with os.fdopen(descriptor, "rb", closefd=False) as model_file:
+                for block in iter(lambda: model_file.read(1024 * 1024), b""):
+                    digest.update(block)
+            after_read = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
+        path_after_read = file_path.lstat()
+        expected_identity = _stable_stat_identity(opened_stat)
+        if (
+            _is_link_or_reparse(path_after_read)
+            or expected_identity != _stable_stat_identity(after_read)
+            or expected_identity != _stable_stat_identity(path_after_read)
+        ):
+            raise ValueError("pinned streaming model file mutated during verification")
+    return digest.hexdigest()
+
+
+def _verify_stream_model_directory(
+    model_path: str | Path,
+    expected_model_sha256: str,
+    expected_tree_sha256: str,
+) -> Path:
+    root = Path(os.path.abspath(os.fspath(model_path)))
+    tree_digest = _stream_model_directory_sha256(root)
+    model_bin = root / "model.bin"
+    if not model_bin.is_file():
+        raise FileNotFoundError("pinned streaming model directory does not contain model.bin")
+    expected_model = expected_model_sha256.removeprefix("sha256:").lower()
+    if expected_model and _sha256_file(model_bin) != expected_model:
+        raise ValueError("pinned streaming model SHA-256 mismatch")
+    expected_tree = expected_tree_sha256.removeprefix("sha256:").lower()
+    if expected_tree and tree_digest != expected_tree:
+        raise ValueError("pinned streaming model tree SHA-256 mismatch")
+    return root
+
+
+def _sha256_file(path: Path) -> str:
+    _assert_path_components_are_directories(path.parent)
+    listed_stat = path.lstat()
+    if _is_link_or_reparse(listed_stat) or not stat.S_ISREG(listed_stat.st_mode):
+        raise ValueError("pinned streaming model manifest member is not a regular file")
+
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened_stat = os.fstat(descriptor)
+        if _stable_stat_identity(listed_stat) != _stable_stat_identity(opened_stat):
+            raise ValueError("pinned streaming model file mutated during verification")
+        with os.fdopen(descriptor, "rb", closefd=False) as model_file:
+            for block in iter(lambda: model_file.read(1024 * 1024), b""):
+                digest.update(block)
+        after_read = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+    path_after_read = path.lstat()
+    expected_identity = _stable_stat_identity(opened_stat)
+    if (
+        _is_link_or_reparse(path_after_read)
+        or expected_identity != _stable_stat_identity(after_read)
+        or expected_identity != _stable_stat_identity(path_after_read)
+    ):
+        raise ValueError("pinned streaming model file mutated during verification")
+    return digest.hexdigest()
+
+
+def _model_tree_sha256(root: Path) -> str:
+    """Backward-compatible name for the full, link-safe directory manifest hash."""
+    return _stream_model_directory_sha256(root)
+
+
+def _resolve_stream_model_source(
+    model_name: str,
+    model_path: str | None,
+    model_sha256: str,
+    model_tree_sha256: str = "",
+) -> str:
+    """Resolve and verify the exact streaming model bytes before GPU allocation."""
+    if model_path is None:
+        return model_name
+    return str(
+        _verify_stream_model_directory(model_path, model_sha256, model_tree_sha256)
+    )
 
 
 def _finite_float(value: object) -> float | None:
@@ -73,6 +250,9 @@ class DirectWhisperService:
         beam_size: int,
         role: str = "stream",
         *,
+        model_path: str | None = None,
+        model_sha256: str = "",
+        model_tree_sha256: str = "",
         no_speech_threshold: float = _DEFAULT_NO_SPEECH_THRESHOLD,
         log_prob_threshold: float = _DEFAULT_LOG_PROB_THRESHOLD,
         compression_ratio_threshold: float = _DEFAULT_COMPRESSION_RATIO_THRESHOLD,
@@ -84,6 +264,9 @@ class DirectWhisperService:
         self.language = language
         self.beam_size = beam_size
         self.role = role
+        self.model_path = model_path
+        self.model_sha256 = model_sha256
+        self.model_tree_sha256 = model_tree_sha256
         self.no_speech_threshold = no_speech_threshold
         self.log_prob_threshold = log_prob_threshold
         self.compression_ratio_threshold = compression_ratio_threshold
@@ -91,8 +274,14 @@ class DirectWhisperService:
         self._model: object | None = None
         self._lock = threading.Lock()
 
-    def ensure_model(self) -> None:
+    def ensure_model(
+        self,
+        *,
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
         """Load the model now (first call pays download/VRAM cost)."""
+        del deadline, cleanup_deadline  # Inline backend is forbidden in staging/production.
         if self._model is None:
             with self._lock:
                 if self._model is None:
@@ -107,11 +296,27 @@ class DirectWhisperService:
                             "beam_size": self.beam_size,
                         },
                     )
-                    self._model = WhisperModel(
+                    model_source = _resolve_stream_model_source(
                         self.model_name,
+                        self.model_path,
+                        self.model_sha256,
+                        self.model_tree_sha256,
+                    )
+                    loaded_model = WhisperModel(
+                        model_source,
                         device=self.device,
                         compute_type=self.compute_type,
                     )
+                    if self.model_path is not None:
+                        # Recheck after config/tokenizer/model consumption. A
+                        # mutation in the verification/load window must never
+                        # publish a ready model generation.
+                        _verify_stream_model_directory(
+                            model_source,
+                            self.model_sha256,
+                            self.model_tree_sha256,
+                        )
+                    self._model = loaded_model
 
     @property
     def model_loaded(self) -> bool:
@@ -158,6 +363,9 @@ def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_q
         cast(str, config["language"]),
         cast(int, config["beam_size"]),
         role=cast(str, config["role"]),
+        model_path=cast(str | None, config["model_path"]),
+        model_sha256=cast(str, config["model_sha256"]),
+        model_tree_sha256=cast(str, config["model_tree_sha256"]),
         no_speech_threshold=cast(float, config["no_speech_threshold"]),
         log_prob_threshold=cast(float, config["log_prob_threshold"]),
         compression_ratio_threshold=cast(float, config["compression_ratio_threshold"]),
@@ -193,13 +401,26 @@ class _SupervisedWhisperService:
         is_final = role == "final"
         self._config: dict[str, object] = {
             "role": role,
-            "model_name": settings.final_model_name if is_final else settings.live_model_name,
+            "model_name": (settings.final_model_name if is_final else settings.live_model_name),
+            "model_path": (
+                str(settings.final_model_path if is_final else settings.live_model_path)
+                if (settings.final_model_path if is_final else settings.live_model_path) is not None
+                else None
+            ),
+            "model_sha256": (
+                settings.final_model_sha256 if is_final else settings.live_model_sha256
+            ),
+            "model_tree_sha256": (
+                settings.final_model_tree_sha256
+                if is_final
+                else settings.live_model_tree_sha256
+            ),
             "device": settings.final_device if is_final else settings.live_device,
             "compute_type": (
                 settings.final_compute_type if is_final else settings.live_compute_type
             ),
             "language": settings.language,
-            "beam_size": settings.final_beam_size if is_final else settings.live_beam_size,
+            "beam_size": (settings.final_beam_size if is_final else settings.live_beam_size),
             "no_speech_threshold": settings.no_speech_threshold,
             "log_prob_threshold": settings.log_prob_threshold,
             "compression_ratio_threshold": settings.compression_ratio_threshold,
@@ -259,6 +480,10 @@ class _SupervisedWhisperService:
         task_queue = self._task_queue
         result_queue = self._result_queue
         process = self._process
+        # Invalidate readiness before touching the child. Even an unkillable
+        # process must not leave the accepted stream's generation valid.
+        self._model_loaded = False
+        self._generation = getattr(self, "_generation", 0) + 1
 
         def join_timeout() -> float:
             if deadline is None:
@@ -276,7 +501,6 @@ class _SupervisedWhisperService:
                 # still alive would make process/VRAM use unbounded. Keep the
                 # supervisor permanently fail-closed until the service is
                 # restarted by its orchestrator.
-                self._model_loaded = False
                 self._restart_blocked = True
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker could not be stopped safely"
@@ -284,8 +508,11 @@ class _SupervisedWhisperService:
         self._close_queue(task_queue)
         self._close_queue(result_queue)
         self._process = None
-        self._model_loaded = False
         if restart and not self._is_closing():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise WorkerTimeoutError(
+                    f"streaming {getattr(self, 'role', 'final')} worker restart exceeded timeout"
+                )
             self._start()
 
     def _invoke_locked(
@@ -298,7 +525,9 @@ class _SupervisedWhisperService:
         restart_on_failure: bool = True,
         required_generation: int | None = None,
         require_loaded: bool = False,
+        cleanup_deadline: float | None = None,
     ) -> str:
+        effective_cleanup_deadline = cleanup_deadline if operation == "load" else None
         if self._is_closing():
             raise WorkerCrashedError(
                 f"streaming {getattr(self, 'role', 'final')} worker is shutting down"
@@ -320,7 +549,7 @@ class _SupervisedWhisperService:
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker is not alive"
                 )
-            self._terminate_and_restart()
+            self._terminate_and_restart(deadline=effective_cleanup_deadline)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise WorkerTimeoutError(
@@ -338,7 +567,10 @@ class _SupervisedWhisperService:
                 timeout=remaining,
             )
         except queue.Full as exc:
-            self._terminate_and_restart(restart=restart_on_failure)
+            self._terminate_and_restart(
+                restart=restart_on_failure,
+                deadline=effective_cleanup_deadline,
+            )
             raise WorkerTimeoutError(
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
             ) from exc
@@ -348,13 +580,19 @@ class _SupervisedWhisperService:
                     f"streaming {getattr(self, 'role', 'final')} worker is shutting down"
                 )
             if not self._is_alive():
-                self._terminate_and_restart(restart=restart_on_failure)
+                self._terminate_and_restart(
+                    restart=restart_on_failure,
+                    deadline=effective_cleanup_deadline,
+                )
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker exited before response"
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._terminate_and_restart(restart=restart_on_failure)
+                self._terminate_and_restart(
+                    restart=restart_on_failure,
+                    deadline=effective_cleanup_deadline,
+                )
                 raise WorkerTimeoutError(
                     f"streaming {getattr(self, 'role', 'final')} worker exceeded timeout"
                 )
@@ -365,7 +603,16 @@ class _SupervisedWhisperService:
             if response.get("job_id") != job_id:
                 continue
             if not response.get("ok"):
-                raise RuntimeError(str(response.get("error_class", "RuntimeError")))
+                error = RuntimeError(str(response.get("error_class", "RuntimeError")))
+                # Any native/CUDA failure can poison allocator or model state.
+                # Invalidate this generation before surfacing the error. An
+                # accepted stream passes restart_on_failure=False, so it never
+                # retries or lazy-loads in the replacement generation.
+                self._terminate_and_restart(
+                    restart=restart_on_failure,
+                    deadline=effective_cleanup_deadline,
+                )
+                raise error
             text = str(response.get("text", ""))
             if operation == "load":
                 self._model_loaded = True
@@ -378,19 +625,39 @@ class _SupervisedWhisperService:
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
             )
 
-    def _ensure_model_locked(self) -> None:
+    def _ensure_model_locked(
+        self,
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
         if self._model_loaded and self._is_alive():
             return
+        effective_deadline = deadline
+        if effective_deadline is None:
+            effective_deadline = time.monotonic() + self._load_timeout_sec
         self._invoke_locked(
             "load",
-            deadline=time.monotonic() + self._load_timeout_sec,
+            deadline=effective_deadline,
+            cleanup_deadline=cleanup_deadline,
         )
 
-    def ensure_model(self) -> None:
-        deadline = time.monotonic() + self._load_timeout_sec
-        self._acquire_call_lock(deadline)
+    def ensure_model(
+        self,
+        *,
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
+        effective_deadline = deadline
+        if effective_deadline is None:
+            effective_deadline = time.monotonic() + self._load_timeout_sec
+        effective_cleanup_deadline = cleanup_deadline
+        if effective_cleanup_deadline is None:
+            effective_cleanup_deadline = effective_deadline + (2 * self._kill_grace_sec)
+        if effective_cleanup_deadline < effective_deadline:
+            raise ValueError("cleanup deadline must not precede operation deadline")
+        self._acquire_call_lock(effective_deadline)
         try:
-            self._ensure_model_locked()
+            self._ensure_model_locked(effective_deadline, effective_cleanup_deadline)
         finally:
             self._call_lock.release()
 
@@ -421,7 +688,7 @@ class _SupervisedWhisperService:
         try:
             # Readiness is rechecked after acquiring the shared single-flight lock.
             # A preceding timeout may have recycled the process while this call waited.
-            self._ensure_model_locked()
+            self._ensure_model_locked(queue_deadline)
             ready_generation = self._generation
             return self._invoke_locked(
                 "transcribe",
@@ -440,12 +707,11 @@ class _SupervisedWhisperService:
         vad: bool,
         expected_generation: int,
     ) -> str:
-        """Decode only with the worker that was proven ready for this stream.
+        """Decode only with the worker generation proven ready for this stream.
 
-        EOF must never hide a cold model reload behind the terminal timeout
-        advertised during the ready handshake. If the supervised worker was
-        recycled after readiness, this connection fails closed and a new
-        connection performs model loading before it can receive audio.
+        No inference inside an accepted connection may hide a cold model reload.
+        If the supervised worker is recycled after readiness, that connection
+        fails closed and lifecycle recovery must make a later connection ready.
         """
         contiguous = np.ascontiguousarray(audio, dtype=np.float32)
         deadline = time.monotonic() + self._timeout_sec
@@ -508,6 +774,10 @@ def _named(
     language: str,
     beam_size: int,
     *,
+    model_revision: str,
+    model_sha256: str,
+    model_tree_sha256: str,
+    model_path: Path | None,
     no_speech_threshold: float,
     log_prob_threshold: float,
     compression_ratio_threshold: float,
@@ -519,6 +789,10 @@ def _named(
         [
             key,
             model_name,
+            model_revision,
+            model_sha256,
+            model_tree_sha256,
+            str(model_path) if model_path is not None else "",
             device,
             compute_type,
             language,
@@ -538,6 +812,9 @@ def _named(
                 language,
                 beam_size,
                 role=key,
+                model_path=str(model_path) if model_path is not None else None,
+                model_sha256=model_sha256,
+                model_tree_sha256=model_tree_sha256,
                 no_speech_threshold=no_speech_threshold,
                 log_prob_threshold=log_prob_threshold,
                 compression_ratio_threshold=compression_ratio_threshold,
@@ -554,6 +831,10 @@ def get_live_service(
         service_key = "\u0000".join(
             [
                 settings.live_model_name,
+                settings.live_model_revision,
+                settings.live_model_sha256,
+                settings.live_model_tree_sha256,
+                (str(settings.live_model_path) if settings.live_model_path is not None else ""),
                 settings.live_device,
                 settings.live_compute_type,
                 settings.language,
@@ -573,6 +854,10 @@ def get_live_service(
         settings.live_compute_type,
         settings.language,
         settings.live_beam_size,
+        model_revision=settings.live_model_revision,
+        model_sha256=settings.live_model_sha256,
+        model_tree_sha256=settings.live_model_tree_sha256,
+        model_path=settings.live_model_path,
         no_speech_threshold=settings.no_speech_threshold,
         log_prob_threshold=settings.log_prob_threshold,
         compression_ratio_threshold=settings.compression_ratio_threshold,
@@ -588,6 +873,10 @@ def get_final_service(
         service_key = "\u0000".join(
             [
                 settings.final_model_name,
+                settings.final_model_revision,
+                settings.final_model_sha256,
+                settings.final_model_tree_sha256,
+                (str(settings.final_model_path) if settings.final_model_path is not None else ""),
                 settings.final_device,
                 settings.final_compute_type,
                 settings.language,
@@ -607,6 +896,10 @@ def get_final_service(
         settings.final_compute_type,
         settings.language,
         settings.final_beam_size,
+        model_revision=settings.final_model_revision,
+        model_sha256=settings.final_model_sha256,
+        model_tree_sha256=settings.final_model_tree_sha256,
+        model_path=settings.final_model_path,
         no_speech_threshold=settings.no_speech_threshold,
         log_prob_threshold=settings.log_prob_threshold,
         compression_ratio_threshold=settings.compression_ratio_threshold,
@@ -616,14 +909,20 @@ def get_final_service(
 
 def streaming_services_healthy() -> bool:
     with _services_lock:
-        supervised = [*_supervised_live_services.values(), *_supervised_final_services.values()]
-        return all(service.healthy for service in supervised)
+        supervised = [
+            *_supervised_live_services.values(),
+            *_supervised_final_services.values(),
+        ]
+        return all(service.healthy and service.model_loaded for service in supervised)
 
 
 def shutdown_streaming_services(*, timeout_sec: float = 5.0) -> None:
     deadline = time.monotonic() + timeout_sec
     with _services_lock:
-        supervised = [*_supervised_live_services.values(), *_supervised_final_services.values()]
+        supervised = [
+            *_supervised_live_services.values(),
+            *_supervised_final_services.values(),
+        ]
     closed: list[_SupervisedWhisperService] = []
     failures: list[Exception] = []
     for index, service in enumerate(supervised):

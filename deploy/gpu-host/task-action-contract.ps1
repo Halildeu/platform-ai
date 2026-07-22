@@ -96,6 +96,29 @@ function ConvertTo-GpuHostWindowsArgument {
     return $builder.ToString()
 }
 
+function Get-GpuHostWindowsPowerShellPath {
+    $systemRoot = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = "C:\Windows"
+    }
+    return Join-Path $systemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+}
+
+function Test-GpuHostSameLocalPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+
+    try {
+        $leftFull = [IO.Path]::GetFullPath($Left).TrimEnd('\')
+        $rightFull = [IO.Path]::GetFullPath($Right).TrimEnd('\')
+        return $leftFull.Equals($rightFull, [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
 function Get-GpuHostTaskSpec {
     param([Parameter(Mandatory = $true)][string]$TaskName)
 
@@ -170,12 +193,14 @@ function Get-GpuHostTaskActionContract {
         [Parameter(Mandatory = $true)][string]$TaskName,
         [Parameter(Mandatory = $true)][string]$Execute,
         [Parameter(Mandatory = $true)][string]$Arguments,
-        [string]$WorkingDirectory = ''
+        [string]$WorkingDirectory = '',
+        [switch]$AllowBarePowerShell
     )
 
     $result = [ordered]@{
         Valid = $false
         RepoClass = 'other'
+        RepoRoot = ''
         CanonicalArguments = ''
         PythonExe = ''
         HfHome = ''
@@ -183,12 +208,15 @@ function Get-GpuHostTaskActionContract {
     }
     try {
         $spec = Get-GpuHostTaskSpec -TaskName $TaskName
-        $trustedPowerShell = @('powershell.exe')
-        if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
-            $trustedPowerShell += (Join-Path $env:SystemRoot `
-                'System32\WindowsPowerShell\v1.0\powershell.exe')
+        $trustedPowerShell = Get-GpuHostWindowsPowerShellPath
+        $absolutePowerShell = $trustedPowerShell.Equals(
+            $Execute,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+        if (-not $absolutePowerShell -and
+            (-not $AllowBarePowerShell -or $Execute -ine "powershell.exe")) {
+            return $result
         }
-        if ($trustedPowerShell -inotcontains $Execute) { return $result }
         if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) { return $result }
 
         $tokens = @([PlatformAi.NativeCommandLine]::Split(
@@ -207,16 +235,18 @@ function Get-GpuHostTaskActionContract {
             return $result
         }
 
-        $canonicalRoot = 'C:\platform-ai'
         $legacyRoot = 'C:\Users\denetimpc\platform-ai'
-        $canonicalScript = Join-Path (Join-Path $canonicalRoot 'deploy\gpu-host') $spec.Script
-        $legacyScript = Join-Path (Join-Path $legacyRoot 'deploy\gpu-host') $spec.Script
-        if ($tokens[5] -ieq $canonicalScript -and $tokens[7] -ieq $canonicalRoot) {
-            $result.RepoClass = 'canonical-repo'
-        } elseif ($tokens[5] -ieq $legacyScript -and $tokens[7] -ieq $legacyRoot) {
+        $parsedRoot = $tokens[7]
+        if (-not (Test-GpuHostValueSafe -Value $parsedRoot)) { return $result }
+        $parsedRoot = [IO.Path]::GetFullPath($parsedRoot).TrimEnd('\')
+        $expectedScript = Join-Path (Join-Path $parsedRoot 'deploy\gpu-host') $spec.Script
+        if (-not (Test-GpuHostSameLocalPath -Left $tokens[5] -Right $expectedScript)) {
+            return $result
+        }
+        if (Test-GpuHostSameLocalPath -Left $parsedRoot -Right $legacyRoot) {
             $result.RepoClass = 'legacy-user-repo'
         } else {
-            return $result
+            $result.RepoClass = 'canonical-repo'
         }
 
         $pythonExe = $tokens[9]
@@ -242,10 +272,15 @@ function Get-GpuHostTaskActionContract {
         }
         if ($index -ne $tokens.Count) { return $result }
 
+        $canonicalActionRoot = $parsedRoot
+        if ($result.RepoClass -eq 'legacy-user-repo') {
+            $canonicalActionRoot = 'C:\platform-ai'
+        }
         $result.CanonicalArguments = New-GpuHostTaskActionArguments `
-            -TaskName $TaskName -RepoRoot $canonicalRoot -PythonExe $pythonExe `
+            -TaskName $TaskName -RepoRoot $canonicalActionRoot -PythonExe $pythonExe `
             -HfHome $hfHome -CudaBin $cudaBin
         $result.PythonExe = $pythonExe
+        $result.RepoRoot = $parsedRoot
         $result.HfHome = $hfHome
         $result.CudaBin = $cudaBin
         $result.Valid = $true

@@ -157,6 +157,8 @@ function Register-TestTask {
     $trigger = $definition.Triggers.Create(1)
     $trigger.StartBoundary = "2099-01-01T00:00:00"
     $action = $definition.Actions.Create(0)
+    # Legacy fixture: migration may recognize this bare executable only long
+    # enough to rewrite it to the absolute trusted Windows PowerShell path.
     $action.Path = "powershell.exe"
     $action.Arguments = $Arguments
     $action.WorkingDirectory = ""
@@ -217,9 +219,12 @@ function Get-RegisteredContract {
 
     $task = $Folder.GetTask($TaskName)
     $action = $task.Definition.Actions.Item(1)
+    # The fixture intentionally models the legacy bare powershell.exe action.
+    # Keep this exception scoped to migration readback; deployment validation
+    # continues to require the absolute trusted Windows PowerShell path.
     return Get-GpuHostTaskActionContract -TaskName $TaskName `
         -Execute ([string]$action.Path) -Arguments ([string]$action.Arguments) `
-        -WorkingDirectory ([string]$action.WorkingDirectory)
+        -WorkingDirectory ([string]$action.WorkingDirectory) -AllowBarePowerShell
 }
 
 function Set-RegisteredActionArguments {
@@ -231,7 +236,7 @@ function Set-RegisteredActionArguments {
 
     $task = $Folder.GetTask($TaskName)
     $definition = $task.Definition
-    $definition.Actions.Item(1).Path = "powershell.exe"
+    $definition.Actions.Item(1).Path = Get-GpuHostWindowsPowerShellPath
     $definition.Actions.Item(1).Arguments = $Arguments
     $definition.Actions.Item(1).WorkingDirectory = ""
     $sddl = [string]$task.GetSecurityDescriptor(15)
@@ -427,15 +432,45 @@ $child.WaitForExit()
         Assert-True $contract.Valid "Exact legacy task action was rejected."
         Assert-True ($contract.RepoClass -eq "legacy-user-repo") `
             "Legacy action was classified incorrectly."
+        Assert-True ($contract.CanonicalArguments -eq `
+            (Get-ActionArguments -TaskName $case.Name -RepoRoot $canonicalRoot)) `
+            "Legacy action did not target the migration root."
     }
+    $customRoot = "D:\platform-ai"
+    $customArguments = Get-ActionArguments -TaskName "platform-ai-live-stt" `
+        -RepoRoot $customRoot
+    $customContract = Get-GpuHostTaskActionContract `
+        -TaskName "platform-ai-live-stt" `
+        -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -Arguments $customArguments
+    Assert-True $customContract.Valid `
+        "An installer-supported absolute repository root was rejected."
+    Assert-True ($customContract.RepoClass -eq "canonical-repo") `
+        "A non-legacy repository root was classified incorrectly."
+    Assert-True ($customContract.RepoRoot -eq $customRoot) `
+        "The parsed custom repository root was not exposed."
+    Assert-True ($customContract.CanonicalArguments -eq $customArguments) `
+        "Canonical arguments were not generated from the parsed repository root."
+
+    $mismatchedRootArguments = $customArguments.Replace(
+        "-RepoRoot D:\platform-ai -PythonExe",
+        "-RepoRoot C:\platform-ai -PythonExe"
+    )
+    Assert-ContractInvalid -TaskName "platform-ai-live-stt" `
+        -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -Arguments $mismatchedRootArguments
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "cmd.exe" `
         -Arguments $liveLegacy
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" `
         -Execute "C:\untrusted\powershell.exe" -Arguments $liveLegacy
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
         -Arguments ($liveLegacy + " -Unexpected value")
+    $mismatchedLegacyArguments = $liveLegacy.Replace(
+        "-RepoRoot $legacyRoot -PythonExe",
+        "-RepoRoot C:\other-repo -PythonExe"
+    )
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
-        -Arguments ($liveLegacy.Replace($legacyRoot, "C:\other-repo"))
+        -Arguments $mismatchedLegacyArguments
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
         -Arguments $liveLegacy -WorkingDirectory $legacyRoot
 

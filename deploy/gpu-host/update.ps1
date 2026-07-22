@@ -20,10 +20,13 @@
 
   Exit codes: 0 success; 2 guard/no-mutation failure; 3 source pin landed but
   scheduled-task restart failed; 4 automatic source restoration or rollback
-  mutation failed. Warmup remains best-effort and transcript-free.
+  mutation failed. Restart acceptance is fail-closed: the service must become
+  ready and complete the pinned sample-WAV stream protocol through final text,
+  eof_ack, and drained before the deployment is accepted.
 
 .PARAMETER RepoRoot
-  Deploy clone path. Defaults to the repo this script lives in (deploy/gpu-host/..).
+  Deploy clone path. Required. This script must execute from a separate,
+  exact-target control checkout so the first rollout uses the target updater.
 
 .PARAMETER Branch
   Tracking branch. Default 'main'. The deploy clone tracks main only.
@@ -37,10 +40,16 @@
 .PARAMETER NoRestart
   Pin and ledger the working tree but do not restart scheduled tasks.
 
+.PARAMETER NoConfirm
+  Suppress ShouldProcess confirmation for a non-interactive controller child.
+  This is a normal script switch and is safe through Windows PowerShell 5.1
+  powershell.exe -File argument binding.
+
 .EXAMPLE
-  cd C:\Users\denetimpc\platform-ai
+  cd C:\platform-ai-control
   Set-ExecutionPolicy -Scope Process Bypass
-  .\deploy\gpu-host\update.ps1 -TargetCommit <full-40-hex-commit>
+  .\deploy\gpu-host\update.ps1 -RepoRoot C:\platform-ai `
+    -TargetCommit <full-40-hex-commit>
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
 param(
@@ -49,22 +58,49 @@ param(
   [string]$TargetCommit = "",
   [string]$StatePath = "C:\ProgramData\Acik\platform-ai\deployment-state.json",
   [switch]$Rollback,
-  [switch]$NoRestart
+  [switch]$NoRestart,
+  [switch]$NoConfirm
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
+if ($NoConfirm) { $ConfirmPreference = "None" }
 $script:DeployExitGuard = 2
 $script:DeployExitRestartFailed = 3
 $script:DeployExitRollbackFailed = 4
 $script:DeployMutex = $null
 $script:DeployLockTaken = $false
+$script:TestAcceptanceInvocation = 0
 $script:DefaultDeploymentStatePath = `
   "C:\ProgramData\Acik\platform-ai\deployment-state.json"
-$script:TestFaultsEnabled = (
-  $env:CI -eq "true" -and
-  $StatePath -ne $script:DefaultDeploymentStatePath
-)
+$script:LegacyRollbackCompatCommit = `
+  "512e9cc0fe4368d3cc91759dcd48756e54c2ad63"
+$script:ResolvedRunnerTemp = ""
+if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+  try { $script:ResolvedRunnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP) }
+  catch { $script:ResolvedRunnerTemp = "" }
+}
+$script:ResolvedStatePath = ""
+try { $script:ResolvedStatePath = [IO.Path]::GetFullPath($StatePath) } catch { }
+$script:TestFaultsEnabled = $false
+
+function Test-GpuHostPathUnderRoot {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Root
+  )
+
+  try {
+    $resolvedPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $resolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    return $resolvedPath.StartsWith(
+      $resolvedRoot + '\',
+      [StringComparison]::OrdinalIgnoreCase
+    )
+  } catch {
+    return $false
+  }
+}
 
 function Stop-Deploy {
   param(
@@ -112,22 +148,48 @@ function Invoke-GitStream {
 }
 
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
-  $scriptDir = $PSScriptRoot
-  if ([string]::IsNullOrWhiteSpace($scriptDir) -and $PSCommandPath) {
-    $scriptDir = Split-Path -Parent $PSCommandPath
-  }
-  if ([string]::IsNullOrWhiteSpace($scriptDir) -and $MyInvocation.MyCommand.Path) {
-    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-  }
-  if ([string]::IsNullOrWhiteSpace($scriptDir)) {
-    Stop-Deploy "Could not resolve script directory. Pass -RepoRoot explicitly." `
-      $script:DeployExitGuard
-  }
-  $RepoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+  Stop-Deploy "RepoRoot is required; run this updater from an exact-target control checkout." `
+    $script:DeployExitGuard
+}
+$controllerRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path
+$currentWindowsIdentity = ""
+try {
+  $currentWindowsIdentity = `
+    [Security.Principal.WindowsIdentity]::GetCurrent().Name
+} catch { }
+$script:TestFaultsEnabled = (
+  $env:CI -eq "true" -and
+  $env:GITHUB_ACTIONS -eq "true" -and
+  $env:RUNNER_ENVIRONMENT -eq "github-hosted" -and
+  $currentWindowsIdentity -match '\\runneradmin$' -and
+  -not [string]::IsNullOrWhiteSpace($script:ResolvedRunnerTemp) -and
+  -not [string]::IsNullOrWhiteSpace($script:ResolvedStatePath) -and
+  (Test-GpuHostPathUnderRoot -Path $controllerRoot `
+    -Root $script:ResolvedRunnerTemp) -and
+  (Test-GpuHostPathUnderRoot -Path $RepoRoot `
+    -Root $script:ResolvedRunnerTemp) -and
+  (Test-GpuHostPathUnderRoot -Path $script:ResolvedStatePath `
+    -Root $script:ResolvedRunnerTemp)
+)
+if ([IO.Path]::GetFullPath($controllerRoot).TrimEnd('\').Equals(
+    [IO.Path]::GetFullPath($RepoRoot).TrimEnd('\'),
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+  Stop-Deploy "Updater must run from a separate exact-target control checkout." `
+    $script:DeployExitGuard
 }
 
 if (-not (Test-Path (Join-Path $RepoRoot ".git"))) {
   Stop-Deploy "RepoRoot '$RepoRoot' is not a git clone. Pass -RepoRoot explicitly." `
+    $script:DeployExitGuard
+}
+if (-not (Test-Path (Join-Path $controllerRoot ".git"))) {
+  Stop-Deploy "ControllerRoot is not a git checkout." $script:DeployExitGuard
+}
+$legacyRuntimeEnv = Join-Path $RepoRoot "deploy\gpu-host\env.local.ps1"
+if (Test-Path -LiteralPath $legacyRuntimeEnv -PathType Leaf) {
+  Stop-Deploy "Legacy plaintext env.local.ps1 exists. Migrate to DPAPI live-stt.env and securely remove it before deploy." `
     $script:DeployExitGuard
 }
 if ($Branch -notmatch '^[A-Za-z0-9._/-]+$') {
@@ -264,6 +326,36 @@ if ($ancestorResult.ExitCode -ne 0) {
     $script:DeployExitGuard
 }
 
+$controllerHead = Invoke-GitCapture -GitArgs @(
+  "-C", $controllerRoot, "rev-parse", "HEAD"
+)
+$expectedControllerCommit = if ($Rollback) { $before } else { $target }
+if ($controllerHead.ExitCode -ne 0 -or $controllerHead.Output.Count -ne 1 -or
+    "$($controllerHead.Output[0])".Trim().ToLowerInvariant() -ne $expectedControllerCommit) {
+  Stop-Deploy "Control checkout HEAD must equal the approved controller commit." `
+    $script:DeployExitGuard
+}
+$controllerDirty = Invoke-GitCapture -GitArgs @(
+  "-C", $controllerRoot, "status", "--porcelain", "--untracked-files=all"
+)
+if ($controllerDirty.ExitCode -ne 0 -or $controllerDirty.Output.Count -gt 0) {
+  Stop-Deploy "Control checkout must be clean, including untracked files." `
+    $script:DeployExitGuard
+}
+$deployOrigin = Invoke-GitCapture -GitArgs @("remote", "get-url", "origin")
+$controllerOrigin = Invoke-GitCapture -GitArgs @(
+  "-C", $controllerRoot, "remote", "get-url", "origin"
+)
+if ($deployOrigin.ExitCode -ne 0 -or $controllerOrigin.ExitCode -ne 0 -or
+    $deployOrigin.Output.Count -ne 1 -or $controllerOrigin.Output.Count -ne 1 -or
+    -not "$($deployOrigin.Output[0])".Trim().Equals(
+      "$($controllerOrigin.Output[0])".Trim(),
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+  Stop-Deploy "Deploy and control checkouts must use the same origin." `
+    $script:DeployExitGuard
+}
+
 if (-not $PSCmdlet.ShouldProcess(
     $RepoRoot,
     ("{0} immutable commit {1}" -f $action, $target)
@@ -289,7 +381,7 @@ if ($afterResult.ExitCode -ne 0 -or $afterResult.Output.Count -ne 1 -or
   Stop-Deploy "Detached exact-pin postcondition failed." $pinFailedCode
 }
 
-$ledgerRecord = New-DeploymentStateRecord -CurrentCommit $target `
+$script:DeploymentLedgerRecord = New-DeploymentStateRecord -CurrentCommit $target `
   -PreviousCommit $previous -BranchRef $branchRef -Action $action `
   -Result "source-pinned"
 try {
@@ -297,7 +389,7 @@ try {
       $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE -eq "1") {
     throw "CI fault injection: deployment ledger write failure"
   }
-  Write-DeploymentStateAtomic -StatePath $StatePath -State $ledgerRecord
+  Write-DeploymentStateAtomic -StatePath $StatePath -State $script:DeploymentLedgerRecord
 } catch {
   Write-Host "[update] ledger write failed; restoring pre-deploy commit" `
     -ForegroundColor Red
@@ -336,13 +428,39 @@ Write-Host "[update] $before -> $target (detached immutable pin)" `
 function Set-DeploymentLedgerResult {
   param([Parameter(Mandatory = $true)][string]$Result)
 
-  $ledgerRecord["lastResult"] = $Result
-  $ledgerRecord["timestampUtc"] = [DateTime]::UtcNow.ToString("o")
+  $script:DeploymentLedgerRecord["lastResult"] = $Result
+  $script:DeploymentLedgerRecord["timestampUtc"] = [DateTime]::UtcNow.ToString("o")
   try {
-    Write-DeploymentStateAtomic -StatePath $StatePath -State $ledgerRecord
+    Write-DeploymentStateAtomic -StatePath $StatePath `
+      -State $script:DeploymentLedgerRecord
   } catch {
     Stop-Deploy ("Pinned source but ledger result update failed: {0}" -f `
       $_.Exception.Message) $script:DeployExitRollbackFailed
+  }
+}
+
+$runtimeContract = Join-Path $controllerRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
+$taskActionContract = Join-Path $controllerRoot "deploy\gpu-host\task-action-contract.ps1"
+$restartAcceptance = Join-Path $controllerRoot "deploy\gpu-host\restart-acceptance.ps1"
+if (-not $NoRestart) {
+  $testAcceptanceInjected = (
+    $script:TestFaultsEnabled -and
+    $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
+      "reject-twice", "reject-then-accept"
+    )
+  )
+  if (-not $testAcceptanceInjected -and (
+      -not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf))) {
+    Set-DeploymentLedgerResult -Result "restart-failed"
+    Stop-Deploy "Pinned source is missing a GPU-host runtime/action contract." `
+      $script:DeployExitRestartFailed
+  }
+  if (-not $testAcceptanceInjected) {
+    . $runtimeContract
+    . $taskActionContract
+    . $restartAcceptance
   }
 }
 
@@ -378,182 +496,463 @@ function Invoke-SchtasksTask {
   }
 }
 
-function Wait-LiveSttStreamReady {
+function Get-SchtasksTaskXml {
+  param([Parameter(Mandatory = $true)][string]$TaskName)
+
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = @(& schtasks.exe /Query /TN $TaskName /XML 2> $null)
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
+function Get-TaskRuntimeContract {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    try {
+        $query = Get-SchtasksTaskXml -TaskName $TaskName
+        if ($query.ExitCode -ne 0 -or $query.Output.Count -eq 0) { throw "query-failed" }
+        return Get-GpuHostTaskXmlContract -TaskName $TaskName `
+          -TaskXml ($query.Output -join [Environment]::NewLine)
+    } catch {
+        return [pscustomobject]@{
+          Valid = $false
+          PythonExe = ""
+          RepoRoot = ""
+          Reason = [string]$_.Exception.Message
+        }
+    }
+}
+
+function Invoke-LiveSttFixtureAcceptance {
   param(
-    [string]$Url = "ws://127.0.0.1:8200/ws/stream",
-    [int]$TimeoutSec = 240
+    [Parameter(Mandatory = $true)][string]$PythonExe,
+    [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
+    [Parameter(Mandatory = $true)][double]$DeadlineSec,
+    [Parameter(Mandatory = $true)][ValidateSet(
+      "sample-tr-cv17-001",
+      "sample-tr-cv17-002"
+    )][string]$FixtureBaseName,
+    [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
+    [int]$ConnectTimeoutCapSec = 30
   )
 
   $oldEap = $ErrorActionPreference
-  $client = $null
   try {
     $ErrorActionPreference = "Continue"
-    $client = [System.Net.WebSockets.ClientWebSocket]::new()
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
-    $connectTask = $client.ConnectAsync([Uri]$Url, [Threading.CancellationToken]::None)
-    $remainingMs = [Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
-    if (-not $connectTask.Wait($remainingMs)) {
-      Write-Host "[update] direct stream warmup timed out while connecting" -ForegroundColor Yellow
+    $smoke = Join-Path $controllerRoot "services\live-stt-service\scripts\live_stream_smoke.py"
+    $wav = Join-Path $controllerRoot `
+      ("services\live-stt-service\tests\fixtures\{0}.wav" -f $FixtureBaseName)
+    $referenceText = Join-Path $controllerRoot `
+      ("services\live-stt-service\tests\fixtures\{0}.txt" -f $FixtureBaseName)
+    if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $smoke -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $wav -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $referenceText -PathType Leaf)) {
+      Write-Host "[update] direct stream acceptance interpreter/fixture missing" `
+        -ForegroundColor Yellow
       return $false
     }
-    if ($connectTask.Exception) {
-      Write-Host "[update] direct stream warmup connect failed: $($connectTask.Exception.GetBaseException().GetType().Name)" -ForegroundColor Yellow
+    $remainingSec = $DeadlineSec - $Clock.Elapsed.TotalSeconds
+    if ($remainingSec -le 5) { return $false }
+    $connectTimeoutSec = [Math]::Max(1, [Math]::Min(
+      $ConnectTimeoutCapSec,
+      [Math]::Floor($remainingSec / 3)
+    ))
+    $finalWaitSec = [Math]::Max(1, [Math]::Min(
+      120,
+      [Math]::Floor($remainingSec - $connectTimeoutSec - 2)
+    ))
+    $arguments = @(
+      $smoke,
+      "--url", $Url,
+      "--wav", $wav,
+      "--reference-text", $referenceText,
+      "--timeout-sec", "$connectTimeoutSec",
+      "--final-wait-sec", "$finalWaitSec",
+      "--min-final-word-coverage", "0.8",
+      "--min-partial-events", "1",
+      "--min-final-events", "1",
+      "--min-reference-token-coverage", "0.8",
+      "--max-word-error-rate", "0.25",
+      "--max-transcript-gap-ms", "6000"
+    )
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $PythonExe
+    $startInfo.Arguments = (($arguments | ForEach-Object {
+      ConvertTo-GpuHostWindowsArgument -Value ([string]$_)
+    }) -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { return $false }
+    $remainingMs = [Math]::Max(1, [int](
+      ($DeadlineSec - $Clock.Elapsed.TotalSeconds) * 1000
+    ))
+    if (-not $process.WaitForExit($remainingMs)) {
+      try { $process.Kill() } catch { }
+      $process.Dispose()
       return $false
     }
-
-    $buffer = New-Object byte[] 8192
-    $builder = [System.Text.StringBuilder]::new()
-    while ([DateTime]::UtcNow -lt $deadline) {
-      $remainingMs = [Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
-      $segment = [ArraySegment[byte]]::new($buffer)
-      $receiveTask = $client.ReceiveAsync($segment, [Threading.CancellationToken]::None)
-      if (-not $receiveTask.Wait($remainingMs)) {
-        Write-Host "[update] direct stream warmup timed out waiting for ready" -ForegroundColor Yellow
-        return $false
-      }
-      if ($receiveTask.Exception) {
-        Write-Host "[update] direct stream warmup receive failed: $($receiveTask.Exception.GetBaseException().GetType().Name)" -ForegroundColor Yellow
-        return $false
-      }
-
-      $result = $receiveTask.Result
-      if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
-        Write-Host "[update] direct stream warmup closed before ready" -ForegroundColor Yellow
-        return $false
-      }
-
-      if ($result.Count -gt 0) {
-        [void]$builder.Append([System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count))
-      }
-      if (-not $result.EndOfMessage) {
-        continue
-      }
-
-      $payload = $builder.ToString()
-      [void]$builder.Clear()
+    $output = $process.StandardOutput.ReadToEnd()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    if ($exitCode -ne 0 -or
+        -not (Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec)) {
+      Write-Host "[update] direct stream inference acceptance failed" -ForegroundColor Yellow
+      return $false
+    }
+    try {
+      $summary = $output | ConvertFrom-Json -ErrorAction Stop
+      $referenceName = [IO.Path]::GetFileName($referenceText)
+      $referenceContent = [IO.File]::ReadAllText($referenceText).Trim()
+      $sha256 = [Security.Cryptography.SHA256]::Create()
       try {
-        $event = $payload | ConvertFrom-Json -ErrorAction Stop
-        if ($event.type -eq "ready") {
-          return $true
-        }
-        if ($event.type -eq "error") {
-          Write-Host "[update] direct stream warmup server error event" -ForegroundColor Yellow
-          return $false
-        }
-      } catch {
-        Write-Host "[update] direct stream warmup ignored non-json event" -ForegroundColor Yellow
+        $referenceNameHash = ([BitConverter]::ToString(
+          $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($referenceName))
+        ) -replace '-', '').ToLowerInvariant().Substring(0, 12)
+        $referenceTextHash = ([BitConverter]::ToString(
+          $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($referenceContent))
+        ) -replace '-', '').ToLowerInvariant().Substring(0, 12)
+      } finally {
+        $sha256.Dispose()
       }
+      return (
+        $summary.schema -eq "platform-ai.live-stt.stream-smoke.v1" -and
+        $summary.ok -eq $true -and
+        $summary.reference.artifact_id_sha256_12 -eq $referenceNameHash -and
+        $summary.reference.text_sha256_12 -eq $referenceTextHash -and
+        [int]$summary.reference.words -ge 1 -and
+        [int]$summary.events.partial_count -ge 1 -and
+        [int]$summary.events.final_count -ge 1 -and
+        [int]$summary.events.final_hallucination_count -eq 0 -and
+        [int]$summary.events.error_count -eq 0 -and
+        $null -ne $summary.events.max_transcript_gap_ms -and
+        [int]$summary.events.max_transcript_gap_ms -ge 0 -and
+        [int]$summary.events.max_transcript_gap_ms -le 6000 -and
+        [int]$summary.coverage.reference_words -eq `
+          [int]$summary.reference.words -and
+        [int]$summary.coverage.final_words -ge 1 -and
+        [double]$summary.coverage.final_word_coverage -ge 0.8 -and
+        [double]$summary.coverage.reference_token_coverage -ge 0.8 -and
+        [double]$summary.coverage.word_error_rate -ge 0.0 -and
+        [double]$summary.coverage.word_error_rate -le 0.25 -and
+        [int]$summary.quality_gate.min_partial_events -eq 1 -and
+        [int]$summary.quality_gate.min_final_events -eq 1 -and
+        [double]$summary.quality_gate.min_final_word_coverage -eq 0.8 -and
+        [double]$summary.quality_gate.min_reference_token_coverage -eq 0.8 -and
+        [double]$summary.quality_gate.max_word_error_rate -eq 0.25 -and
+        [int]$summary.quality_gate.max_transcript_gap_ms -eq 6000 -and
+        @($summary.quality_gate.failures).Count -eq 0 -and
+        (@($summary.events.terminal_sequence) -join ",") -eq "eof_ack,drained"
+      )
+    } catch {
+      Write-Host "[update] direct stream acceptance returned invalid summary" -ForegroundColor Yellow
+      return $false
     }
-
-    Write-Host "[update] direct stream warmup timed out before ready" -ForegroundColor Yellow
+  } catch {
+    Write-Host "[update] direct stream acceptance could not be executed" -ForegroundColor Yellow
     return $false
   } finally {
-    if ($client) {
-      try {
-        if ($client.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
-          $null = $client.CloseAsync(
-            [System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure,
-            "deploy-warmup",
-            [Threading.CancellationToken]::None
-          ).Wait(2000)
-        }
-      } catch { }
-      $client.Dispose()
-    }
     $ErrorActionPreference = $oldEap
   }
+}
+
+function Invoke-LiveSttStreamAcceptance {
+  param(
+    [Parameter(Mandatory = $true)][string]$PythonExe,
+    [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
+    [Parameter(Mandatory = $true)][double]$DeadlineSec,
+    [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
+    [int]$ConnectTimeoutCapSec = 30
+  )
+
+  $fixtures = @("sample-tr-cv17-001", "sample-tr-cv17-002")
+  for ($index = 0; $index -lt $fixtures.Count; $index++) {
+    $fixturesRemaining = $fixtures.Count - $index
+    $remainingSec = $DeadlineSec - $Clock.Elapsed.TotalSeconds
+    if ($remainingSec -le (5 * $fixturesRemaining)) { return $false }
+    $fixtureBudgetSec = [Math]::Floor($remainingSec / $fixturesRemaining)
+    $fixtureDeadlineSec = [Math]::Min(
+      $DeadlineSec,
+      $Clock.Elapsed.TotalSeconds + $fixtureBudgetSec
+    )
+    if (-not (Invoke-LiveSttFixtureAcceptance -PythonExe $PythonExe `
+        -Clock $Clock -DeadlineSec $fixtureDeadlineSec `
+        -FixtureBaseName $fixtures[$index] -Url $Url `
+        -ConnectTimeoutCapSec $ConnectTimeoutCapSec)) {
+      Write-Host ("[update] fixture acceptance failed: {0}" -f $fixtures[$index]) `
+        -ForegroundColor Yellow
+      return $false
+    }
+  }
+  return $true
+}
+
+function New-GpuHostAcceptanceResult {
+  param([bool]$Succeeded, [string]$Reason = "")
+  return [pscustomobject]@{ Succeeded = $Succeeded; Reason = $Reason }
+}
+
+function Invoke-GpuHostRevisionAcceptance {
+  param(
+    [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+    [Parameter(Mandatory = $true)][ValidateSet("strict-v1", "legacy-512e9cc")]
+    [string]$AcceptanceProfile
+  )
+
+  if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
+        "reject-twice", "reject-then-accept"
+      )) {
+    $script:TestAcceptanceInvocation += 1
+    if ($env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -eq "reject-twice" -or
+        $script:TestAcceptanceInvocation -eq 1) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "injected-acceptance-failure"
+    }
+    return New-GpuHostAcceptanceResult -Succeeded $true -Reason "accepted"
+  }
+
+  $liveSttPythonExe = ""
+  $liveSttRuntimeOwner = 0
+  $liveSttTaskInstance = $null
+  $acceptanceClock = [Diagnostics.Stopwatch]::StartNew()
+  foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
+    if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-missing"
+    }
+    $taskSpec = Get-GpuHostTaskSpec -TaskName $task
+    $taskContract = Get-TaskRuntimeContract -TaskName $task
+    if (-not $taskContract.Valid) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-contract"
+    }
+    if (-not (Test-GpuHostSameLocalPath -Left $RepoRoot `
+        -Right ([string]$taskContract.RepoRoot))) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-repo-root"
+    }
+    $taskPythonExe = [string]$taskContract.PythonExe
+    $previousTaskSnapshot = Get-GpuHostTaskInstanceSnapshot -TaskName $task
+    if (-not $previousTaskSnapshot.Succeeded) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-query"
+    }
+    $previousInstanceGuids = @($previousTaskSnapshot.Instances | ForEach-Object {
+      ([string]$_.InstanceGuid).ToLowerInvariant()
+    })
+    $previousOwnerSnapshot = Get-GpuHostListeningPortOwnerSnapshot `
+      -Port ([int]$taskSpec.Port)
+    if (-not $previousOwnerSnapshot.Succeeded) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-owner-query"
+    }
+    $previousOwners = @($previousOwnerSnapshot.Owners)
+    $endExit = Invoke-SchtasksTask -Action "/End" -TaskName $task
+    if ($previousInstanceGuids.Count -gt 0 -and $endExit -ne 0) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-end"
+    }
+    $taskReleased = Wait-GpuHostTaskInstancesReleased -TaskName $task `
+      -PreviousInstanceGuids $previousInstanceGuids -Clock $acceptanceClock `
+      -DeadlineSec $script:LiveSttReadinessDeadlineSec
+    if (-not $taskReleased.Succeeded) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-stale-task-instance"
+    }
+    $portReleased = Wait-GpuHostPortReleased -Port ([int]$taskSpec.Port) `
+      -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec
+    if (-not $portReleased.Succeeded) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-stale-listener"
+    }
+    if ((Invoke-SchtasksTask -Action "/Run" -TaskName $task) -ne 0) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-run"
+    }
+    $newTaskResult = Wait-GpuHostNewTaskInstance -TaskName $task `
+      -PreviousInstanceGuids $previousInstanceGuids -Clock $acceptanceClock `
+      -DeadlineSec $script:LiveSttReadinessDeadlineSec
+    if (-not $newTaskResult.Succeeded -or @($newTaskResult.Instances).Count -ne 1) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-no-new-task-instance"
+    }
+    $newTaskInstance = $newTaskResult.Instances[0]
+    $newOwnerResult = Wait-GpuHostNewPortOwner -Port ([int]$taskSpec.Port) `
+      -PreviousOwners $previousOwners -Clock $acceptanceClock `
+      -DeadlineSec $script:LiveSttReadinessDeadlineSec
+    if (-not $newOwnerResult.Succeeded -or @($newOwnerResult.Owners).Count -ne 1) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-no-new-listener"
+    }
+    $newOwner = [int]$newOwnerResult.Owners[0]
+    $taskPids = @([int]$newTaskInstance.EnginePid)
+    if (-not (Test-GpuHostTaskInstanceStable -TaskName $task `
+          -ExpectedInstanceGuid ([string]$newTaskInstance.InstanceGuid) `
+          -ExpectedEnginePid ([int]$newTaskInstance.EnginePid) `
+          -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec) -or
+        -not (Test-GpuHostListenerStable -Port ([int]$taskSpec.Port) `
+          -ExpectedOwnerId $newOwner -ExpectedPythonExe $taskPythonExe `
+          -ExpectedTaskPids $taskPids -Clock $acceptanceClock `
+          -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-identity-unstable"
+    }
+    if ($task -eq "platform-ai-live-stt") {
+      $liveSttPythonExe = $taskPythonExe
+      $liveSttRuntimeOwner = $newOwner
+      $liveSttTaskInstance = $newTaskInstance
+    }
+    Write-Host "[update] restarted $task with a new task instance and listener" `
+      -ForegroundColor Green
+  }
+
+  $streamReady = ($AcceptanceProfile -eq "legacy-512e9cc")
+  if (-not $streamReady) {
+    Write-Host "[update] waiting for live-stt streaming model readiness..." `
+      -ForegroundColor Cyan
+  }
+  while (-not $streamReady -and
+      $acceptanceClock.Elapsed.TotalSeconds -lt $script:LiveSttReadinessDeadlineSec) {
+    $remaining = $script:LiveSttReadinessDeadlineSec - $acceptanceClock.Elapsed.TotalSeconds
+    $requestTimeout = [Math]::Max(1, [Math]::Min(5, [Math]::Ceiling($remaining)))
+    try {
+      $readiness = Invoke-RestMethod "http://127.0.0.1:8200/ready" `
+        -TimeoutSec $requestTimeout -ErrorAction Stop
+      $runtimeOk = (
+        $readiness.status -eq "ready" -and
+        $readiness.runtime_commit -eq $ExpectedCommit -and
+        [int]$readiness.preload_budget_sec -eq $script:LiveSttReadinessDeadlineSec -and
+        $readiness.runtime.legacy.device -eq "cpu" -and
+        $readiness.runtime.legacy.compute_type -eq "int8" -and
+        $readiness.runtime.live.device -eq "cuda" -and
+        $readiness.runtime.live.compute_type -eq "int8" -and
+        $readiness.runtime.final.device -eq "cuda" -and
+        $readiness.runtime.final.compute_type -eq "float16"
+      )
+      if ($runtimeOk) { $streamReady = $true; break }
+    } catch { }
+    $sleepMs = [Math]::Min(5000, [Math]::Max(
+      0,
+      [int](($script:LiveSttReadinessDeadlineSec - $acceptanceClock.Elapsed.TotalSeconds) * 1000)
+    ))
+    if ($sleepMs -gt 0) { Start-Sleep -Milliseconds $sleepMs }
+  }
+  if (-not $streamReady) {
+    return New-GpuHostAcceptanceResult -Succeeded $false -Reason "readiness-failed"
+  }
+  $liveTaskPids = @([int]$liveSttTaskInstance.EnginePid)
+  if (-not (Test-GpuHostTaskInstanceStable -TaskName "platform-ai-live-stt" `
+        -ExpectedInstanceGuid ([string]$liveSttTaskInstance.InstanceGuid) `
+        -ExpectedEnginePid ([int]$liveSttTaskInstance.EnginePid) `
+        -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec) -or
+      -not (Test-GpuHostListenerStable -Port 8200 `
+        -ExpectedOwnerId $liveSttRuntimeOwner -ExpectedPythonExe $liveSttPythonExe `
+        -ExpectedTaskPids $liveTaskPids -Clock $acceptanceClock `
+        -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "readiness-failed-identity-changed"
+  }
+  $connectTimeoutCapSec = 30
+  if ($AcceptanceProfile -eq "legacy-512e9cc") { $connectTimeoutCapSec = 300 }
+  if (-not (Invoke-LiveSttStreamAcceptance -PythonExe $liveSttPythonExe `
+      -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec `
+      -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1" `
+      -ConnectTimeoutCapSec $connectTimeoutCapSec)) {
+    return New-GpuHostAcceptanceResult -Succeeded $false -Reason "smoke-failed"
+  }
+  if (-not (Test-GpuHostTaskInstanceStable -TaskName "platform-ai-live-stt" `
+        -ExpectedInstanceGuid ([string]$liveSttTaskInstance.InstanceGuid) `
+        -ExpectedEnginePid ([int]$liveSttTaskInstance.EnginePid) `
+        -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec) -or
+      -not (Test-GpuHostListenerStable -Port 8200 `
+        -ExpectedOwnerId $liveSttRuntimeOwner -ExpectedPythonExe $liveSttPythonExe `
+        -ExpectedTaskPids $liveTaskPids -Clock $acceptanceClock `
+        -DeadlineSec $script:LiveSttReadinessDeadlineSec)) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "smoke-failed-identity-changed"
+  }
+  return New-GpuHostAcceptanceResult -Succeeded $true -Reason "accepted"
+}
+
+function Invoke-GpuHostAutomaticRollback {
+  param(
+    [Parameter(Mandatory = $true)][string]$RestoreCommit,
+    [Parameter(Mandatory = $true)][string]$RejectedResult,
+    [AllowNull()][string]$RestorePreviousCommit
+  )
+
+  Set-DeploymentLedgerResult -Result $RejectedResult
+  Write-Host "[update] revision rejected; restoring $RestoreCommit" `
+    -ForegroundColor Yellow
+  $restoreOk = (
+    (Invoke-GitStream -GitArgs @("checkout", "--detach", $RestoreCommit)) -eq 0 -and
+    (Invoke-GitStream -GitArgs @("reset", "--hard", $RestoreCommit)) -eq 0
+  )
+  if (-not $restoreOk) { return $false }
+  $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+  if ($restoreHead.ExitCode -ne 0 -or $restoreHead.Output.Count -ne 1 -or
+      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -ne $RestoreCommit) {
+    return $false
+  }
+  $script:DeploymentLedgerRecord = New-DeploymentStateRecord `
+    -CurrentCommit $RestoreCommit -PreviousCommit $RestorePreviousCommit `
+    -BranchRef $branchRef `
+    -Action "rollback" -Result "automatic-rollback-source-restored"
+  try {
+    Write-DeploymentStateAtomic -StatePath $StatePath `
+      -State $script:DeploymentLedgerRecord
+  } catch {
+    return $false
+  }
+  $rollbackProfile = "strict-v1"
+  if ($RestoreCommit -eq $script:LegacyRollbackCompatCommit) {
+    $rollbackProfile = "legacy-512e9cc"
+  }
+  $rollbackAcceptance = Invoke-GpuHostRevisionAcceptance `
+    -ExpectedCommit $RestoreCommit -AcceptanceProfile $rollbackProfile
+  if (-not $rollbackAcceptance.Succeeded) {
+    Set-DeploymentLedgerResult `
+      -Result ("automatic-rollback-failed-{0}" -f $rollbackAcceptance.Reason)
+    return $false
+  }
+  Set-DeploymentLedgerResult -Result "automatic-rollback-accepted"
+  return $true
 }
 
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
   Set-DeploymentLedgerResult -Result "pinned-no-restart"
 } else {
-  $restartFailed = $false
-  foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
-    if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
-      Write-Host "[update] ERROR: required task '$task' is not installed" `
-        -ForegroundColor Red
-      $restartFailed = $true
-      continue
-    }
-    # /End returns non-zero when the task is not running (benign). When it WAS
-    # running, give the process ~2s to release its listening port before /Run
-    # starts a fresh instance (live-stt/meeting-ai bind 8200/8300).
-    if ((Invoke-SchtasksTask -Action "/End" -TaskName $task) -eq 0) { Start-Sleep -Seconds 2 }
-    $runExit = Invoke-SchtasksTask -Action "/Run" -TaskName $task
-    if ($runExit -ne 0) {
-      Write-Host "[update] ERROR: schtasks /Run '$task' exit=$runExit" -ForegroundColor Red
-      $restartFailed = $true
-    } else {
-      Write-Host "[update] restarted $task" -ForegroundColor Green
-    }
+  $targetAcceptanceProfile = "strict-v1"
+  if ($Rollback -and $target -eq $script:LegacyRollbackCompatCommit) {
+    $targetAcceptanceProfile = "legacy-512e9cc"
   }
-  if ($restartFailed) {
-    Set-DeploymentLedgerResult -Result "restart-failed"
-    Stop-Deploy "Source pin landed but one or more scheduled tasks failed to restart." `
+  $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target `
+    -AcceptanceProfile $targetAcceptanceProfile
+  if (-not $acceptance.Succeeded) {
+    $restorePreviousCommit = $null
+    if ($state) { $restorePreviousCommit = $state.previousCommit }
+    if (-not (Invoke-GpuHostAutomaticRollback -RestoreCommit $before `
+        -RejectedResult $acceptance.Reason `
+        -RestorePreviousCommit $restorePreviousCommit)) {
+      Stop-Deploy "Revision acceptance and automatic rollback acceptance failed." `
+        $script:DeployExitRollbackFailed
+    }
+    Stop-Deploy "Revision acceptance failed; previous revision was restored and reaccepted." `
       $script:DeployExitRestartFailed
   }
 }
 
-# 5. Warm live-stt so /health reaches "ok" after the deploy without a manual
-#    transcribe (the /transcribe model is lazy-loaded on the first request). This
-#    is a plain FOREGROUND curl in update.ps1's own process - NOT a Start-Job: an
-#    in-process background job inside the SYSTEM start task breaks the uvicorn
-#    launch under WinPS 5.1 (#193 live-acceptance failed). Running it here, outside
-#    the service tree, cannot affect the service. Best-effort - never fails update;
-#    a reboot (not via this script) stays lazy until the first real transcribe.
-if (-not $NoRestart -and -not $restartFailed) {
-  $warmupWav = Join-Path $RepoRoot "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.wav"
-  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-  if ((Test-Path $warmupWav) -and $curl) {
-    $oldEap = $ErrorActionPreference
-    try {
-      $ErrorActionPreference = "Continue"
-      Write-Host "[update] warming live-stt (lazy model load)..." -ForegroundColor Cyan
-      # Health-wait via Invoke-RestMethod (NOT curl -o $null -w http_code: under
-      # WinPS 5.1 a $null arg mangles curl so the code is never "200" and the
-      # warmup is always skipped - caught live 2026-06-22). IRM throws on non-200,
-      # caught; EAP=Continue is already set so it stays best-effort.
-      $up = $false
-      for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Seconds 5
-        try { $null = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5 -ErrorAction Stop; $up = $true; break } catch { }
-      }
-      if (-not $up) {
-        Write-Host "[update] live-stt /health did not answer in time; skipping warmup (lazy load on first transcribe)" -ForegroundColor Yellow
-      } else {
-        # -f so an HTTP 4xx/5xx (e.g. a 503 while the model loads) is a non-zero
-        # exit rather than a false success; then verify /health actually reached
-        # "ok" before logging green (curl exit 0 alone is not warmup acceptance).
-        # Match the GPU-host cold-load request budget from start-live-stt.ps1.
-        # The old 120s curl cap could abort the deploy warmup before the service
-        # reached its own 180s STT_REQUEST_TIMEOUT window.
-        & curl.exe -fsS --max-time 240 -F "audio=@$warmupWav;type=audio/wav" "http://127.0.0.1:8200/transcribe?language=tr&session_id=deploy-warmup&meeting_id=deploy-warmup&device_id=deploy-warmup" 1> $null 2> $null
-        $curlExit = $LASTEXITCODE
-        if ($curlExit -ne 0) {
-          Write-Host "[update] live-stt warmup curl exit=$curlExit (service is up; first real transcribe will load it)" -ForegroundColor Yellow
-        } else {
-          try {
-            $health = Invoke-RestMethod "http://127.0.0.1:8200/health" -TimeoutSec 5 -ErrorAction Stop
-            if ($health.status -eq "ok") { Write-Host "[update] live-stt warmup posted (model loaded -> /health ok)" -ForegroundColor Green }
-            else { Write-Host "[update] live-stt warmup posted but /health status=$($health.status) (first real transcribe may still load it)" -ForegroundColor Yellow }
-          } catch {
-            Write-Host "[update] live-stt warmup posted but /health verify failed (first real transcribe may still load it)" -ForegroundColor Yellow
-          }
-        }
-      }
-    } finally { $ErrorActionPreference = $oldEap }
-  }
-
-  Write-Host "[update] warming live-stt direct /ws/stream models..." -ForegroundColor Cyan
-  if (Wait-LiveSttStreamReady -Url "ws://127.0.0.1:8200/ws/stream" -TimeoutSec 240) {
-    Write-Host "[update] direct /ws/stream warmup ready (live + final models loaded)" -ForegroundColor Green
-  } else {
-    Write-Host "[update] direct /ws/stream warmup did not reach ready (first stream may pay model load)" -ForegroundColor Yellow
-  }
-}
-
-Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8300/health ; ws://127.0.0.1:8200/ws/stream ready" -ForegroundColor Cyan
+Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8200/ready ; :8300/health ; ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1 ready" -ForegroundColor Cyan
 if (-not $NoRestart) {
   Set-DeploymentLedgerResult -Result "tasks-restarted"
 }

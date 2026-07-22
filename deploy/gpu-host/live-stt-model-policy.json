@@ -1,0 +1,19 @@
+{
+  "schema": "platform-ai.live-stt.model-policy.v1",
+  "models": [
+    {
+      "role": "live",
+      "repository": "Systran/faster-whisper-medium",
+      "revision": "08e178d48790749d25932bbc082711ddcfdfbc4f",
+      "modelBinSha256": "9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae",
+      "relativePath": "artifacts/live/08e178d48790749d25932bbc082711ddcfdfbc4f"
+    },
+    {
+      "role": "final",
+      "repository": "deepdml/faster-whisper-large-v3-turbo-ct2",
+      "revision": "4df90f75321148c3a29a9e2351b7ddf8f5b115a8",
+      "modelBinSha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da",
+      "relativePath": "artifacts/final/4df90f75321148c3a29a9e2351b7ddf8f5b115a8"
+    }
+  ]
+}

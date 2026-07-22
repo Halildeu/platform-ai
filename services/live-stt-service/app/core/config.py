@@ -65,8 +65,10 @@ class Settings(BaseSettings):
     # bytes before Whisper can load them. Local/test keeps the historical
     # floating-name convenience, but can opt into the same contract.
     environment: str = Field(default="local", pattern="^(local|test|staging|production)$")
+    runtime_commit: str = Field(default="unversioned", min_length=1, max_length=40)
     model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
     model_sha256: str = Field(default="", max_length=71)
+    model_tree_sha256: str = Field(default="", max_length=71)
     model_path: Path | None = None
     compute_type: str = Field(default="int8", description="quantization")
     device: str = Field(default="cpu", description="cpu / cuda / auto")
@@ -98,6 +100,10 @@ class Settings(BaseSettings):
     # final=large-v3-turbo fp16). Lazy-loaded only when /ws/stream is used, so
     # CPU/CI paths are unaffected by the cuda defaults.
     live_model_name: str = Field(default="medium", description="fast draft model")
+    live_model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
+    live_model_sha256: str = Field(default="", max_length=71)
+    live_model_tree_sha256: str = Field(default="", max_length=71)
+    live_model_path: Path | None = None
     live_compute_type: str = Field(default="int8")
     live_device: str = Field(default="cuda")
     live_beam_size: int = Field(default=1, ge=1, le=10)
@@ -110,6 +116,10 @@ class Settings(BaseSettings):
         default="deepdml/faster-whisper-large-v3-turbo-ct2",
         description="accurate final model (ADR-0031)",
     )
+    final_model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
+    final_model_sha256: str = Field(default="", max_length=71)
+    final_model_tree_sha256: str = Field(default="", max_length=71)
+    final_model_path: Path | None = None
     final_compute_type: str = Field(default="float16")
     final_device: str = Field(default="cuda")
     final_beam_size: int = Field(default=1, ge=1, le=10)
@@ -140,10 +150,14 @@ class Settings(BaseSettings):
     # from zero, so the model never finishes loading and no session can ever
     # start. Preloading moves that cost to boot, where nothing is waiting.
     #
-    # Runs in a background thread: startup stays non-blocking so health probes
-    # answer immediately. Disable only where the model cannot be fetched (unit
-    # tests, air-gapped CI).
-    stream_preload_models: bool = Field(default=True)
+    # Runs in a background thread: startup stays non-blocking so liveness probes
+    # answer immediately. The production launcher opts in explicitly; local and
+    # test environments must not allocate both models merely by importing the app.
+    stream_preload_models: bool = Field(default=False)
+    stream_preload_max_attempts: int = Field(default=2, ge=1, le=5)
+    stream_preload_retry_base_sec: float = Field(default=1.0, ge=0.1, le=30.0)
+    stream_preload_readiness_budget_sec: float = Field(default=960.0, ge=1.0, le=3600.0)
+    stream_recovery_poll_sec: float = Field(default=1.0, ge=0.1, le=30.0)
     # #128 WebSocket streaming cadence/commit tuning. These env-backed values
     # stay bounded so a bad rollout cannot turn partials off or flood finals.
     live_infer_interval_ms: int = Field(default=700, ge=1, le=5000)
@@ -182,18 +196,77 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_stream_tuning(self) -> Self:
         """Keep model provenance and low-latency knobs internally consistent."""
-        if self.model_sha256 and not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", self.model_sha256):
-            raise ValueError("model_sha256 must be a lowercase full SHA-256 digest")
+        model_identities = (
+            (
+                "model", self.model_revision, self.model_sha256,
+                self.model_tree_sha256, self.model_path,
+            ),
+            (
+                "live_model",
+                self.live_model_revision,
+                self.live_model_sha256,
+                self.live_model_tree_sha256,
+                self.live_model_path,
+            ),
+            (
+                "final_model",
+                self.final_model_revision,
+                self.final_model_sha256,
+                self.final_model_tree_sha256,
+                self.final_model_path,
+            ),
+        )
+        for label, _revision, digest, tree_digest, _path in model_identities:
+            for field_name, value in (("sha256", digest), ("tree_sha256", tree_digest)):
+                if value and not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", value):
+                    raise ValueError(
+                        f"{label}_{field_name} must be a lowercase full SHA-256 digest"
+                    )
         if self.environment in {"staging", "production"}:
-            if not re.fullmatch(r"[0-9a-f]{40}", self.model_revision):
-                raise ValueError(
-                    "model_revision must be a lowercase 40-hex immutable revision "
-                    "in staging/production"
-                )
-            if not self.model_sha256:
-                raise ValueError("model_sha256 is required in staging/production")
-            if self.model_path is None:
-                raise ValueError("model_path is required in staging/production")
+            for label, revision, digest, tree_digest, path in model_identities:
+                if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                    raise ValueError(
+                        f"{label}_revision must be a lowercase 40-hex immutable revision "
+                        "in staging/production"
+                    )
+                if not digest:
+                    raise ValueError(f"{label}_sha256 is required in staging/production")
+                if not tree_digest:
+                    raise ValueError(
+                        f"{label}_tree_sha256 is required in staging/production"
+                    )
+                if path is None:
+                    raise ValueError(f"{label}_path is required in staging/production")
+        if self.environment == "production" and not self.stream_preload_models:
+            raise ValueError("stream_preload_models must be enabled in production")
+        if self.environment == "production" and not re.fullmatch(
+            r"[0-9a-f]{40}", self.runtime_commit
+        ):
+            raise ValueError("runtime_commit must be a lowercase 40-hex commit in production")
+        if self.environment == "production":
+            expected_runtime = {
+                "device": (self.device, "cpu"),
+                "compute_type": (self.compute_type, "int8"),
+                "live_device": (self.live_device, "cuda"),
+                "live_compute_type": (self.live_compute_type, "int8"),
+                "final_device": (self.final_device, "cuda"),
+                "final_compute_type": (self.final_compute_type, "float16"),
+            }
+            for label, (actual, expected) in expected_runtime.items():
+                if actual != expected:
+                    raise ValueError(f"{label} must be {expected} in production")
+        retry_wait_sec = self.stream_preload_retry_base_sec * (
+            (2 ** (self.stream_preload_max_attempts - 1)) - 1
+        )
+        preload_worst_case_sec = 2 * (
+            self.stream_preload_max_attempts
+            * (self.stream_model_load_timeout_sec + (2 * self.worker_kill_grace_sec))
+            + retry_wait_sec
+        )
+        if preload_worst_case_sec > self.stream_preload_readiness_budget_sec:
+            raise ValueError(
+                "stream preload worst-case timeout exceeds stream_preload_readiness_budget_sec"
+            )
         if self.min_speech_rms < self.silence_rms:
             raise ValueError("min_speech_rms must be >= silence_rms")
         if self.min_infer_sec > self.live_window_sec:

@@ -4,7 +4,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import queue
+import stat
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -22,11 +26,13 @@ from app.api.stream import (
     _select_partial_parts,
     _select_partial_text,
     _stabilize_rolling_partial,
+    _transcribe_with_stream_generation,
 )
 from app.core import config as config_module
 from app.core.config import Settings
 from app.services import streaming_models as streaming_models_module
 from app.services.hallucination import is_hallucination
+from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import (
     DirectWhisperService,
     SupervisedFinalWhisperService,
@@ -34,6 +40,7 @@ from app.services.streaming_models import (
     get_final_service,
     get_live_service,
     shutdown_streaming_services,
+    streaming_services_healthy,
 )
 from app.services.worker import WorkerCrashedError, WorkerTimeoutError
 
@@ -51,6 +58,47 @@ def test_hallucination_filter_blocks_known_artifacts() -> None:
     assert is_hallucination("Altyazı M.K.") is True
     assert is_hallucination("Videoyu beğenmeyi unutmayın arkadaşlar") is True
     assert is_hallucination("Neroba") is True
+
+
+def test_preload_failure_rejects_websocket_without_lazy_model_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production admission must not bypass the exhausted startup budget."""
+
+    class _WebSocket:
+        def __init__(self) -> None:
+            state = StreamingPreloadState(enabled=True)
+            state.mark_failed("live")
+            self.app = SimpleNamespace(state=SimpleNamespace(streaming_preload=state))
+            self.query_params = {"protocol": stream_api.STREAM_PROTOCOL}
+            self.events: list[dict[str, object]] = []
+            self.close_code: int | None = None
+
+        async def accept(self) -> None:
+            return None
+
+        async def send_json(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+        async def close(self, *, code: int = 1000) -> None:
+            self.close_code = code
+
+    def unexpected_model_access(_settings: Settings) -> object:
+        raise AssertionError("failed preload must not invoke a lazy model factory")
+
+    monkeypatch.setattr(stream_api, "get_live_service", unexpected_model_access)
+    monkeypatch.setattr(stream_api, "get_final_service", unexpected_model_access)
+    websocket = _WebSocket()
+
+    asyncio.run(
+        stream_api.stream_endpoint(
+            websocket,  # type: ignore[arg-type]
+            Settings(stream_preload_models=True),
+        )
+    )
+
+    assert websocket.events == [{"type": "error", "msg": "service_not_ready"}]
+    assert websocket.close_code == 1013
 
 
 def test_hallucination_filter_keeps_valid_short_turkish_utterances() -> None:
@@ -691,6 +739,392 @@ def test_waiting_live_call_reloads_recycled_worker_before_inference(
     assert operations == ["transcribe", "load", "transcribe"]
 
 
+def test_load_failure_recycles_worker_before_preload_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        alive = True
+        terminated = False
+        killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._load_timeout_sec = 1.0
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._closing = threading.Event()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._result_queue.put({"job_id": "load-job", "ok": False, "error_class": "RuntimeError"})
+    service._model_loaded = False
+    service._restart_blocked = False
+    service._generation = 1
+    old_process = service._process
+    starts: list[None] = []
+    monkeypatch.setattr(streaming_models_module.uuid, "uuid4", lambda: "load-job")
+    monkeypatch.setattr(service, "_start", lambda: starts.append(None))
+
+    with pytest.raises(RuntimeError, match="RuntimeError"):
+        service.ensure_model()
+
+    assert old_process.terminated is True
+    assert old_process.killed is True
+    assert starts == [None]
+
+
+def test_transcribe_failure_invalidates_generation_until_explicit_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.alive = True
+            self.terminated = False
+            self.killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._timeout_sec = 0.5
+    service._load_timeout_sec = 0.5
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._closing = threading.Event()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._result_queue.put(
+        {"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"}
+    )
+    service._model_loaded = True
+    service._restart_blocked = False
+    service._generation = 11
+    old_process = service._process
+    starts: list[None] = []
+    operations: list[str] = []
+
+    class ResponsiveTaskQueue(queue.Queue[dict[str, object]]):
+        def put(  # type: ignore[override]
+            self,
+            item: dict[str, object],
+            block: bool = True,
+            timeout: float | None = None,
+        ) -> None:
+            del block, timeout
+            operation = str(item["type"])
+            operations.append(operation)
+            service._result_queue.put(
+                {
+                    "job_id": item["job_id"],
+                    "ok": True,
+                    "text": "recovered" if operation == "transcribe" else "",
+                }
+            )
+
+    def fake_start() -> None:
+        starts.append(None)
+        service._generation += 1
+        service._process = FakeProcess()
+        service._result_queue = queue.Queue(maxsize=1)
+        service._task_queue = ResponsiveTaskQueue(maxsize=1)
+        service._model_loaded = False
+        service._restart_blocked = False
+
+    monkeypatch.setattr(streaming_models_module.uuid, "uuid4", lambda: "transcribe-job")
+    monkeypatch.setattr(service, "_start", fake_start)
+
+    saved_live = dict(streaming_models_module._supervised_live_services)
+    saved_final = dict(streaming_models_module._supervised_final_services)
+    streaming_models_module._supervised_live_services.clear()
+    streaming_models_module._supervised_final_services.clear()
+    streaming_models_module._supervised_live_services["failed-generation"] = service
+    try:
+        with pytest.raises(RuntimeError, match="CudaError"):
+            service.transcribe_loaded_array(
+                np.ones(1600, dtype=np.float32),
+                vad=False,
+                expected_generation=11,
+            )
+
+        assert old_process.terminated is True
+        assert old_process.killed is True
+        assert service._generation != 11
+        assert service.model_loaded is False
+        assert streaming_services_healthy() is False
+        assert starts == []
+
+        # The failed active connection cannot retry or lazy-load against its
+        # captured generation. Recovery belongs to the lifecycle owner.
+        with pytest.raises(WorkerCrashedError, match="readiness changed"):
+            service.transcribe_loaded_array(
+                np.ones(1600, dtype=np.float32),
+                vad=False,
+                expected_generation=11,
+            )
+        assert starts == []
+        assert operations == []
+
+        service.ensure_model()
+        recovered_generation = service.ready_generation
+        assert starts == [None]
+        assert recovered_generation != 11
+        assert service.model_loaded is True
+        assert streaming_services_healthy() is True
+        assert service.transcribe_loaded_array(
+            np.ones(1600, dtype=np.float32),
+            vad=False,
+            expected_generation=recovered_generation,
+        ) == "recovered"
+        assert operations == ["load", "transcribe"]
+    finally:
+        streaming_models_module._supervised_live_services.clear()
+        streaming_models_module._supervised_live_services.update(saved_live)
+        streaming_models_module._supervised_final_services.clear()
+        streaming_models_module._supervised_final_services.update(saved_final)
+
+
+def test_loaded_transcribe_failure_invalidates_generation_without_stream_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        alive = True
+        terminated = False
+        killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            del timeout
+
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._timeout_sec = 1.0
+    service._load_timeout_sec = 1.0
+    service._kill_grace_sec = 0.0
+    service._call_lock = threading.Lock()
+    service._closing = threading.Event()
+    service._process = FakeProcess()
+    service._task_queue = queue.Queue(maxsize=1)
+    service._result_queue = queue.Queue(maxsize=1)
+    service._result_queue.put(
+        {"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"}
+    )
+    service._model_loaded = True
+    service._restart_blocked = False
+    service._generation = 7
+    starts: list[None] = []
+    monkeypatch.setattr(streaming_models_module.uuid, "uuid4", lambda: "transcribe-job")
+    monkeypatch.setattr(service, "_start", lambda: starts.append(None))
+
+    with pytest.raises(RuntimeError, match="CudaError"):
+        service.transcribe_loaded_array(
+            np.ones(1600, dtype=np.float32), vad=False, expected_generation=7
+        )
+
+    assert service._process is None
+    assert service._model_loaded is False
+    assert starts == []
+
+
+def test_preload_lock_and_load_share_the_callers_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(SupervisedLiveWhisperService)
+    service.role = "live"
+    service._load_timeout_sec = 180.0
+    service._kill_grace_sec = 2.0
+    service._call_lock = threading.Lock()
+    observed: list[tuple[str, float]] = []
+
+    def acquire(deadline: float) -> None:
+        observed.append(("lock", deadline))
+        assert service._call_lock.acquire(timeout=0)
+
+    def load(
+        deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+    ) -> None:
+        assert deadline is not None
+        assert cleanup_deadline is not None
+        observed.append(("load", deadline))
+        observed.append(("cleanup", cleanup_deadline))
+
+    monkeypatch.setattr(service, "_acquire_call_lock", acquire)
+    monkeypatch.setattr(service, "_ensure_model_locked", load)
+    service.ensure_model(deadline=12345.0)
+
+    assert observed == [
+        ("lock", 12345.0),
+        ("load", 12345.0),
+        ("cleanup", 12349.0),
+    ]
+
+
+def test_streaming_readiness_requires_loaded_current_workers() -> None:
+    saved_live = dict(streaming_models_module._supervised_live_services)
+    saved_final = dict(streaming_models_module._supervised_final_services)
+    streaming_models_module._supervised_live_services.clear()
+    streaming_models_module._supervised_final_services.clear()
+    try:
+        streaming_models_module._supervised_live_services["cold"] = SimpleNamespace(
+            healthy=True,
+            model_loaded=False,
+        )
+        assert streaming_services_healthy() is False
+        streaming_models_module._supervised_live_services["cold"].model_loaded = True
+        assert streaming_services_healthy() is True
+    finally:
+        streaming_models_module._supervised_live_services.clear()
+        streaming_models_module._supervised_live_services.update(saved_live)
+        streaming_models_module._supervised_final_services.clear()
+        streaming_models_module._supervised_final_services.update(saved_final)
+
+
+def test_streaming_model_pin_hashes_exact_model_bytes(tmp_path) -> None:
+    model_bin = tmp_path / "model.bin"
+    model_bin.write_bytes(b"approved-stream-model")
+    config = tmp_path / "config.json"
+    config.write_text('{"approved":true}', encoding="utf-8")
+    tokenizer = tmp_path / "tokenizer.json"
+    tokenizer.write_text('{"version":"approved"}', encoding="utf-8")
+    digest = hashlib.sha256(model_bin.read_bytes()).hexdigest()
+    tree_digest = streaming_models_module._model_tree_sha256(tmp_path)
+
+    assert streaming_models_module._resolve_stream_model_source(
+        "floating-name", str(tmp_path), f"sha256:{digest}", f"sha256:{tree_digest}"
+    ) == str(tmp_path.resolve())
+    config.write_text('{"approved":false}', encoding="utf-8")
+    with pytest.raises(ValueError, match="tree SHA-256 mismatch"):
+        streaming_models_module._resolve_stream_model_source(
+            "floating-name", str(tmp_path), digest, tree_digest
+        )
+    config.write_text('{"approved":true}', encoding="utf-8")
+    tokenizer.write_text('{"version":"mutated"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="tree SHA-256 mismatch"):
+        streaming_models_module._resolve_stream_model_source(
+            "floating-name", str(tmp_path), digest, tree_digest
+        )
+    tokenizer.write_text('{"version":"approved"}', encoding="utf-8")
+    model_bin.write_bytes(b"mutated-stream-model")
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        streaming_models_module._resolve_stream_model_source(
+            "floating-name", str(tmp_path), digest, tree_digest
+        )
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        streaming_models_module._resolve_stream_model_source(
+            "floating-name", str(tmp_path), "0" * 64
+        )
+
+
+def test_streaming_model_pin_rejects_linked_artifact(tmp_path) -> None:
+    model_bin = tmp_path / "model.bin"
+    model_bin.write_bytes(b"approved-stream-model")
+    target = tmp_path / "tokenizer-target.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "tokenizer.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    with pytest.raises(ValueError, match="contains a link"):
+        streaming_models_module._model_tree_sha256(tmp_path)
+
+
+def test_streaming_model_pin_rejects_linked_root(tmp_path) -> None:
+    model_root = tmp_path / "model-root"
+    model_root.mkdir()
+    (model_root / "model.bin").write_bytes(b"approved-stream-model")
+    linked_root = tmp_path / "linked-root"
+    try:
+        linked_root.symlink_to(model_root, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(ValueError, match="link or reparse point"):
+        streaming_models_module._resolve_stream_model_source(
+            "floating-name", str(linked_root), ""
+        )
+
+
+def test_streaming_model_pin_recognizes_windows_reparse_attribute() -> None:
+    reparse_stat = SimpleNamespace(
+        st_mode=stat.S_IFDIR,
+        st_file_attributes=streaming_models_module._FILE_ATTRIBUTE_REPARSE_POINT,
+    )
+
+    assert streaming_models_module._is_link_or_reparse(reparse_stat) is True
+
+
+def test_streaming_model_pin_rechecks_tree_after_loader_consumes_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_bin = tmp_path / "model.bin"
+    model_bin.write_bytes(b"approved-stream-model")
+    config = tmp_path / "config.json"
+    config.write_text('{"approved":true}', encoding="utf-8")
+    tokenizer = tmp_path / "tokenizer.json"
+    tokenizer.write_text('{"version":"approved"}', encoding="utf-8")
+    model_digest = hashlib.sha256(model_bin.read_bytes()).hexdigest()
+    tree_digest = streaming_models_module._model_tree_sha256(tmp_path)
+
+    class MutatingWhisperModel:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            tokenizer.write_text('{"version":"swapped-during-load"}', encoding="utf-8")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=MutatingWhisperModel),
+    )
+    service = DirectWhisperService(
+        "floating-name",
+        "cpu",
+        "int8",
+        "tr",
+        1,
+        model_path=str(tmp_path),
+        model_sha256=model_digest,
+        model_tree_sha256=tree_digest,
+    )
+
+    with pytest.raises(ValueError, match="tree SHA-256 mismatch"):
+        service.ensure_model()
+    assert service.model_loaded is False
+
+
 def test_supervised_worker_close_is_bounded_while_call_lock_is_held() -> None:
     service = object.__new__(SupervisedLiveWhisperService)
     service.role = "live"
@@ -843,6 +1277,59 @@ def test_terminal_decode_rechecks_ready_generation_after_waiting_for_lock() -> N
     assert isinstance(result[0], WorkerCrashedError)
     assert "readiness changed" in str(result[0])
     assert service._task_queue.empty()
+
+
+@pytest.mark.parametrize(
+    "service_type",
+    (SupervisedLiveWhisperService, SupervisedFinalWhisperService),
+)
+def test_stream_decode_uses_pinned_worker_generation_without_lazy_reload(
+    service_type: type[SupervisedLiveWhisperService] | type[SupervisedFinalWhisperService],
+) -> None:
+    class PinnedService(service_type):  # type: ignore[misc, valid-type]
+        def __init__(self) -> None:
+            self.loaded_calls: list[int] = []
+
+        def transcribe_array(
+            self,
+            audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+            vad: bool,
+        ) -> str:
+            del audio, vad
+            raise AssertionError("accepted streams must not call the lazy reload path")
+
+        def transcribe_loaded_array(
+            self,
+            audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+            vad: bool,
+            expected_generation: int,
+        ) -> str:
+            del audio, vad
+            self.loaded_calls.append(expected_generation)
+            return "generation-pinned"
+
+    service = PinnedService()
+    result = _transcribe_with_stream_generation(
+        service,
+        np.ones(1600, dtype=np.float32),
+        False,
+        17,
+    )
+
+    assert result == "generation-pinned"
+    assert service.loaded_calls == [17]
+
+
+def test_stream_decode_fails_when_pinned_generation_is_missing() -> None:
+    service = object.__new__(SupervisedLiveWhisperService)
+
+    with pytest.raises(WorkerCrashedError, match="readiness is unavailable"):
+        _transcribe_with_stream_generation(
+            service,
+            np.ones(1600, dtype=np.float32),
+            False,
+            None,
+        )
 
 
 def test_direct_stream_service_passes_role_specific_beam_size() -> None:

@@ -83,54 +83,151 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # model load"). Every attempt restarted from zero, so no session could ever
     # start. Preloading moves the cost to boot, where nothing is waiting.
     #
-    # Daemon thread: startup must not block, or health probes fail for the
+    # Daemon thread: startup must not block, or liveness probes fail for the
     # minutes the load takes and the supervisor kills the service mid-load —
     # recreating the same never-finishes loop at a different layer.
+    from app.services.model_preload import StreamingPreloadState
+
+    preload_state = StreamingPreloadState(enabled=settings.stream_preload_models)
+    app.state.streaming_preload = preload_state
     preload_thread = None
     if settings.stream_preload_models:
         import threading
 
-        def _preload_models() -> None:
-            from app.services.streaming_models import get_final_service, get_live_service
+        from app.services.streaming_models import get_final_service, get_live_service
 
-            for label, factory in (("live", get_live_service), ("final", get_final_service)):
-                started = time.monotonic()
-                try:
-                    factory(settings).ensure_model()
-                except Exception as exc:  # noqa: BLE001 - never kill the service over a preload
-                    # A failed preload is not fatal: the WS path still calls
-                    # ensure_model(), so behaviour degrades to the old lazy load
-                    # rather than taking the service down.
-                    # Role and duration go in the message, not only in `extra`:
-                    # the configured format renders just `%(message)s`, so extras
-                    # are invisible in the log an operator actually reads.
+        # Construct both supervised services before the worker thread starts.
+        # shutdown_streaming_services() can then always find and stop them, even
+        # if shutdown races the first native model load.
+        preload_services = (
+            ("live", get_live_service(settings)),
+            ("final", get_final_service(settings)),
+        )
+
+        startup_preload_deadline = time.monotonic() + settings.stream_preload_readiness_budget_sec
+
+        def _load_role(label: str, service: Any, *, deadline: float) -> bool:
+            for attempt in range(1, settings.stream_preload_max_attempts + 1):
+                if preload_state.stop_event.is_set():
+                    return False
+                if time.monotonic() >= deadline:
+                    preload_state.mark_failed(label)
                     logger.error(
-                        "streaming model preload failed role=%s error=%s elapsed_sec=%.1f",
+                        "streaming model preload deadline exhausted role=%s attempt=%d",
                         label,
+                        attempt,
+                        extra={
+                            "correlation_id": "startup",
+                            "model_role": label,
+                            "attempt": attempt,
+                        },
+                    )
+                    return False
+                preload_state.begin_attempt(label)
+                started = time.monotonic()
+                cleanup_reserve_sec = 2 * settings.worker_kill_grace_sec
+                attempt_deadline = min(
+                    deadline - cleanup_reserve_sec,
+                    started + settings.stream_model_load_timeout_sec,
+                )
+                if attempt_deadline <= started:
+                    preload_state.mark_failed(label)
+                    return False
+                cleanup_deadline = min(
+                    deadline,
+                    attempt_deadline + cleanup_reserve_sec,
+                )
+                try:
+                    service.ensure_model(
+                        deadline=attempt_deadline,
+                        cleanup_deadline=cleanup_deadline,
+                    )
+                except Exception as exc:  # noqa: BLE001 - readiness records the failure
+                    preload_state.mark_failed(label)
+                    logger.error(
+                        "streaming model preload failed role=%s attempt=%d error=%s "
+                        "elapsed_sec=%.1f",
+                        label,
+                        attempt,
                         type(exc).__name__,
                         time.monotonic() - started,
                         extra={
                             "correlation_id": "startup",
                             "model_role": label,
                             "error_class": type(exc).__name__,
+                            "attempt": attempt,
                             "elapsed_sec": round(time.monotonic() - started, 1),
                         },
                     )
+                    if attempt >= settings.stream_preload_max_attempts:
+                        return False
+                    delay = settings.stream_preload_retry_base_sec * (2 ** (attempt - 1))
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or delay > remaining:
+                        return False
+                    if preload_state.stop_event.wait(min(delay, remaining)):
+                        return False
                     continue
+                preload_state.mark_ready(label)
                 logger.info(
-                    "streaming model preloaded role=%s elapsed_sec=%.1f",
+                    "streaming model preloaded role=%s attempt=%d elapsed_sec=%.1f",
                     label,
+                    attempt,
                     time.monotonic() - started,
                     extra={
                         "correlation_id": "startup",
                         "model_role": label,
+                        "attempt": attempt,
                         "elapsed_sec": round(time.monotonic() - started, 1),
                     },
                 )
+                return True
+            return False
 
-        preload_thread = threading.Thread(
-            target=_preload_models, name="model-preload", daemon=True
-        )
+        def _preload_models() -> None:
+            startup_ready = True
+            for label, service in preload_services:
+                if not _load_role(
+                    label,
+                    service,
+                    deadline=startup_preload_deadline,
+                ):
+                    startup_ready = False
+                if preload_state.stop_event.is_set():
+                    return
+
+            # A startup that exhausted its single declared deadline stays
+            # fail-closed. Runtime recovery is only entered after both models
+            # proved ready within that initial acceptance window.
+            if not startup_ready:
+                return
+
+            # The startup preload is also the lifecycle owner for later worker
+            # generations. A native timeout may recycle a child into a cold state,
+            # and final EOF deliberately does not restart inline. Keep readiness
+            # fail-closed while this bounded loop reloads the same pinned service;
+            # ensure_model() will never start a replacement while an unkillable old
+            # child remains alive because the supervisor's restart_blocked guard wins.
+            while not preload_state.stop_event.wait(settings.stream_recovery_poll_sec):
+                for label, service in preload_services:
+                    healthy = bool(getattr(service, "healthy", True))
+                    loaded = bool(getattr(service, "model_loaded", False))
+                    if healthy and loaded:
+                        preload_state.mark_ready(label)
+                        continue
+                    logger.warning(
+                        "streaming model worker requires recovery role=%s",
+                        label,
+                        extra={"correlation_id": "recovery", "model_role": label},
+                    )
+                    recovery_deadline = (
+                        time.monotonic() + settings.stream_preload_readiness_budget_sec
+                    )
+                    _load_role(label, service, deadline=recovery_deadline)
+                    if preload_state.stop_event.is_set():
+                        return
+
+        preload_thread = threading.Thread(target=_preload_models, name="model-preload", daemon=True)
         preload_thread.start()
         logger.info("streaming model preload started", extra={"correlation_id": "startup"})
 
@@ -163,6 +260,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             },
         )
     yield
+    # Stop preload progression first. Consumer shutdown can take five seconds;
+    # without this signal the preload thread could begin the second GPU model
+    # while the service is already leaving its lifespan.
+    preload_state.request_stop()
     if consumer is not None and consumer_thread is not None:
         consumer.stop()
         consumer_thread.join(timeout=5)
@@ -175,6 +276,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "streaming worker shutdown incomplete",
             extra={"correlation_id": "shutdown", "error_class": type(exc).__name__},
         )
+    if preload_thread is not None:
+        preload_thread.join(timeout=5)
+        if preload_thread.is_alive():
+            logger.error(
+                "streaming model preload thread did not stop within shutdown budget",
+                extra={"correlation_id": "shutdown"},
+            )
     logger.info("live-stt-service stopping", extra={"correlation_id": "shutdown"})
 
 
