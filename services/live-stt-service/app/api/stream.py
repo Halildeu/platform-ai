@@ -41,6 +41,7 @@ from app.core.config import Settings, get_settings
 from app.services.hallucination import is_hallucination
 from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import (
+    DirectWhisperService,
     SupervisedFinalWhisperService,
     SupervisedLiveWhisperService,
     get_final_service,
@@ -545,6 +546,20 @@ def _decode_terminal_control(value: str) -> None:
         raise StreamProtocolError("invalid_client_control")
 
 
+def _transcribe_with_stream_generation(
+    service: DirectWhisperService | SupervisedLiveWhisperService | SupervisedFinalWhisperService,
+    audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+    vad: bool,
+    expected_generation: int | None,
+) -> str:
+    """Decode without allowing a supervised worker reload inside a live stream."""
+    if isinstance(service, SupervisedLiveWhisperService | SupervisedFinalWhisperService):
+        if expected_generation is None:
+            raise WorkerCrashedError("streaming worker readiness is unavailable")
+        return service.transcribe_loaded_array(audio, vad, expected_generation)
+    return service.transcribe_array(audio, vad)
+
+
 @router.websocket("/ws/stream")
 async def stream_endpoint(
     websocket: WebSocket,
@@ -579,6 +594,7 @@ async def stream_endpoint(
         + (2 * settings.worker_kill_grace_sec)
         + (6 * settings.stream_transport_timeout_sec)
     )
+    live_worker_generation: int | None = None
     final_worker_generation: int | None = None
 
     try:
@@ -596,6 +612,8 @@ async def stream_endpoint(
             await websocket.send_json({"type": "error", "msg": "service_not_ready"})
             await websocket.close(code=1013)
             return
+        if isinstance(live_service, SupervisedLiveWhisperService):
+            live_worker_generation = live_service.ready_generation
         if isinstance(final_service, SupervisedFinalWhisperService):
             final_worker_generation = final_service.ready_generation
     except WebSocketDisconnect:
@@ -841,21 +859,13 @@ async def stream_endpoint(
         await send_debug("final_start", reason=reason, rms=round(rms, 5), buffer_sec=buffer_sec)
         started = time.perf_counter()
         try:
-            if reason == "eof" and isinstance(final_service, SupervisedFinalWhisperService):
-                if final_worker_generation is None:
-                    raise WorkerCrashedError("streaming final worker readiness is unavailable")
-                final_call = run_in_threadpool(
-                    final_service.transcribe_loaded_array,
-                    audio,
-                    settings.stream_final_vad_filter,
-                    final_worker_generation,
-                )
-            else:
-                final_call = run_in_threadpool(
-                    final_service.transcribe_array,
-                    audio,
-                    settings.stream_final_vad_filter,
-                )
+            final_call = run_in_threadpool(
+                _transcribe_with_stream_generation,
+                final_service,
+                audio,
+                settings.stream_final_vad_filter,
+                final_worker_generation,
+            )
             text = (
                 await final_call
                 if getattr(final_service, "hard_timeout", False)
@@ -865,7 +875,7 @@ async def stream_endpoint(
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
             logger.warning("Final pass error err_class=%s", type(exc).__name__, exc_info=True)
             await send_debug("final_error", error=type(exc).__name__)
-            if reason == "eof":
+            if reason == "eof" or isinstance(final_service, SupervisedFinalWhisperService):
                 raise
             text = last_draft
 
@@ -961,7 +971,13 @@ async def stream_endpoint(
         await send_debug("draft_start", rms=round(live_rms, 5))
         started = time.perf_counter()
         try:
-            draft_call = run_in_threadpool(live_service.transcribe_array, live_audio, False)
+            draft_call = run_in_threadpool(
+                _transcribe_with_stream_generation,
+                live_service,
+                live_audio,
+                False,
+                live_worker_generation,
+            )
             draft = (
                 await draft_call
                 if isinstance(live_service, SupervisedLiveWhisperService)

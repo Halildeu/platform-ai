@@ -24,6 +24,7 @@ from app.api.stream import (
     _select_partial_parts,
     _select_partial_text,
     _stabilize_rolling_partial,
+    _transcribe_with_stream_generation,
 )
 from app.core import config as config_module
 from app.core.config import Settings
@@ -1003,6 +1004,59 @@ def test_terminal_decode_rechecks_ready_generation_after_waiting_for_lock() -> N
     assert isinstance(result[0], WorkerCrashedError)
     assert "readiness changed" in str(result[0])
     assert service._task_queue.empty()
+
+
+@pytest.mark.parametrize(
+    "service_type",
+    (SupervisedLiveWhisperService, SupervisedFinalWhisperService),
+)
+def test_stream_decode_uses_pinned_worker_generation_without_lazy_reload(
+    service_type: type[SupervisedLiveWhisperService] | type[SupervisedFinalWhisperService],
+) -> None:
+    class PinnedService(service_type):  # type: ignore[misc, valid-type]
+        def __init__(self) -> None:
+            self.loaded_calls: list[int] = []
+
+        def transcribe_array(
+            self,
+            audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+            vad: bool,
+        ) -> str:
+            del audio, vad
+            raise AssertionError("accepted streams must not call the lazy reload path")
+
+        def transcribe_loaded_array(
+            self,
+            audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+            vad: bool,
+            expected_generation: int,
+        ) -> str:
+            del audio, vad
+            self.loaded_calls.append(expected_generation)
+            return "generation-pinned"
+
+    service = PinnedService()
+    result = _transcribe_with_stream_generation(
+        service,
+        np.ones(1600, dtype=np.float32),
+        False,
+        17,
+    )
+
+    assert result == "generation-pinned"
+    assert service.loaded_calls == [17]
+
+
+def test_stream_decode_fails_when_pinned_generation_is_missing() -> None:
+    service = object.__new__(SupervisedLiveWhisperService)
+
+    with pytest.raises(WorkerCrashedError, match="readiness is unavailable"):
+        _transcribe_with_stream_generation(
+            service,
+            np.ones(1600, dtype=np.float32),
+            False,
+            None,
+        )
 
 
 def test_direct_stream_service_passes_role_specific_beam_size() -> None:

@@ -85,8 +85,8 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
         {
             "type": "partial",
             "seq": 0,
-            "confirmed": "Kelime akışı",
-            "tentative": "aktif",
+            "confirmed": "Geçiş ülkelerinde",
+            "tentative": "yaşananlar",
             "elapsed_ms": 100,
             "rms": 0.02,
             "source": "fixture-live",
@@ -94,7 +94,7 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
         {
             "type": "final",
             "seq": 0,
-            "text": "Kelime akışı aktif ve doğru",
+            "text": "Geçiş ülkelerinde yaşananlar ise karışık.",
             "reason": "eof",
             "elapsed_ms": 200,
             "rms": 0.02,
@@ -420,7 +420,7 @@ def test_wav_loader_resamples_common_voice_fixture_to_16khz_float32() -> None:
 
 def test_redacted_summary_excludes_transcript_text() -> None:
     smoke = _load_smoke_module()
-    raw_text = "Kelime akışı aktif ve doğruluk oranı gayet iyi."
+    raw_text = FIXTURE.with_suffix(".txt").read_text(encoding="utf-8").strip()
     started_at = time.perf_counter()
 
     summary = smoke.build_summary(
@@ -456,6 +456,7 @@ def test_redacted_summary_excludes_transcript_text() -> None:
         terminal_events=["eof_ack", "drained"],
         errors=[],
         reference_text_path=FIXTURE.with_suffix(".txt"),
+        final_transcript_text=raw_text,
     )
     payload = json.dumps(summary, ensure_ascii=False)
     raw_reference = FIXTURE.with_suffix(".txt").read_text(encoding="utf-8").strip()
@@ -652,17 +653,47 @@ def test_summary_fails_when_final_word_coverage_is_too_low() -> None:
         errors=[],
         reference_text_path=FIXTURE.with_suffix(".txt"),
         min_final_word_coverage=0.5,
+        final_transcript_text=raw_text,
     )
     payload = json.dumps(summary, ensure_ascii=False)
 
     assert summary["ok"] is False
-    assert summary["coverage"] == {
-        "final_words": 1,
-        "reference_words": 5,
-        "final_word_coverage": 0.2,
-    }
+    assert summary["coverage"]["final_words"] == 1
+    assert summary["coverage"]["reference_words"] == 5
+    assert summary["coverage"]["final_word_coverage"] == 0.2
+    assert summary["coverage"]["reference_token_coverage"] == 0.0
+    assert summary["coverage"]["word_error_rate"] == 1.0
     assert "final_word_coverage_below_min" in summary["quality_gate"]["failures"]
     assert raw_text not in payload
+
+
+def test_summary_rejects_equal_length_but_unrelated_final_text() -> None:
+    smoke = _load_smoke_module()
+    unrelated = "Tamamen ilgisiz beş sözcüklü sonuç burada"
+    started_at = time.perf_counter()
+
+    summary = smoke.build_summary(
+        url="ws://127.0.0.1:18220/ws/stream",
+        wav_path=FIXTURE,
+        audio_samples=88_320,
+        started_at=started_at,
+        loading_events=["loading:live_model", "loading:final_model"],
+        ready_at=started_at + 0.1,
+        transcript_events=[
+            {"type": "partial", "received_at_ms": 100},
+            {"type": "final", "received_at_ms": 200, "text_words": 6},
+        ],
+        terminal_events=["eof_ack", "drained"],
+        errors=[],
+        reference_text_path=FIXTURE.with_suffix(".txt"),
+        final_transcript_text=unrelated,
+    )
+    payload = json.dumps(summary, ensure_ascii=False)
+
+    assert summary["ok"] is False
+    assert "reference_token_coverage_below_min" in summary["quality_gate"]["failures"]
+    assert "word_error_rate_above_max" in summary["quality_gate"]["failures"]
+    assert unrelated not in payload
 
 
 def test_summary_rejects_missing_terminal_drain() -> None:

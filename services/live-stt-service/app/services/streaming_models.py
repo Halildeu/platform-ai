@@ -523,12 +523,11 @@ class _SupervisedWhisperService:
         vad: bool,
         expected_generation: int,
     ) -> str:
-        """Decode only with the worker that was proven ready for this stream.
+        """Decode only with the worker generation proven ready for this stream.
 
-        EOF must never hide a cold model reload behind the terminal timeout
-        advertised during the ready handshake. If the supervised worker was
-        recycled after readiness, this connection fails closed and a new
-        connection performs model loading before it can receive audio.
+        No inference inside an accepted connection may hide a cold model reload.
+        If the supervised worker is recycled after readiness, that connection
+        fails closed and lifecycle recovery must make a later connection ready.
         """
         contiguous = np.ascontiguousarray(audio, dtype=np.float32)
         deadline = time.monotonic() + self._timeout_sec

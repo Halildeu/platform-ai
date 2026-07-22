@@ -290,4 +290,152 @@ try {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+$configureFixtureRoot = Join-Path $env:RUNNER_TEMP "live-stt-configure"
+$configureDeployRoot = Join-Path $configureFixtureRoot "deploy\gpu-host"
+$configureProgramData = Join-Path $configureFixtureRoot "ProgramData"
+$configureScript = Join-Path $configureDeployRoot "configure-live-stt.ps1"
+$configureRuntimeModule = Join-Path $configureDeployRoot "live-stt-runtime-env.ps1"
+$oldProgramData = $env:ProgramData
+$legacyFixture = Join-Path $configureDeployRoot "env.local.ps1"
+$script:LiveSttLegacyExecuted = $false
+try {
+    Remove-Item -LiteralPath $configureFixtureRoot -Recurse -Force `
+        -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $configureDeployRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $configureProgramData | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot `
+        "deploy\gpu-host\configure-live-stt.ps1") -Destination $configureScript
+    Copy-Item -LiteralPath (Join-Path $repoRoot `
+        "deploy\gpu-host\live-stt-runtime-env.ps1") -Destination $configureRuntimeModule
+    $configureSource = [IO.File]::ReadAllText($configureScript)
+    Assert-True (-not ($configureSource -match '(?m)^\s*\[string\]\$ConfigPath')) `
+        "The live STT provisioner must not expose a configurable runtime path."
+    Assert-True (-not $configureSource.Contains(". `$legacyConfigPath")) `
+        "The live STT provisioner must never dot-source the legacy config."
+    Assert-True ($configureSource.Contains("DataProtectionScope]::LocalMachine")) `
+        "The live STT provisioner must use DPAPI LocalMachine."
+
+    $env:ProgramData = $configureProgramData
+    $firstRedis = "redis://:synthetic-provision-secret-one@127.0.0.1:6379/0"
+    $firstSecure = ConvertTo-SecureString $firstRedis -AsPlainText -Force
+    $firstOutput = @(& $configureScript -RepoRoot $configureFixtureRoot `
+        -RedisUrl $firstSecure `
+        -ChunkConsumerEnabled true -RequestTimeout 180 `
+        -ChunkStreamPrefix "audio:chunks:p" -ChunkPartitionCount 32 `
+        -ChunkConsumerGroup "live-stt-v1" -ChunkConsumerName "gpu-host-1" `
+        -ChunkBlockMs 2000 -ChunkBatchSize 16 -ChunkDedupCacheSize 8192 `
+        -ChunkClaimIdleMs 60000 -ChunkClaimEveryLoops 30 `
+        -ChunkTrimMaxlen 10000 6>&1)
+    Assert-True (-not (($firstOutput | Out-String).Contains($firstRedis))) `
+        "Provisioning output exposed the Redis credential."
+
+    $configuredPath = Join-Path $configureProgramData `
+        "Acik\platform-ai\live-stt.env"
+    Assert-True (Test-Path -LiteralPath $configuredPath -PathType Leaf) `
+        "The provisioner did not write the fixed ProgramData config."
+    Assert-LiveSttRuntimeConfigAcl -Path (Join-Path $configureProgramData "Acik") `
+        -Directory
+    Assert-LiveSttRuntimeConfigAcl -Path (Join-Path $configureProgramData `
+        "Acik\platform-ai") -Directory
+    Assert-LiveSttRuntimeConfigAcl -Path $configuredPath
+    $firstContent = [IO.File]::ReadAllText($configuredPath)
+    Assert-True (-not $firstContent.Contains($firstRedis)) `
+        "The runtime config contains a plaintext Redis credential."
+    Assert-True ($firstContent.Contains("STT_REDIS_URL_DPAPI=")) `
+        "The runtime config misses its DPAPI Redis blob."
+    Clear-LiveSttManagedProcessEnvironment
+    Assert-True (Import-LiveSttRuntimeEnvironment -ConfigPath $configuredPath) `
+        "The provisioned runtime config did not pass strict readback."
+    Assert-True ($env:STT_REDIS_URL -eq $firstRedis) `
+        "The provisioned Redis credential failed its DPAPI round trip."
+    Assert-True ($env:STT_CHUNK_PARTITION_COUNT -eq "32") `
+        "The provisioned public config did not round trip."
+    Clear-LiveSttManagedProcessEnvironment
+
+    $secondOutput = @(& $configureScript -RepoRoot $configureFixtureRoot 6>&1)
+    $secondContent = [IO.File]::ReadAllText($configuredPath)
+    Assert-True ($secondContent -ceq $firstContent) `
+        "An idempotent run changed existing public config or the DPAPI blob."
+    Assert-True (-not (($secondOutput | Out-String).Contains($firstRedis))) `
+        "Idempotent provisioning output exposed the Redis credential."
+
+    $rotatedRedis = "rediss://:synthetic-provision-secret-two@redis.internal:6380/0"
+    $rotatedSecure = ConvertTo-SecureString $rotatedRedis -AsPlainText -Force
+    $rotationOutput = @(& $configureScript -RepoRoot $configureFixtureRoot `
+        -RedisUrl $rotatedSecure `
+        -RequestTimeout 90 6>&1)
+    $rotatedContent = [IO.File]::ReadAllText($configuredPath)
+    Assert-True (-not $rotatedContent.Contains($rotatedRedis)) `
+        "Rotated runtime config contains a plaintext Redis credential."
+    Assert-True (-not (($rotationOutput | Out-String).Contains($rotatedRedis))) `
+        "Rotation output exposed the Redis credential."
+    Assert-True ($rotatedContent.Contains("STT_REQUEST_TIMEOUT=90")) `
+        "Explicit public config rotation was not persisted."
+    Assert-True (-not (Test-Path -LiteralPath "$configuredPath.bak")) `
+        "A successful atomic rotation retained its temporary backup."
+    Assert-True ((Get-ChildItem -LiteralPath (Split-Path -Parent $configuredPath) `
+        -Filter ".live-stt-*.tmp" -Force).Count -eq 0) `
+        "A successful atomic rotation retained a staging file."
+    Clear-LiveSttManagedProcessEnvironment
+    Assert-True (Import-LiveSttRuntimeEnvironment -ConfigPath $configuredPath) `
+        "The rotated runtime config did not pass strict readback."
+    Assert-True ($env:STT_REDIS_URL -eq $rotatedRedis) `
+        "The rotated Redis credential failed its DPAPI round trip."
+    Clear-LiveSttManagedProcessEnvironment
+
+    [IO.File]::WriteAllText(
+        $legacyFixture,
+        '$script:LiveSttLegacyExecuted = $true; throw "legacy executed"',
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $migrationRedis = "redis://:synthetic-migration-secret@127.0.0.1:6379/1"
+    $migrationSecure = ConvertTo-SecureString $migrationRedis -AsPlainText -Force
+    $migrationRecords = New-Object Collections.Generic.List[string]
+    $migrationError = ""
+    try {
+        & $configureScript -RepoRoot $configureFixtureRoot `
+            -RedisUrl $migrationSecure -RequestTimeout 91 6>&1 |
+            ForEach-Object { [void]$migrationRecords.Add("$_") }
+    } catch {
+        $migrationError = $_.Exception.Message
+        [void]$migrationRecords.Add($migrationError)
+    }
+    Assert-True (-not [string]::IsNullOrWhiteSpace($migrationError)) `
+        "A remaining legacy PowerShell config must leave migration fail-closed."
+    Assert-True (Test-Path -LiteralPath $legacyFixture -PathType Leaf) `
+        "The provisioner must not silently delete the legacy config."
+    Assert-True (-not $script:LiveSttLegacyExecuted) `
+        "The provisioner executed or dot-sourced the legacy PowerShell config."
+    Assert-True (-not (($migrationRecords -join "`n").Contains($migrationRedis))) `
+        "Fail-closed migration output exposed the newly supplied credential."
+    Clear-LiveSttManagedProcessEnvironment
+    Assert-True (Import-LiveSttRuntimeEnvironment -ConfigPath $configuredPath) `
+        "The replacement DPAPI config was not verified before migration blocked."
+    Assert-True ($env:STT_REDIS_URL -eq $migrationRedis) `
+        "The fail-closed migration did not persist the operator-supplied secret."
+    Assert-True ($env:STT_REQUEST_TIMEOUT -eq "91") `
+        "The fail-closed migration did not persist the public config update."
+    Clear-LiveSttManagedProcessEnvironment
+
+    $postMigrationOutput = @(& $configureScript -RepoRoot $configureFixtureRoot `
+        -RemoveLegacyAfterVerifiedMigration -Confirm:$false 6>&1)
+    Assert-True (-not (Test-Path -LiteralPath $legacyFixture)) `
+        "Explicit verified migration did not remove the legacy plaintext config."
+    Assert-True (-not $script:LiveSttLegacyExecuted) `
+        "Explicit verified migration executed the legacy PowerShell config."
+    Assert-True (-not (($postMigrationOutput | Out-String).Contains($migrationRedis))) `
+        "Post-migration verification output exposed the Redis credential."
+} finally {
+    Clear-LiveSttManagedProcessEnvironment
+    $env:ProgramData = $oldProgramData
+    $firstSecure = $null
+    $rotatedSecure = $null
+    $migrationSecure = $null
+    $firstRedis = $null
+    $rotatedRedis = $null
+    $migrationRedis = $null
+    Remove-Item -LiteralPath $configureFixtureRoot -Recurse -Force `
+        -ErrorAction SilentlyContinue
+}
+
 Write-Host "live-stt restart/runtime acceptance contract: PASS"

@@ -13,21 +13,106 @@ başlatılır. Login gerekmez (SYSTEM hesabı).
   mock'a dusmez; Ollama yoksa fail-closed cikar ve Scheduled Task restart
   policy tekrar dener.
 
-## Kurulum (yönetici PowerShell)
+## Fresh bootstrap (yonetici PowerShell)
+
+Fresh bootstrap iki ayri clone kullanir. `platform-ai-control` yalniz approved
+exact commit'teki controller kodunu calistirir; Scheduled Task'lar yalniz
+`platform-ai` deploy clone'undan calisir. Iki rol ayni checkout olamaz.
+
 ```powershell
-cd C:\platform-ai
 Set-ExecutionPolicy -Scope Process Bypass
-.\deploy\gpu-host\update.ps1 `
-  -TargetCommit <approved-full-40-hex-commit> `
-  -NoRestart -Confirm:$false
-.\deploy\gpu-host\install.ps1            # RepoRoot farklıysa: -RepoRoot D:\platform-ai
+$TargetCommit = "<approved-full-40-hex-commit>"
+$Origin = "https://github.com/Halildeu/platform-ai.git"
+
+git clone $Origin C:\platform-ai-control
+git clone $Origin C:\platform-ai
+git -C C:\platform-ai-control fetch --prune origin
+git -C C:\platform-ai-control checkout --detach $TargetCommit
+git -C C:\platform-ai-control reset --hard $TargetCommit
+git -C C:\platform-ai fetch --prune origin
+git -C C:\platform-ai checkout --detach $TargetCommit
+git -C C:\platform-ai reset --hard $TargetCommit
 ```
 
-## Doğrulama
+Task kurmadan once secret/runtime config olusturulmalidir. En azindan stage/prod
+launcher'in zorunlu `meeting-ai.env` dosyasini controller checkout'undaki
+provisioner ile uretin; secret degerlerini komut satirina yazmayin:
+
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8200/health   # live-stt  (model load ~30-60 sn)
-Invoke-RestMethod http://127.0.0.1:8300/health   # meeting-ai
-Get-ScheduledTask platform-ai-*                   # ikisi de Running olmalı
+$meetingSecret = Read-Host "meeting-service OAuth secret" -AsSecureString
+$transcriptSecret = Read-Host `
+  "transcript-service capability OAuth secret" -AsSecureString
+& C:\platform-ai-control\deploy\gpu-host\configure-meeting-ai.ps1 `
+  -MeetingServiceBaseUrl "https://<internal-meeting-service-origin>" `
+  -MeetingServiceTokenUrl "https://<internal-auth-service-origin>/oauth2/token" `
+  -ClientSecret $meetingSecret `
+  -TranscriptServiceBaseUrl "https://<internal-transcript-service-origin>" `
+  -TranscriptServiceCapabilityPathTemplate '/api/v1/internal/tenants/{tenant_id}/meetings/{meeting_id}/sessions/{session_id}/finalizations/{finalization_version}/analysis-capability' `
+  -TranscriptServiceTokenUrl "https://<internal-auth-service-origin>/oauth2/token" `
+  -TranscriptServiceClientSecret $transcriptSecret
+```
+
+Redis-backed live-STT host config kullaniliyorsa DPAPI-backed
+`C:\ProgramData\Acik\platform-ai\live-stt.env` dosyasini task kurulumundan once
+controller checkout'undaki provisioner ile hazirlayin. Script legacy PowerShell
+configini okumaz veya calistirmaz; secret yeniden `SecureString` olarak girilir:
+
+```powershell
+$redisUrl = Read-Host "live-STT Redis URL" -AsSecureString
+& C:\platform-ai-control\deploy\gpu-host\configure-live-stt.ps1 `
+  -RepoRoot C:\platform-ai `
+  -RedisUrl $redisUrl `
+  -ChunkConsumerEnabled true `
+  -ChunkStreamPrefix "audio:chunks:p" `
+  -ChunkPartitionCount 32 `
+  -ChunkConsumerGroup "live-stt-v1" `
+  -ChunkConsumerName "gpu-host-1"
+```
+
+Hostta `deploy\gpu-host\env.local.ps1` varsa ilk cagri verified DPAPI configi
+yazar fakat plaintext dosya kaldigi icin fail-closed doner. Replacement secret
+ve host erasure aksiyonu onaylandiktan sonra migration'i atomik config readback
+sonrasinda explicit tamamlayin:
+
+```powershell
+& C:\platform-ai-control\deploy\gpu-host\configure-live-stt.ps1 `
+  -RepoRoot C:\platform-ai `
+  -RemoveLegacyAfterVerifiedMigration
+if (Test-Path C:\platform-ai\deploy\gpu-host\env.local.ps1) {
+  throw "Legacy plaintext config removal postcondition failed."
+}
+```
+
+Bu islem legacy dosyayi hicbir zaman dot-source etmez. SSD/backup uzerindeki
+eski bloklarin fiziksel sanitizasyonu kurumun host-erasure politikasina gore
+ayrica uygulanir; updater plaintext dosya gorurse deploy'u yine reddeder.
+
+Config hazir olduktan sonra installer yalniz controller checkout'undan
+calistirilir:
+
+```powershell
+& C:\platform-ai-control\deploy\gpu-host\install.ps1 `
+  -RepoRoot C:\platform-ai `
+  -TargetCommit $TargetCommit
+```
+
+Installer tasklari kaydetmeden once controller updater'ini `-WhatIf` ile
+calistirarak exact commit, clean checkout, ancestry ve same-origin guard'larini
+dogrular. Ardindan iki taski kaydeder ve ayni controller `update.ps1` ile ilk
+start'i yapar. Bu cagrida `-NoRestart` kullanilmaz. Basari; `/ready` icindeki
+exact `runtime_commit`, yeni ve stabil task/listener identity'si ve pinned sample
+WAV icin live partial, reference-token/WER kalite kapisi ve
+final/eof_ack/drained smoke'u birlikte gerektirir. Ilk kabul
+basarisizsa installer iki taski kaldirir ve 8200/8300 portlarinin birakildigini
+dogrulamadan donmez.
+
+## Kabul kanitini yeniden goruntuleme
+```powershell
+$ready = Invoke-RestMethod http://127.0.0.1:8200/ready
+$ready.status
+$ready.runtime_commit
+Get-ScheduledTask platform-ai-*
+Get-NetTCPConnection -LocalPort 8200,8300 -State Listen
 ```
 
 ## meeting-ai durable delivery runtime config
@@ -36,9 +121,11 @@ Get-ScheduledTask platform-ai-*                   # ikisi de Running olmalı
 meeting-service persist/read zincirini acmadan once Windows hostunda elevated
 PowerShell ile DPAPI-protected runtime config uretin. Client secret komut satirina,
 shell history'ye veya repoya yazilmaz; script `SecureString` prompt kullanir.
+Fresh bootstrap'ta bu provisioning task install adimindan once calistirilir;
+installer eksik `meeting-ai.env` ile task yaratmaz.
 
 ```powershell
-cd C:\platform-ai
+cd C:\platform-ai-control
 $transcriptSecret = Read-Host `
   "transcript-service delivery capability OAuth secret" -AsSecureString
 .\deploy\gpu-host\configure-meeting-ai.ps1 `

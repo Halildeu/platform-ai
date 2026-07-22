@@ -235,16 +235,18 @@ function Get-GpuHostTaskActionContract {
             return $result
         }
 
-        $canonicalRoot = 'C:\platform-ai'
         $legacyRoot = 'C:\Users\denetimpc\platform-ai'
-        $canonicalScript = Join-Path (Join-Path $canonicalRoot 'deploy\gpu-host') $spec.Script
-        $legacyScript = Join-Path (Join-Path $legacyRoot 'deploy\gpu-host') $spec.Script
-        if ($tokens[5] -ieq $canonicalScript -and $tokens[7] -ieq $canonicalRoot) {
-            $result.RepoClass = 'canonical-repo'
-        } elseif ($tokens[5] -ieq $legacyScript -and $tokens[7] -ieq $legacyRoot) {
+        $parsedRoot = $tokens[7]
+        if (-not (Test-GpuHostValueSafe -Value $parsedRoot)) { return $result }
+        $parsedRoot = [IO.Path]::GetFullPath($parsedRoot).TrimEnd('\')
+        $expectedScript = Join-Path (Join-Path $parsedRoot 'deploy\gpu-host') $spec.Script
+        if (-not (Test-GpuHostSameLocalPath -Left $tokens[5] -Right $expectedScript)) {
+            return $result
+        }
+        if (Test-GpuHostSameLocalPath -Left $parsedRoot -Right $legacyRoot) {
             $result.RepoClass = 'legacy-user-repo'
         } else {
-            return $result
+            $result.RepoClass = 'canonical-repo'
         }
 
         $pythonExe = $tokens[9]
@@ -271,10 +273,10 @@ function Get-GpuHostTaskActionContract {
         if ($index -ne $tokens.Count) { return $result }
 
         $result.CanonicalArguments = New-GpuHostTaskActionArguments `
-            -TaskName $TaskName -RepoRoot $canonicalRoot -PythonExe $pythonExe `
+            -TaskName $TaskName -RepoRoot $parsedRoot -PythonExe $pythonExe `
             -HfHome $hfHome -CudaBin $cudaBin
         $result.PythonExe = $pythonExe
-        $result.RepoRoot = $tokens[7]
+        $result.RepoRoot = $parsedRoot
         $result.HfHome = $hfHome
         $result.CudaBin = $cudaBin
         $result.Valid = $true

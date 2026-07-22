@@ -50,7 +50,21 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn('$env:CI -eq "true"', script)
         self.assertIn('$env:GITHUB_ACTIONS -eq "true"', script)
         self.assertIn('$env:RUNNER_ENVIRONMENT -eq "github-hosted"', script)
+        self.assertIn("\\\\runneradmin$", script)
         self.assertIn("$script:ResolvedRunnerTemp", script)
+        self.assertIn("function Test-GpuHostPathUnderRoot", script)
+        self.assertIn(
+            "Test-GpuHostPathUnderRoot -Path $controllerRoot", script
+        )
+        self.assertIn("Test-GpuHostPathUnderRoot -Path $RepoRoot", script)
+        self.assertIn(
+            "Test-GpuHostPathUnderRoot -Path $script:ResolvedStatePath",
+            script,
+        )
+        self.assertGreater(
+            script.index("$script:TestFaultsEnabled = ("),
+            script.index("$controllerRoot = (Resolve-Path"),
+        )
         self.assertIn("PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE", script)
         self.assertIn("PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE", script)
         self.assertNotIn("[switch]$Force", script)
@@ -101,6 +115,28 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("principals require FullControl", runtime_env)
         self.assertIn("Get-LiveSttRuntimeRoot", runtime_env)
 
+        provisioner = self._read_script("configure-live-stt.ps1")
+        self.assertIn("[string]$RepoRoot", provisioner)
+        self.assertIn("[Security.SecureString]$RedisUrl", provisioner)
+        self.assertIn("DataProtectionScope]::LocalMachine", provisioner)
+        self.assertIn("Write-LiveSttProvisionConfigAtomic", provisioner)
+        self.assertIn("-RemoveLegacyAfterVerifiedMigration", provisioner)
+        self.assertNotIn(". $legacyConfigPath", provisioner)
+
+    def test_fresh_install_delegates_first_start_to_full_acceptance(self) -> None:
+        script = self._read_script("install.ps1")
+
+        self.assertIn("[string]$TargetCommit", script)
+        self.assertIn("separate exact-target controller checkout", script)
+        self.assertIn("Invoke-GpuHostControllerUpdate -ValidationOnly", script)
+        self.assertIn("Provision the DPAPI meeting-ai runtime config", script)
+        self.assertIn("Register-ScheduledTask", script)
+        self.assertIn("$acceptanceExit = Invoke-GpuHostControllerUpdate", script)
+        self.assertIn("Remove-GpuHostBootstrapTasks", script)
+        self.assertIn("Bootstrap rollback did not release service listener", script)
+        self.assertNotIn("Start-ScheduledTask -TaskName $t.Name", script)
+        self.assertNotIn('tokens += "-NoRestart"', script)
+
     def test_live_stt_update_waits_for_stream_readiness_without_sync_gpu_warmup(
         self,
     ) -> None:
@@ -113,7 +149,44 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         )
         self.assertIn('Reason "readiness-failed"', script)
         self.assertIn("live_stream_smoke.py", script)
+        self.assertIn('"--reference-text", $referenceText', script)
+        self.assertIn('"--min-final-word-coverage", "0.5"', script)
+        self.assertIn('"--min-partial-events", "1"', script)
         self.assertIn('"--min-final-events", "1"', script)
+        self.assertIn(
+            '"--min-reference-token-coverage", "0.6"', script
+        )
+        self.assertIn('"--max-word-error-rate", "0.8"', script)
+        self.assertIn('"--max-transcript-gap-ms", "6000"', script)
+        self.assertNotIn('"--min-final-word-coverage", "0"', script)
+        self.assertNotIn('"--min-partial-events", "0"', script)
+        self.assertNotIn('"--max-transcript-gap-ms", "0"', script)
+        self.assertIn("[int]$summary.events.partial_count -ge 1", script)
+        self.assertIn(
+            "[double]$summary.coverage.final_word_coverage -ge 0.5",
+            script,
+        )
+        self.assertIn(
+            "[double]$summary.coverage.reference_token_coverage -ge 0.6",
+            script,
+        )
+        self.assertIn(
+            "[double]$summary.coverage.word_error_rate -le 0.8",
+            script,
+        )
+        self.assertIn(
+            "$summary.quality_gate.min_reference_token_coverage -eq 0.6",
+            script,
+        )
+        self.assertIn(
+            "$summary.quality_gate.max_word_error_rate -eq 0.8", script
+        )
+        self.assertIn(
+            "[int]$summary.events.max_transcript_gap_ms -le 6000",
+            script,
+        )
+        self.assertIn("$summary.reference.text_sha256_12", script)
+        self.assertIn("@($summary.quality_gate.failures).Count -eq 0", script)
         self.assertIn('"eof_ack,drained"', script)
         self.assertIn("LiveSttReadinessDeadlineSec", script)
         self.assertIn("[Diagnostics.Stopwatch]::StartNew()", script)

@@ -433,14 +433,41 @@ $child.WaitForExit()
         Assert-True ($contract.RepoClass -eq "legacy-user-repo") `
             "Legacy action was classified incorrectly."
     }
+    $customRoot = "D:\platform-ai"
+    $customArguments = Get-ActionArguments -TaskName "platform-ai-live-stt" `
+        -RepoRoot $customRoot
+    $customContract = Get-GpuHostTaskActionContract `
+        -TaskName "platform-ai-live-stt" `
+        -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -Arguments $customArguments
+    Assert-True $customContract.Valid `
+        "An installer-supported absolute repository root was rejected."
+    Assert-True ($customContract.RepoClass -eq "canonical-repo") `
+        "A non-legacy repository root was classified incorrectly."
+    Assert-True ($customContract.RepoRoot -eq $customRoot) `
+        "The parsed custom repository root was not exposed."
+    Assert-True ($customContract.CanonicalArguments -eq $customArguments) `
+        "Canonical arguments were not generated from the parsed repository root."
+
+    $mismatchedRootArguments = $customArguments.Replace(
+        "-RepoRoot D:\platform-ai -PythonExe",
+        "-RepoRoot C:\platform-ai -PythonExe"
+    )
+    Assert-ContractInvalid -TaskName "platform-ai-live-stt" `
+        -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -Arguments $mismatchedRootArguments
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "cmd.exe" `
         -Arguments $liveLegacy
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" `
         -Execute "C:\untrusted\powershell.exe" -Arguments $liveLegacy
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
         -Arguments ($liveLegacy + " -Unexpected value")
+    $mismatchedLegacyArguments = $liveLegacy.Replace(
+        "-RepoRoot $legacyRoot -PythonExe",
+        "-RepoRoot C:\other-repo -PythonExe"
+    )
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
-        -Arguments ($liveLegacy.Replace($legacyRoot, "C:\other-repo"))
+        -Arguments $mismatchedLegacyArguments
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
         -Arguments $liveLegacy -WorkingDirectory $legacyRoot
 

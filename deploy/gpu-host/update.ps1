@@ -75,17 +75,25 @@ if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
 }
 $script:ResolvedStatePath = ""
 try { $script:ResolvedStatePath = [IO.Path]::GetFullPath($StatePath) } catch { }
-$script:TestFaultsEnabled = (
-  $env:CI -eq "true" -and
-  $env:GITHUB_ACTIONS -eq "true" -and
-  $env:RUNNER_ENVIRONMENT -eq "github-hosted" -and
-  -not [string]::IsNullOrWhiteSpace($script:ResolvedRunnerTemp) -and
-  -not [string]::IsNullOrWhiteSpace($script:ResolvedStatePath) -and
-  $script:ResolvedStatePath.StartsWith(
-    $script:ResolvedRunnerTemp.TrimEnd('\') + '\',
-    [StringComparison]::OrdinalIgnoreCase
+$script:TestFaultsEnabled = $false
+
+function Test-GpuHostPathUnderRoot {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Root
   )
-)
+
+  try {
+    $resolvedPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $resolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    return $resolvedPath.StartsWith(
+      $resolvedRoot + '\',
+      [StringComparison]::OrdinalIgnoreCase
+    )
+  } catch {
+    return $false
+  }
+}
 
 function Stop-Deploy {
   param(
@@ -138,6 +146,25 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 }
 $controllerRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path
+$currentWindowsIdentity = ""
+try {
+  $currentWindowsIdentity = `
+    [Security.Principal.WindowsIdentity]::GetCurrent().Name
+} catch { }
+$script:TestFaultsEnabled = (
+  $env:CI -eq "true" -and
+  $env:GITHUB_ACTIONS -eq "true" -and
+  $env:RUNNER_ENVIRONMENT -eq "github-hosted" -and
+  $currentWindowsIdentity -match '\\runneradmin$' -and
+  -not [string]::IsNullOrWhiteSpace($script:ResolvedRunnerTemp) -and
+  -not [string]::IsNullOrWhiteSpace($script:ResolvedStatePath) -and
+  (Test-GpuHostPathUnderRoot -Path $controllerRoot `
+    -Root $script:ResolvedRunnerTemp) -and
+  (Test-GpuHostPathUnderRoot -Path $RepoRoot `
+    -Root $script:ResolvedRunnerTemp) -and
+  (Test-GpuHostPathUnderRoot -Path $script:ResolvedStatePath `
+    -Root $script:ResolvedRunnerTemp)
+)
 if ([IO.Path]::GetFullPath($controllerRoot).TrimEnd('\').Equals(
     [IO.Path]::GetFullPath($RepoRoot).TrimEnd('\'),
     [StringComparison]::OrdinalIgnoreCase
@@ -508,9 +535,12 @@ function Invoke-LiveSttStreamAcceptance {
     $smoke = Join-Path $controllerRoot "services\live-stt-service\scripts\live_stream_smoke.py"
     $wav = Join-Path $controllerRoot `
       "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.wav"
+    $referenceText = Join-Path $controllerRoot `
+      "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.txt"
     if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf) -or
         -not (Test-Path -LiteralPath $smoke -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $wav -PathType Leaf)) {
+        -not (Test-Path -LiteralPath $wav -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $referenceText -PathType Leaf)) {
       Write-Host "[update] direct stream acceptance interpreter/fixture missing" `
         -ForegroundColor Yellow
       return $false
@@ -529,12 +559,15 @@ function Invoke-LiveSttStreamAcceptance {
       $smoke,
       "--url", $Url,
       "--wav", $wav,
+      "--reference-text", $referenceText,
       "--timeout-sec", "$connectTimeoutSec",
       "--final-wait-sec", "$finalWaitSec",
-      "--min-final-word-coverage", "0",
-      "--min-partial-events", "0",
+      "--min-final-word-coverage", "0.5",
+      "--min-partial-events", "1",
       "--min-final-events", "1",
-      "--max-transcript-gap-ms", "0"
+      "--min-reference-token-coverage", "0.6",
+      "--max-word-error-rate", "0.8",
+      "--max-transcript-gap-ms", "6000"
     )
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $PythonExe
@@ -566,9 +599,46 @@ function Invoke-LiveSttStreamAcceptance {
     }
     try {
       $summary = $output | ConvertFrom-Json -ErrorAction Stop
+      $referenceName = [IO.Path]::GetFileName($referenceText)
+      $referenceContent = [IO.File]::ReadAllText($referenceText).Trim()
+      $sha256 = [Security.Cryptography.SHA256]::Create()
+      try {
+        $referenceNameHash = ([BitConverter]::ToString(
+          $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($referenceName))
+        ) -replace '-', '').ToLowerInvariant().Substring(0, 12)
+        $referenceTextHash = ([BitConverter]::ToString(
+          $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($referenceContent))
+        ) -replace '-', '').ToLowerInvariant().Substring(0, 12)
+      } finally {
+        $sha256.Dispose()
+      }
       return (
+        $summary.schema -eq "platform-ai.live-stt.stream-smoke.v1" -and
         $summary.ok -eq $true -and
+        $summary.reference.artifact_id_sha256_12 -eq $referenceNameHash -and
+        $summary.reference.text_sha256_12 -eq $referenceTextHash -and
+        [int]$summary.reference.words -ge 1 -and
+        [int]$summary.events.partial_count -ge 1 -and
         [int]$summary.events.final_count -ge 1 -and
+        [int]$summary.events.final_hallucination_count -eq 0 -and
+        [int]$summary.events.error_count -eq 0 -and
+        $null -ne $summary.events.max_transcript_gap_ms -and
+        [int]$summary.events.max_transcript_gap_ms -ge 0 -and
+        [int]$summary.events.max_transcript_gap_ms -le 6000 -and
+        [int]$summary.coverage.reference_words -eq `
+          [int]$summary.reference.words -and
+        [int]$summary.coverage.final_words -ge 1 -and
+        [double]$summary.coverage.final_word_coverage -ge 0.5 -and
+        [double]$summary.coverage.reference_token_coverage -ge 0.6 -and
+        [double]$summary.coverage.word_error_rate -ge 0.0 -and
+        [double]$summary.coverage.word_error_rate -le 0.8 -and
+        [int]$summary.quality_gate.min_partial_events -eq 1 -and
+        [int]$summary.quality_gate.min_final_events -eq 1 -and
+        [double]$summary.quality_gate.min_final_word_coverage -eq 0.5 -and
+        [double]$summary.quality_gate.min_reference_token_coverage -eq 0.6 -and
+        [double]$summary.quality_gate.max_word_error_rate -eq 0.8 -and
+        [int]$summary.quality_gate.max_transcript_gap_ms -eq 6000 -and
+        @($summary.quality_gate.failures).Count -eq 0 -and
         (@($summary.events.terminal_sequence) -join ",") -eq "eof_ack,drained"
       )
     } catch {
