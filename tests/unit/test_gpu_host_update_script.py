@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import ast
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -125,10 +132,22 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
 
     def test_fresh_install_delegates_first_start_to_full_acceptance(self) -> None:
         script = self._read_script("install.ps1")
+        process_contract = self._read_script("bootstrap-process.ps1")
+        updater = self._read_script("update.ps1")
 
         self.assertIn("[string]$TargetCommit", script)
         self.assertIn("separate exact-target controller checkout", script)
         self.assertIn("Invoke-GpuHostControllerUpdate -ValidationOnly", script)
+        self.assertIn('"-NoConfirm"', script)
+        self.assertNotIn("'-Confirm:$false'", script)
+        self.assertIn("Invoke-GpuHostBoundedWindowsPowerShellFile", script)
+        self.assertIn("ModelStagingTimeoutSec", script)
+        self.assertIn("AcceptanceTimeoutSec", script)
+        self.assertIn("stage-live-stt-models.ps1", script)
+        self.assertLess(
+            script.index("stage-live-stt-models.ps1"),
+            script.index("Register-ScheduledTask"),
+        )
         self.assertIn("Provision the DPAPI meeting-ai runtime config", script)
         self.assertIn("Register-ScheduledTask", script)
         self.assertIn("$acceptanceExit = Invoke-GpuHostControllerUpdate", script)
@@ -136,6 +155,183 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Bootstrap rollback did not release service listener", script)
         self.assertNotIn("Start-ScheduledTask -TaskName $t.Name", script)
         self.assertNotIn('tokens += "-NoRestart"', script)
+        self.assertIn("Stop-GpuHostProcessTreeBounded", process_contract)
+        self.assertIn("taskkill.exe", process_contract)
+        self.assertIn("$process.WaitForExit($TimeoutSec * 1000)", process_contract)
+        self.assertIn('"-NonInteractive"', process_contract)
+        self.assertIn("[switch]$NoConfirm", updater)
+        self.assertIn('$ConfirmPreference = "None"', updater)
+
+    def test_live_stt_models_are_staged_and_verified_as_complete_directories(
+        self,
+    ) -> None:
+        policy = json.loads(
+            (ROOT / "deploy/gpu-host/live-stt-model-policy.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(policy["schema"], "platform-ai.live-stt.model-policy.v1")
+        self.assertEqual(
+            {entry["role"] for entry in policy["models"]}, {"live", "final"}
+        )
+        for entry in policy["models"]:
+            self.assertRegex(entry["revision"], r"^[0-9a-f]{40}$")
+            self.assertRegex(entry["modelBinSha256"], r"^[0-9a-f]{64}$")
+
+        runtime = self._read_script("live-stt-model-runtime.ps1")
+        stager = self._read_script("stage-live-stt-models.ps1")
+        launcher = self._read_script("start-live-stt.ps1")
+        for script in (runtime, stager):
+            script.encode("ascii")
+        self.assertIn("Assert-LiveSttNoReparseTree", runtime)
+        self.assertIn("must not traverse a reparse point", runtime)
+        self.assertIn("SetAccessRuleProtection($true, $false)", runtime)
+        self.assertIn('"S-1-5-18"', runtime)
+        self.assertIn('"S-1-5-32-544"', runtime)
+        self.assertIn("Assert-LiveSttModelTreeAcl", runtime)
+        self.assertIn("Invoke-LiveSttModelVerifier", runtime)
+        self.assertIn('"--digest-output", $DigestOutputPath', runtime)
+        self.assertIn("treeSha256", runtime)
+        self.assertIn(
+            "Move-Item -LiteralPath $staging -Destination $destination", stager
+        )
+        self.assertIn("Model staging rollback failed", stager)
+        self.assertIn("Assert-LiveSttModelSet", launcher)
+        self.assertIn('$env:HF_HUB_OFFLINE = "1"', launcher)
+        self.assertIn("STT_LIVE_MODEL_TREE_SHA256", launcher)
+        self.assertIn("STT_FINAL_MODEL_TREE_SHA256", launcher)
+        self.assertNotIn("models--Systran--", launcher)
+        self.assertNotIn("models--deepdml--", launcher)
+
+    def test_model_integrity_helper_stages_and_detects_non_model_bin_changes(
+        self,
+    ) -> None:
+        helper = ROOT / "deploy/gpu-host/stage-live-stt-model.py"
+        revision = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            destination = root / "runtime"
+            source.mkdir()
+            model_bytes = b"synthetic-model-bin"
+            (source / "model.bin").write_bytes(model_bytes)
+            (source / "config.json").write_text(
+                '{"model":"synthetic"}', encoding="utf-8"
+            )
+            (source / "tokenizer.json").write_text('{"tokens":[]}', encoding="utf-8")
+            model_hash = hashlib.sha256(model_bytes).hexdigest()
+            common = [
+                "--repository",
+                "example/synthetic-model",
+                "--revision",
+                revision,
+                "--model-bin-sha256",
+                model_hash,
+                "--destination",
+                str(destination),
+            ]
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(helper),
+                    "stage",
+                    *common,
+                    "--source-directory",
+                    str(source),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest = json.loads(
+                (destination / "integrity-manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [entry["path"] for entry in manifest["files"]],
+                ["config.json", "model.bin", "tokenizer.json"],
+            )
+            digest_output = root / "tree-digest.txt"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(helper),
+                    "verify",
+                    *common,
+                    "--digest-output",
+                    str(digest_output),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertRegex(
+                digest_output.read_text(encoding="ascii").strip(),
+                r"^[0-9a-f]{64}$",
+            )
+            expected_tree = hashlib.sha256(
+                b"platform-live-stt-model-directory-v1\0"
+            )
+            for artifact in sorted(
+                path for path in destination.rglob("*") if path.is_file()
+            ):
+                relative = artifact.relative_to(destination).as_posix().encode("utf-8")
+                payload = artifact.read_bytes()
+                expected_tree.update(len(relative).to_bytes(8, "big"))
+                expected_tree.update(relative)
+                expected_tree.update(len(payload).to_bytes(8, "big"))
+                expected_tree.update(payload)
+            self.assertEqual(
+                digest_output.read_text(encoding="ascii").strip(),
+                expected_tree.hexdigest(),
+            )
+            (destination / "config.json").write_text(
+                '{"model":"changed"}', encoding="utf-8"
+            )
+            rejected = subprocess.run(
+                [sys.executable, str(helper), "verify", *common],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("artifact set or digest changed", rejected.stderr)
+
+    def test_readme_stream_command_passes_actual_smoke_url_validator(self) -> None:
+        readme = (ROOT / "deploy/gpu-host/README.md").read_text(encoding="utf-8")
+        match = re.search(
+            r"live_stream_smoke\.py --url \"([^\"]+)\"",
+            readme,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+
+        smoke_path = ROOT / "services/live-stt-service/scripts/live_stream_smoke.py"
+        tree = ast.parse(smoke_path.read_text(encoding="utf-8"))
+        selected: list[ast.stmt] = []
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "urllib.parse":
+                selected.append(node)
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "STREAM_PROTOCOL"
+                for target in node.targets
+            ):
+                selected.append(node)
+            elif isinstance(node, ast.ClassDef) and node.name == "SmokeError":
+                selected.append(node)
+            elif (
+                isinstance(node, ast.FunctionDef) and node.name == "validate_stream_url"
+            ):
+                selected.append(node)
+        namespace: dict[str, object] = {}
+        exec(
+            compile(
+                ast.Module(body=selected, type_ignores=[]), str(smoke_path), "exec"
+            ),
+            namespace,
+        )
+        validator = namespace["validate_stream_url"]
+        assert callable(validator)
+        validator(match.group(1))
 
     def test_live_stt_update_waits_for_stream_readiness_without_sync_gpu_warmup(
         self,
@@ -150,37 +346,35 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn('Reason "readiness-failed"', script)
         self.assertIn("live_stream_smoke.py", script)
         self.assertIn('"--reference-text", $referenceText', script)
-        self.assertIn('"--min-final-word-coverage", "0.5"', script)
+        self.assertIn('"sample-tr-cv17-001"', script)
+        self.assertIn('"sample-tr-cv17-002"', script)
+        self.assertIn('"--min-final-word-coverage", "0.8"', script)
         self.assertIn('"--min-partial-events", "1"', script)
         self.assertIn('"--min-final-events", "1"', script)
-        self.assertIn(
-            '"--min-reference-token-coverage", "0.6"', script
-        )
-        self.assertIn('"--max-word-error-rate", "0.8"', script)
+        self.assertIn('"--min-reference-token-coverage", "0.8"', script)
+        self.assertIn('"--max-word-error-rate", "0.25"', script)
         self.assertIn('"--max-transcript-gap-ms", "6000"', script)
         self.assertNotIn('"--min-final-word-coverage", "0"', script)
         self.assertNotIn('"--min-partial-events", "0"', script)
         self.assertNotIn('"--max-transcript-gap-ms", "0"', script)
         self.assertIn("[int]$summary.events.partial_count -ge 1", script)
         self.assertIn(
-            "[double]$summary.coverage.final_word_coverage -ge 0.5",
+            "[double]$summary.coverage.final_word_coverage -ge 0.8",
             script,
         )
         self.assertIn(
-            "[double]$summary.coverage.reference_token_coverage -ge 0.6",
+            "[double]$summary.coverage.reference_token_coverage -ge 0.8",
             script,
         )
         self.assertIn(
-            "[double]$summary.coverage.word_error_rate -le 0.8",
+            "[double]$summary.coverage.word_error_rate -le 0.25",
             script,
         )
         self.assertIn(
-            "$summary.quality_gate.min_reference_token_coverage -eq 0.6",
+            "$summary.quality_gate.min_reference_token_coverage -eq 0.8",
             script,
         )
-        self.assertIn(
-            "$summary.quality_gate.max_word_error_rate -eq 0.8", script
-        )
+        self.assertIn("$summary.quality_gate.max_word_error_rate -eq 0.25", script)
         self.assertIn(
             "[int]$summary.events.max_transcript_gap_ms -le 6000",
             script,

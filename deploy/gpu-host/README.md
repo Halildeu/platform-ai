@@ -8,7 +8,10 @@ başlatılır. Login gerekmez (SYSTEM hesabı).
 - Python 3.10+ PATH'te, servis bağımlılıkları kurulu
   (`pip install -r services/live-stt-service/requirements.txt` ve
   `pip install -r services/meeting-ai-service/requirements.txt`)
-- CUDA sürücüsü (live-stt için), modeller ilk açılışta indirilir/cache'ten gelir
+- CUDA sürücüsü (live-stt için). Installer iki modeli exact revision ile indirip
+  `C:\ProgramData\Acik\platform-ai\models\live-stt` altinda full-artifact
+  manifest ve SYSTEM/Administrators-only ACL ile stage eder. Ilk kullaniciya
+  download veya lazy-load birakilmaz.
 - (#54 Option B) Ollama + `ollama pull llama3.1:8b`. Stage/prod launcher
   mock'a dusmez; Ollama yoksa fail-closed cikar ve Scheduled Task restart
   policy tekrar dener.
@@ -98,12 +101,21 @@ calistirilir:
 
 Installer tasklari kaydetmeden once controller updater'ini `-WhatIf` ile
 calistirarak exact commit, clean checkout, ancestry ve same-origin guard'larini
-dogrular. Ardindan iki taski kaydeder ve ayni controller `update.ps1` ile ilk
-start'i yapar. Bu cagrida `-NoRestart` kullanilmaz. Basari; `/ready` icindeki
-exact `runtime_commit`, yeni ve stabil task/listener identity'si ve pinned sample
-WAV icin live partial, reference-token/WER kalite kapisi ve
-final/eof_ack/drained smoke'u birlikte gerektirir. Ilk kabul
-basarisizsa installer iki taski kaldirir ve 8200/8300 portlarinin birakildigini
+dogrular. Sonra bos kullanici cache'i ve bos SYSTEM cache'inden bagimsiz olarak
+iki exact model revision'ini kontrollu staging dizinine indirir; `model.bin`
+pinini ve dizindeki her normal dosyanin SHA-256/size manifestini dogrular,
+reparse point'leri reddeder ve runtime agacini yalniz SYSTEM ile Administrators
+yazabilir hale getirir. Eksik, kismi veya yanlis revision varken task olusturmaz.
+
+Ancak bu model kapisi gectikten sonra iki taski kaydeder ve ayni controller
+`update.ps1` ile ilk start'i yapar. Child Windows PowerShell 5.1
+`-NonInteractive -File ... -NoConfirm` ile ve bounded timeout ile calisir; timeout
+process tree'yi sonlandirir. Bu cagrida `-NoRestart` kullanilmaz. Kabul sirasi:
+startup'ta iki model preload -> `/ready` 200 ve exact `runtime_commit` -> yeni ve
+stabil task/listener/runtime identity -> pinned WAV icin content-quality stream
+smoke -> basari. Herhangi bir adim basarisizsa updater onceki revision'i yeniden
+kabul etmeyi dener. Fresh bootstrap'ta daha once kabul edilmis revision yoksa
+installer iki taski kaldirir ve 8200/8300 portlarinin birakildigini
 dogrulamadan donmez.
 
 ## Kabul kanitini yeniden goruntuleme
@@ -226,18 +238,21 @@ hazirlanir, DSSE Ed25519 imzasi ve tum immutable/live binding'ler dogrulandiktan
 config atomik olarak degistirilir. Production private signing key hosta konmaz; Vault
 Transit sinirinda kalir.
 
-`/health` sadece senkron `/transcribe` modelinin lazy-load durumunu gosterir.
-Canli urun yuzeyi icin asil readiness `/ws/stream` handshake'idir:
-`loading/live_model -> loading/final_model -> ready`. `update.ps1` restart
-sonrasinda bu direct stream modellerini transcript-free websocket warmup ile
-yukler; bu adim basarisizsa ilk kullanici kaydi model yukleme gecikmesini oder.
+`/health` sadece senkron `/transcribe` modelinin durumunu gosterir. Canli urun
+yuzeyinin readiness kapisi `/ready` endpoint'idir. Production launcher once
+hardened model dizinlerinin ACL ve full-artifact manifestlerini dogrular, sonra
+startup lifecycle iki direct-stream modelini preload eder:
+`loading/live_model -> loading/final_model -> ready`. `/ready` bu zincir ve
+exact runtime commit dogrulanmadan 200 donmez. `update.ps1` daha sonra exact
+Scheduled Task, listener ve interpreter identity'sini ve pinned content smoke'u
+dogrular; ilk kullanici icin lazy-load/warmup fallback'i yoktur.
 
 Direct stream kalite smoke'u icin gelistirici makinesinden tunel acikken anonim
 Common Voice TR fixture'i kullanilabilir:
 
 ```powershell
 cd services\live-stt-service
-python scripts\live_stream_smoke.py --url ws://127.0.0.1:18220/ws/stream
+python scripts\live_stream_smoke.py --url "ws://127.0.0.1:18220/ws/stream?protocol=source-ranges-v1"
 ```
 
 Bu smoke stdout'a ham audio veya transcript yazmaz; yalniz event sayisi,

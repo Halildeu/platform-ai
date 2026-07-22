@@ -40,6 +40,11 @@
 .PARAMETER NoRestart
   Pin and ledger the working tree but do not restart scheduled tasks.
 
+.PARAMETER NoConfirm
+  Suppress ShouldProcess confirmation for a non-interactive controller child.
+  This is a normal script switch and is safe through Windows PowerShell 5.1
+  powershell.exe -File argument binding.
+
 .EXAMPLE
   cd C:\platform-ai-control
   Set-ExecutionPolicy -Scope Process Bypass
@@ -53,11 +58,13 @@ param(
   [string]$TargetCommit = "",
   [string]$StatePath = "C:\ProgramData\Acik\platform-ai\deployment-state.json",
   [switch]$Rollback,
-  [switch]$NoRestart
+  [switch]$NoRestart,
+  [switch]$NoConfirm
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
+if ($NoConfirm) { $ConfirmPreference = "None" }
 $script:DeployExitGuard = 2
 $script:DeployExitRestartFailed = 3
 $script:DeployExitRollbackFailed = 4
@@ -520,11 +527,15 @@ function Get-TaskRuntimeContract {
     }
 }
 
-function Invoke-LiveSttStreamAcceptance {
+function Invoke-LiveSttFixtureAcceptance {
   param(
     [Parameter(Mandatory = $true)][string]$PythonExe,
     [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
     [Parameter(Mandatory = $true)][double]$DeadlineSec,
+    [Parameter(Mandatory = $true)][ValidateSet(
+      "sample-tr-cv17-001",
+      "sample-tr-cv17-002"
+    )][string]$FixtureBaseName,
     [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
     [int]$ConnectTimeoutCapSec = 30
   )
@@ -534,9 +545,9 @@ function Invoke-LiveSttStreamAcceptance {
     $ErrorActionPreference = "Continue"
     $smoke = Join-Path $controllerRoot "services\live-stt-service\scripts\live_stream_smoke.py"
     $wav = Join-Path $controllerRoot `
-      "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.wav"
+      ("services\live-stt-service\tests\fixtures\{0}.wav" -f $FixtureBaseName)
     $referenceText = Join-Path $controllerRoot `
-      "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.txt"
+      ("services\live-stt-service\tests\fixtures\{0}.txt" -f $FixtureBaseName)
     if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf) -or
         -not (Test-Path -LiteralPath $smoke -PathType Leaf) -or
         -not (Test-Path -LiteralPath $wav -PathType Leaf) -or
@@ -562,11 +573,11 @@ function Invoke-LiveSttStreamAcceptance {
       "--reference-text", $referenceText,
       "--timeout-sec", "$connectTimeoutSec",
       "--final-wait-sec", "$finalWaitSec",
-      "--min-final-word-coverage", "0.5",
+      "--min-final-word-coverage", "0.8",
       "--min-partial-events", "1",
       "--min-final-events", "1",
-      "--min-reference-token-coverage", "0.6",
-      "--max-word-error-rate", "0.8",
+      "--min-reference-token-coverage", "0.8",
+      "--max-word-error-rate", "0.25",
       "--max-transcript-gap-ms", "6000"
     )
     $startInfo = New-Object Diagnostics.ProcessStartInfo
@@ -628,15 +639,15 @@ function Invoke-LiveSttStreamAcceptance {
         [int]$summary.coverage.reference_words -eq `
           [int]$summary.reference.words -and
         [int]$summary.coverage.final_words -ge 1 -and
-        [double]$summary.coverage.final_word_coverage -ge 0.5 -and
-        [double]$summary.coverage.reference_token_coverage -ge 0.6 -and
+        [double]$summary.coverage.final_word_coverage -ge 0.8 -and
+        [double]$summary.coverage.reference_token_coverage -ge 0.8 -and
         [double]$summary.coverage.word_error_rate -ge 0.0 -and
-        [double]$summary.coverage.word_error_rate -le 0.8 -and
+        [double]$summary.coverage.word_error_rate -le 0.25 -and
         [int]$summary.quality_gate.min_partial_events -eq 1 -and
         [int]$summary.quality_gate.min_final_events -eq 1 -and
-        [double]$summary.quality_gate.min_final_word_coverage -eq 0.5 -and
-        [double]$summary.quality_gate.min_reference_token_coverage -eq 0.6 -and
-        [double]$summary.quality_gate.max_word_error_rate -eq 0.8 -and
+        [double]$summary.quality_gate.min_final_word_coverage -eq 0.8 -and
+        [double]$summary.quality_gate.min_reference_token_coverage -eq 0.8 -and
+        [double]$summary.quality_gate.max_word_error_rate -eq 0.25 -and
         [int]$summary.quality_gate.max_transcript_gap_ms -eq 6000 -and
         @($summary.quality_gate.failures).Count -eq 0 -and
         (@($summary.events.terminal_sequence) -join ",") -eq "eof_ack,drained"
@@ -651,6 +662,37 @@ function Invoke-LiveSttStreamAcceptance {
   } finally {
     $ErrorActionPreference = $oldEap
   }
+}
+
+function Invoke-LiveSttStreamAcceptance {
+  param(
+    [Parameter(Mandatory = $true)][string]$PythonExe,
+    [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
+    [Parameter(Mandatory = $true)][double]$DeadlineSec,
+    [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
+    [int]$ConnectTimeoutCapSec = 30
+  )
+
+  $fixtures = @("sample-tr-cv17-001", "sample-tr-cv17-002")
+  for ($index = 0; $index -lt $fixtures.Count; $index++) {
+    $fixturesRemaining = $fixtures.Count - $index
+    $remainingSec = $DeadlineSec - $Clock.Elapsed.TotalSeconds
+    if ($remainingSec -le (5 * $fixturesRemaining)) { return $false }
+    $fixtureBudgetSec = [Math]::Floor($remainingSec / $fixturesRemaining)
+    $fixtureDeadlineSec = [Math]::Min(
+      $DeadlineSec,
+      $Clock.Elapsed.TotalSeconds + $fixtureBudgetSec
+    )
+    if (-not (Invoke-LiveSttFixtureAcceptance -PythonExe $PythonExe `
+        -Clock $Clock -DeadlineSec $fixtureDeadlineSec `
+        -FixtureBaseName $fixtures[$index] -Url $Url `
+        -ConnectTimeoutCapSec $ConnectTimeoutCapSec)) {
+      Write-Host ("[update] fixture acceptance failed: {0}" -f $fixtures[$index]) `
+        -ForegroundColor Yellow
+      return $false
+    }
+  }
+  return $true
 }
 
 function New-GpuHostAcceptanceResult {

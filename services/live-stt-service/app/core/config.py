@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     runtime_commit: str = Field(default="unversioned", min_length=1, max_length=40)
     model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
     model_sha256: str = Field(default="", max_length=71)
+    model_tree_sha256: str = Field(default="", max_length=71)
     model_path: Path | None = None
     compute_type: str = Field(default="int8", description="quantization")
     device: str = Field(default="cpu", description="cpu / cuda / auto")
@@ -101,6 +102,7 @@ class Settings(BaseSettings):
     live_model_name: str = Field(default="medium", description="fast draft model")
     live_model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
     live_model_sha256: str = Field(default="", max_length=71)
+    live_model_tree_sha256: str = Field(default="", max_length=71)
     live_model_path: Path | None = None
     live_compute_type: str = Field(default="int8")
     live_device: str = Field(default="cuda")
@@ -116,6 +118,7 @@ class Settings(BaseSettings):
     )
     final_model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
     final_model_sha256: str = Field(default="", max_length=71)
+    final_model_tree_sha256: str = Field(default="", max_length=71)
     final_model_path: Path | None = None
     final_compute_type: str = Field(default="float16")
     final_device: str = Field(default="cuda")
@@ -194,25 +197,33 @@ class Settings(BaseSettings):
     def validate_stream_tuning(self) -> Self:
         """Keep model provenance and low-latency knobs internally consistent."""
         model_identities = (
-            ("model", self.model_revision, self.model_sha256, self.model_path),
+            (
+                "model", self.model_revision, self.model_sha256,
+                self.model_tree_sha256, self.model_path,
+            ),
             (
                 "live_model",
                 self.live_model_revision,
                 self.live_model_sha256,
+                self.live_model_tree_sha256,
                 self.live_model_path,
             ),
             (
                 "final_model",
                 self.final_model_revision,
                 self.final_model_sha256,
+                self.final_model_tree_sha256,
                 self.final_model_path,
             ),
         )
-        for label, _revision, digest, _path in model_identities:
-            if digest and not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", digest):
-                raise ValueError(f"{label}_sha256 must be a lowercase full SHA-256 digest")
+        for label, _revision, digest, tree_digest, _path in model_identities:
+            for field_name, value in (("sha256", digest), ("tree_sha256", tree_digest)):
+                if value and not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", value):
+                    raise ValueError(
+                        f"{label}_{field_name} must be a lowercase full SHA-256 digest"
+                    )
         if self.environment in {"staging", "production"}:
-            for label, revision, digest, path in model_identities:
+            for label, revision, digest, tree_digest, path in model_identities:
                 if not re.fullmatch(r"[0-9a-f]{40}", revision):
                     raise ValueError(
                         f"{label}_revision must be a lowercase 40-hex immutable revision "
@@ -220,6 +231,10 @@ class Settings(BaseSettings):
                     )
                 if not digest:
                     raise ValueError(f"{label}_sha256 is required in staging/production")
+                if not tree_digest:
+                    raise ValueError(
+                        f"{label}_tree_sha256 is required in staging/production"
+                    )
                 if path is None:
                     raise ValueError(f"{label}_path is required in staging/production")
         if self.environment == "production" and not self.stream_preload_models:

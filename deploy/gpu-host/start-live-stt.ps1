@@ -8,8 +8,8 @@ param(
     # Full path required: the task runs as SYSTEM, whose PATH does not include
     # per-user Python installs. install.ps1 resolves and passes this.
     [string]$PythonExe = "python",
-    # Whisper model cache. SYSTEM's own cache is empty; install.ps1 passes the
-    # installing user's ~\.cache\huggingface so models are not re-downloaded.
+    # Hardened ProgramData model root. The historical parameter name is kept
+    # for Scheduled Task action compatibility; this is not a user cache.
     [string]$HfHome = "",
     # Semicolon-separated dirs containing cublas/cudnn DLLs, resolved by
     # install.ps1 from the installing user's PATH (SYSTEM cannot see them).
@@ -27,6 +27,17 @@ if (-not (Test-Path -LiteralPath $runtimeEnv -PathType Leaf)) {
     throw "Missing live-stt-runtime-env.ps1"
 }
 . $runtimeEnv
+$taskActionContract = Join-Path $RepoRoot "deploy\gpu-host\task-action-contract.ps1"
+$processContract = Join-Path $RepoRoot "deploy\gpu-host\bootstrap-process.ps1"
+$modelRuntime = Join-Path $RepoRoot "deploy\gpu-host\live-stt-model-runtime.ps1"
+foreach ($required in @($taskActionContract, $processContract, $modelRuntime)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Missing live STT model verification dependency: $required"
+    }
+}
+. $taskActionContract
+. $processContract
+. $modelRuntime
 $legacyRuntimeEnv = Join-Path $RepoRoot "deploy\gpu-host\env.local.ps1"
 if (Test-Path -LiteralPath $legacyRuntimeEnv -PathType Leaf) {
     throw "Legacy plaintext env.local.ps1 detected. Migrate it to the DPAPI-backed ProgramData live-stt.env file and securely remove the legacy file before restart."
@@ -76,10 +87,24 @@ $env:STT_STREAM_PRELOAD_MODELS = "true"
 
 if ($HfHome) {
     $env:HF_HOME = $HfHome
-    $env:HUGGINGFACE_HUB_CACHE = Join-Path $HfHome "hub"
+    $env:HUGGINGFACE_HUB_CACHE = Join-Path $HfHome "cache"
+    $env:HF_HUB_OFFLINE = "1"
+    $env:HF_HUB_DISABLE_TELEMETRY = "1"
 } else {
-    throw "HfHome is required for the production pinned live-stt model"
+    throw "HfHome is required for the production hardened live-stt model runtime"
 }
+
+$modelPolicyPath = Join-Path $RepoRoot "deploy\gpu-host\live-stt-model-policy.json"
+$modelHelperPath = Join-Path $RepoRoot "deploy\gpu-host\stage-live-stt-model.py"
+$modelPolicy = Assert-LiveSttModelSet -RuntimeRoot $HfHome `
+    -PythonExe $PythonExe -PolicyPath $modelPolicyPath -HelperPath $modelHelperPath
+$liveModels = @($modelPolicy.models | Where-Object { $_.role -eq "live" })
+$finalModels = @($modelPolicy.models | Where-Object { $_.role -eq "final" })
+if ($liveModels.Count -ne 1 -or $finalModels.Count -ne 1) {
+    throw "Live STT model policy did not resolve exactly one live and final model."
+}
+$liveModel = $liveModels[0]
+$finalModel = $finalModels[0]
 
 # Optional host-local values come only from the hardened, non-executable
 # ProgramData live-stt.env file. Redis credentials are DPAPI LocalMachine blobs.
@@ -112,22 +137,25 @@ $env:STT_WORKER_KILL_GRACE_SEC = "$script:LiveSttWorkerKillGraceSec"
 $env:STT_STREAM_PRELOAD_READINESS_BUDGET_SEC = "$script:LiveSttReadinessDeadlineSec"
 $env:STT_DEVICE = "cpu"
 $env:STT_COMPUTE_TYPE = "int8"
-$env:STT_MODEL_NAME = "Systran/faster-whisper-medium"
-$env:STT_MODEL_REVISION = "08e178d48790749d25932bbc082711ddcfdfbc4f"
-$env:STT_MODEL_SHA256 = "sha256:9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae"
+$env:STT_MODEL_NAME = [string]$liveModel.repository
+$env:STT_MODEL_REVISION = [string]$liveModel.revision
+$env:STT_MODEL_SHA256 = "sha256:$($liveModel.modelBinSha256)"
+$env:STT_MODEL_TREE_SHA256 = "sha256:$($liveModel.treeSha256)"
 $env:STT_MODEL_PATH = Join-Path $HfHome `
-    "hub\models--Systran--faster-whisper-medium\snapshots\$($env:STT_MODEL_REVISION)"
+    ([string]$liveModel.relativePath).Replace('/', '\')
 $env:STT_LIVE_MODEL_NAME = $env:STT_MODEL_NAME
 $env:STT_LIVE_MODEL_REVISION = $env:STT_MODEL_REVISION
 $env:STT_LIVE_MODEL_SHA256 = $env:STT_MODEL_SHA256
+$env:STT_LIVE_MODEL_TREE_SHA256 = $env:STT_MODEL_TREE_SHA256
 $env:STT_LIVE_MODEL_PATH = $env:STT_MODEL_PATH
 $env:STT_LIVE_DEVICE = "cuda"
 $env:STT_LIVE_COMPUTE_TYPE = "int8"
-$env:STT_FINAL_MODEL_NAME = "deepdml/faster-whisper-large-v3-turbo-ct2"
-$env:STT_FINAL_MODEL_REVISION = "4df90f75321148c3a29a9e2351b7ddf8f5b115a8"
-$env:STT_FINAL_MODEL_SHA256 = "sha256:e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"
+$env:STT_FINAL_MODEL_NAME = [string]$finalModel.repository
+$env:STT_FINAL_MODEL_REVISION = [string]$finalModel.revision
+$env:STT_FINAL_MODEL_SHA256 = "sha256:$($finalModel.modelBinSha256)"
+$env:STT_FINAL_MODEL_TREE_SHA256 = "sha256:$($finalModel.treeSha256)"
 $env:STT_FINAL_MODEL_PATH = Join-Path $HfHome `
-    "hub\models--deepdml--faster-whisper-large-v3-turbo-ct2\snapshots\$($env:STT_FINAL_MODEL_REVISION)"
+    ([string]$finalModel.relativePath).Replace('/', '\')
 $env:STT_FINAL_DEVICE = "cuda"
 $env:STT_FINAL_COMPUTE_TYPE = "float16"
 
@@ -138,15 +166,9 @@ if ($CudaBin) {
     $env:Path = $CudaBin + ";" + $env:Path
 }
 
-# NOTE (lazy model load): the /transcribe model is loaded on the FIRST request,
-# so a freshly (re)started service reports {"status":"loading"} until a transcribe
-# is POSTed. The deploy warmup is done by update.ps1 AFTER it restarts the task — a
-# plain foreground curl, OUTSIDE this service's process tree. An in-process
-# Start-Job here is NOT viable: it broke the SYSTEM-scheduled-task uvicorn launch
-# under Windows PowerShell 5.1 (#193 live-acceptance failed — the MKL/torch python
-# forrtl-aborts on the console event the background job triggers, so uvicorn never
-# came up). A bare reboot therefore leaves the service lazy until its first real
-# transcribe — the original, working behavior.
+# Startup preloads both direct-stream models before /ready becomes 200. The
+# updater then proves readiness, exact task/listener identity, and pinned stream
+# content. There is no first-customer lazy-load fallback in this production path.
 
 Set-Location $svc
 # Redirect via cmd.exe: uvicorn logs to stderr, and PS 5.1 *>> wraps native

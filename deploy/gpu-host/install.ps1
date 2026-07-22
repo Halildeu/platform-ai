@@ -13,6 +13,9 @@
 param(
     [string]$RepoRoot = "C:\platform-ai",
     [string]$TargetCommit = "",
+    [ValidateRange(30, 1800)][int]$PreflightTimeoutSec = 300,
+    [ValidateRange(300, 14400)][int]$ModelStagingTimeoutSec = 7800,
+    [ValidateRange(300, 3600)][int]$AcceptanceTimeoutSec = 1200,
     [switch]$Uninstall
 )
 
@@ -22,6 +25,11 @@ if (-not (Test-Path -LiteralPath $contractPath -PathType Leaf)) {
     throw "Missing task-action-contract.ps1 next to install.ps1."
 }
 . $contractPath
+$processContractPath = Join-Path $PSScriptRoot "bootstrap-process.ps1"
+if (-not (Test-Path -LiteralPath $processContractPath -PathType Leaf)) {
+    throw "Missing bootstrap-process.ps1 next to install.ps1."
+}
+. $processContractPath
 
 $tasks = @(
     @{ Name = "platform-ai-live-stt";   Script = "start-live-stt.ps1" },
@@ -34,31 +42,25 @@ function Invoke-GpuHostControllerUpdate {
 
     $updatePath = Join-Path $PSScriptRoot "update.ps1"
     $tokens = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", $updatePath,
         "-RepoRoot", $RepoRoot,
         "-TargetCommit", $TargetCommit,
-        '-Confirm:$false'
+        "-NoConfirm"
     )
     if ($ValidationOnly) { $tokens += "-WhatIf" }
-
-    $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = Get-GpuHostWindowsPowerShellPath
-    $startInfo.Arguments = (($tokens | ForEach-Object {
-        ConvertTo-GpuHostWindowsArgument -Value ([string]$_)
-    }) -join " ")
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $startInfo
-    if (-not $process.Start()) {
-        throw "Controller update process could not be started."
+    $timeoutSec = if ($ValidationOnly) {
+        $PreflightTimeoutSec
+    } else {
+        $AcceptanceTimeoutSec
     }
-    $process.WaitForExit()
-    $exitCode = $process.ExitCode
-    $process.Dispose()
-    return $exitCode
+    $operation = if ($ValidationOnly) {
+        "Exact-target controller preflight"
+    } else {
+        "Initial exact-target runtime acceptance"
+    }
+    $result = Invoke-GpuHostBoundedWindowsPowerShellFile `
+        -ScriptPath $updatePath -ScriptArguments $tokens `
+        -TimeoutSec $timeoutSec -Operation $operation
+    return $result.ExitCode
 }
 
 function Remove-GpuHostBootstrapTasks {
@@ -151,11 +153,11 @@ foreach ($t in $tasks) {
 $pythonExe = (Get-Command python -ErrorAction Stop).Source
 Write-Host "Using Python: $pythonExe"
 
-# Whisper models are cached per-user (~\.cache\huggingface). SYSTEM has its own
-# empty cache and would re-download gigabytes on first start — point the task at
-# the installing user's cache instead.
-$hfHome = Join-Path $env:USERPROFILE ".cache\huggingface"
-Write-Host "Using HF cache: $hfHome"
+# Streaming models are staged before task creation into a fixed ProgramData
+# root. The launcher verifies their full artifact manifests and ACLs before GPU
+# allocation; it never depends on the installing user or SYSTEM cache.
+$hfHome = Join-Path $env:ProgramData "Acik\platform-ai\models\live-stt"
+Write-Host "Using hardened live-STT model runtime: $hfHome"
 
 # CUDA runtime DLLs (cublas/cudnn) are resolved through the *user's* PATH at
 # inference time; SYSTEM's PATH lacks them and the first transcribe throws
@@ -197,6 +199,22 @@ foreach ($port in $ports) {
 $preflightExit = Invoke-GpuHostControllerUpdate -ValidationOnly
 if ($preflightExit -ne 0) {
     throw "Exact-target controller preflight failed with exit code $preflightExit. No task was installed."
+}
+
+# Empty-cache bootstrap is explicit: both exact revisions must be downloaded,
+# staged, ACL-hardened, and full-directory verified before any task exists.
+$modelStagePath = Join-Path $PSScriptRoot "stage-live-stt-models.ps1"
+if (-not (Test-Path -LiteralPath $modelStagePath -PathType Leaf)) {
+    throw "Missing stage-live-stt-models.ps1 in the exact-target controller checkout."
+}
+$modelStageResult = Invoke-GpuHostBoundedWindowsPowerShellFile `
+    -ScriptPath $modelStagePath -ScriptArguments @(
+        "-PythonExe", $pythonExe,
+        "-RuntimeRoot", $hfHome
+    ) -TimeoutSec $ModelStagingTimeoutSec `
+    -Operation "Exact-revision live-STT model staging"
+if ($modelStageResult.ExitCode -ne 0) {
+    throw "Exact-revision model staging failed with exit code $($modelStageResult.ExitCode). No task was installed."
 }
 
 try {

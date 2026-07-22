@@ -9,9 +9,11 @@ from app.core import config as cfg
 STREAM_MODEL_PINS = {
     "live_model_revision": "c" * 40,
     "live_model_sha256": "d" * 64,
+    "live_model_tree_sha256": "1" * 64,
     "live_model_path": "/models/live",
     "final_model_revision": "e" * 40,
     "final_model_sha256": "f" * 64,
+    "final_model_tree_sha256": "2" * 64,
     "final_model_path": "/models/final",
 }
 
@@ -153,6 +155,7 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
             environment="staging",
             model_revision="a" * 40,
             model_sha256="b" * 64,
+            model_tree_sha256="3" * 64,
             model_path="/models/immutable",
             **STREAM_MODEL_PINS,
             stream_final_worker_backend="inline",
@@ -162,6 +165,7 @@ def test_stream_tuning_bounds_and_cross_field_guards() -> None:
             environment="staging",
             model_revision="a" * 40,
             model_sha256="b" * 64,
+            model_tree_sha256="3" * 64,
             model_path="/models/immutable",
             **STREAM_MODEL_PINS,
             stream_live_worker_backend="inline",
@@ -184,12 +188,14 @@ def test_production_requires_content_addressed_local_model() -> None:
             environment="production",
             model_revision="a" * 40,
             model_sha256="b" * 64,
+            model_tree_sha256="3" * 64,
         )
     with pytest.raises(ValueError, match="live_model_revision"):
         cfg.Settings(
             environment="production",
             model_revision="a" * 40,
             model_sha256="b" * 64,
+            model_tree_sha256="3" * 64,
             model_path="/models/faster-whisper-medium",
         )
     with pytest.raises(ValueError, match="stream_preload_models must be enabled"):
@@ -197,6 +203,7 @@ def test_production_requires_content_addressed_local_model() -> None:
             environment="production",
             model_revision="a" * 40,
             model_sha256="b" * 64,
+            model_tree_sha256="3" * 64,
             model_path="/models/faster-whisper-medium",
             **STREAM_MODEL_PINS,
             runtime_commit="a" * 40,
@@ -206,6 +213,7 @@ def test_production_requires_content_addressed_local_model() -> None:
             environment="production",
             model_revision="a" * 40,
             model_sha256="b" * 64,
+            model_tree_sha256="3" * 64,
             model_path="/models/faster-whisper-medium",
             **STREAM_MODEL_PINS,
             stream_preload_models=True,
@@ -215,6 +223,7 @@ def test_production_requires_content_addressed_local_model() -> None:
         model_name="Systran/faster-whisper-medium",
         model_revision="a" * 40,
         model_sha256="sha256:" + "b" * 64,
+        model_tree_sha256="sha256:" + "3" * 64,
         model_path="/models/faster-whisper-medium",
         **STREAM_MODEL_PINS,
         stream_preload_models=True,
@@ -251,6 +260,7 @@ def test_production_runtime_profile_is_fail_closed() -> None:
         "runtime_commit": "a" * 40,
         "model_revision": "a" * 40,
         "model_sha256": "b" * 64,
+        "model_tree_sha256": "3" * 64,
         "model_path": "/models/faster-whisper-medium",
         **STREAM_MODEL_PINS,
         "stream_preload_models": True,

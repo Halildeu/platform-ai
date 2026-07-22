@@ -36,9 +36,9 @@ DEFAULT_FRAME_MS = 200
 DEFAULT_TAIL_SILENCE_SEC = 1.2
 DEFAULT_TIMEOUT_SEC = 90.0
 DEFAULT_FINAL_WAIT_SEC = 90.0
-DEFAULT_MIN_FINAL_WORD_COVERAGE = 0.5
-DEFAULT_MIN_REFERENCE_TOKEN_COVERAGE = 0.6
-DEFAULT_MAX_WORD_ERROR_RATE = 0.8
+DEFAULT_MIN_FINAL_WORD_COVERAGE = 0.8
+DEFAULT_MIN_REFERENCE_TOKEN_COVERAGE = 0.8
+DEFAULT_MAX_WORD_ERROR_RATE = 0.25
 DEFAULT_MIN_PARTIAL_EVENTS = 1
 DEFAULT_MIN_FINAL_EVENTS = 1
 DEFAULT_MAX_TRANSCRIPT_GAP_MS = 6000
@@ -132,11 +132,16 @@ def validate_transcript_event(
 ) -> None:
     event_type = event.get("type")
     if event_type == "partial":
+        partial_text = (
+            f"{event.get('confirmed', '')} {event.get('tentative', '')}".strip()
+        )
         valid = (
             set(event) == PARTIAL_EVENT_KEYS
             and _is_non_negative_int(event.get("seq"))
             and isinstance(event.get("confirmed"), str)
             and isinstance(event.get("tentative"), str)
+            and bool(_normalized_words(partial_text))
+            and not _is_hallucination(partial_text)
             and _is_non_negative_int(event.get("elapsed_ms"))
             and _is_non_negative_number(event.get("rms"))
             and isinstance(event.get("source"), str)
@@ -174,7 +179,7 @@ def validate_transcript_event(
 
 
 def _word_count(text: str) -> int:
-    return len(text.split())
+    return len(_normalized_words(text))
 
 
 def _safe_ratio(numerator: int, denominator: int | None) -> float | None:

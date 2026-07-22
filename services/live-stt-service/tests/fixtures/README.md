@@ -18,7 +18,9 @@ Bu dizin canonical test ses dosyaları için ayrılmıştır.
 `sample-tr-cv17-001.txt`: Beklenen transkript (smoke assertion için)
 `sample-tr-cv17-002.txt`: Beklenen transkript
 
-Bunlar WER claim için kullanılmaz — sadece pipeline çalıştığını ve Türkçe karakter desteğinin doğru olduğunu doğrulamak için.
+Bunlar genel bir WER/model-kalite claim'i üretmez. Production rollout smoke'u
+iki fixture'ı da ayrı ayrı source-controlled dar toleranslarla doğrular; geniş
+WER kararı için aşağıdaki tam değerlendirme seti yine zorunludur.
 
 ## Tedarik
 

@@ -66,6 +66,37 @@ def test_ready_contract_requires_exact_protocol_and_terminal_budget() -> None:
             smoke.validate_ready_event(incompatible)
 
 
+@pytest.mark.parametrize(
+    ("confirmed", "tentative"),
+    [
+        ("", ""),
+        ("   ", "  "),
+        ("...", "!!!"),
+        ("Altyazı", "M.K."),
+    ],
+)
+def test_partial_contract_rejects_empty_or_junk_content(
+    confirmed: str, tentative: str
+) -> None:
+    smoke = _load_smoke_module()
+    event = {
+        "type": "partial",
+        "seq": 0,
+        "confirmed": confirmed,
+        "tentative": tentative,
+        "elapsed_ms": 100,
+        "rms": 0.02,
+        "source": "fixture-live",
+    }
+
+    with pytest.raises(smoke.SmokeError, match="partial event"):
+        smoke.validate_transcript_event(
+            event,
+            cumulative_samples_sent=16_000,
+            previous_final_seq=None,
+        )
+
+
 def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
     smoke = _load_smoke_module()
     events = [
@@ -694,6 +725,34 @@ def test_summary_rejects_equal_length_but_unrelated_final_text() -> None:
     assert "reference_token_coverage_below_min" in summary["quality_gate"]["failures"]
     assert "word_error_rate_above_max" in summary["quality_gate"]["failures"]
     assert unrelated not in payload
+
+
+def test_summary_rejects_two_missing_reference_words() -> None:
+    smoke = _load_smoke_module()
+    degraded = "Geçiş ülkelerinde yaşananlar"
+    started_at = time.perf_counter()
+
+    summary = smoke.build_summary(
+        url="ws://127.0.0.1:18220/ws/stream",
+        wav_path=FIXTURE,
+        audio_samples=88_320,
+        started_at=started_at,
+        loading_events=["loading:live_model", "loading:final_model"],
+        ready_at=started_at + 0.1,
+        transcript_events=[
+            {"type": "partial", "received_at_ms": 100, "text_words": 3},
+            {"type": "final", "received_at_ms": 200, "text_words": 3},
+        ],
+        terminal_events=["eof_ack", "drained"],
+        errors=[],
+        reference_text_path=FIXTURE.with_suffix(".txt"),
+        final_transcript_text=degraded,
+    )
+
+    assert summary["ok"] is False
+    assert summary["coverage"]["reference_token_coverage"] == 0.6
+    assert "final_word_coverage_below_min" in summary["quality_gate"]["failures"]
+    assert "reference_token_coverage_below_min" in summary["quality_gate"]["failures"]
 
 
 def test_summary_rejects_missing_terminal_drain() -> None:
