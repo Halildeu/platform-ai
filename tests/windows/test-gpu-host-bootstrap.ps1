@@ -183,7 +183,11 @@ exit $ExitCode
         (New-Object Text.UTF8Encoding($false))
     )
 
-    $pythonExe = (Get-Command python.exe -CommandType Application -ErrorAction Stop).Source
+    $pythonCommand = @(Get-Command python.exe -CommandType Application `
+        -ErrorAction Stop | Select-Object -First 1)
+    $pythonExe = [string]$pythonCommand[0].Source
+    Assert-True (Test-Path -LiteralPath $pythonExe -PathType Leaf) `
+        "The hosted Windows runner did not expose a usable python.exe."
     & (Join-Path $repoRoot "deploy\gpu-host\stage-live-stt-models.ps1") `
         -PythonExe $pythonExe -RuntimeRoot $runtimeRoot `
         -PolicyPath $policyPath -TestSourceRoot $sourceRoot `
