@@ -836,7 +836,38 @@ function Invoke-GpuHostRevisionAcceptance {
         $readiness.runtime.live.device -eq "cuda" -and
         $readiness.runtime.live.compute_type -eq "int8" -and
         $readiness.runtime.final.device -eq "cuda" -and
-        $readiness.runtime.final.compute_type -eq "float16"
+        $readiness.runtime.final.compute_type -eq "float16" -and
+        $readiness.speech_gate.profile -eq $script:LiveSttSpeechGateProfile -and
+        @("source-baseline", "host-override") -contains $readiness.speech_gate.rms_source -and
+        [decimal]$readiness.speech_gate.silence_rms -ge 0.0001 -and
+        [decimal]$readiness.speech_gate.silence_rms -le 0.05 -and
+        [decimal]$readiness.speech_gate.min_speech_rms -ge
+          [decimal]$readiness.speech_gate.silence_rms -and
+        [decimal]$readiness.speech_gate.min_speech_rms -le 0.05 -and
+        [int]$readiness.speech_gate.live_infer_interval_ms -eq
+          $script:LiveSttLiveInferIntervalMs -and
+        [decimal]$readiness.speech_gate.live_window_sec -eq
+          [decimal]$script:LiveSttLiveWindowSec -and
+        [decimal]$readiness.speech_gate.final_window_sec -eq
+          [decimal]$script:LiveSttFinalWindowSec -and
+        [decimal]$readiness.speech_gate.forced_commit_sec -eq
+          [decimal]$script:LiveSttForcedCommitSec -and
+        [decimal]$readiness.speech_gate.silence_commit_sec -eq
+          [decimal]$script:LiveSttSilenceCommitSec -and
+        [decimal]$readiness.speech_gate.tail_overlap_sec -eq
+          [decimal]$script:LiveSttTailOverlapSec -and
+        [decimal]$readiness.speech_gate.min_infer_sec -eq
+          [decimal]$script:LiveSttMinInferSec -and
+        $readiness.speech_gate.vad.live_enabled -eq $true -and
+        $readiness.speech_gate.vad.final_enabled -eq $true -and
+        [decimal]$readiness.speech_gate.vad.threshold -eq
+          [decimal]$script:LiveSttStreamVadThreshold -and
+        [int]$readiness.speech_gate.vad.min_speech_duration_ms -eq
+          $script:LiveSttStreamVadMinSpeechDurationMs -and
+        [int]$readiness.speech_gate.vad.min_silence_duration_ms -eq
+          $script:LiveSttStreamVadMinSilenceDurationMs -and
+        [int]$readiness.speech_gate.vad.speech_pad_ms -eq
+          $script:LiveSttStreamVadSpeechPadMs
       )
       if ($runtimeOk) { $streamReady = $true; break }
     } catch { }

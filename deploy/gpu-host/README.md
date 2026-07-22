@@ -242,8 +242,9 @@ Transit sinirinda kalir.
 yuzeyinin readiness kapisi `/ready` endpoint'idir. Production launcher once
 hardened model dizinlerinin ACL ve full-artifact manifestlerini dogrular, sonra
 startup lifecycle iki direct-stream modelini preload eder:
-`loading/live_model -> loading/final_model -> ready`. `/ready` bu zincir ve
-exact runtime commit dogrulanmadan 200 donmez. `update.ps1` daha sonra exact
+`loading/live_model -> loading/final_model -> ready`. `/ready` bu zincir, exact
+runtime commit ve public `speech_gate` profile/RMS-source/VAD/cadence kanitini
+tasir. `update.ps1` bu alanlar source contract ile eslesmeden kabul vermez; sonra exact
 Scheduled Task, listener ve interpreter identity'sini ve pinned content smoke'u
 dogrular; ilk kullanici icin lazy-load/warmup fallback'i yoktur.
 

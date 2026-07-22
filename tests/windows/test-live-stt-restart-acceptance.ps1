@@ -19,6 +19,49 @@ function Assert-Throws {
     Assert-True $threw $Message
 }
 
+$startScriptPath = Join-Path $repoRoot "deploy\gpu-host\start-live-stt.ps1"
+$startScriptSource = [IO.File]::ReadAllText($startScriptPath)
+$runtimeImportMarker = '$null = Import-LiveSttRuntimeEnvironment'
+$runtimeImportIndex = $startScriptSource.IndexOf(
+    $runtimeImportMarker,
+    [StringComparison]::Ordinal
+)
+Assert-True ($runtimeImportIndex -gt 0) `
+    "The launcher must import the validated runtime environment."
+$beforeRuntimeImport = $startScriptSource.Substring(0, $runtimeImportIndex)
+$afterRuntimeImport = $startScriptSource.Substring(
+    $runtimeImportIndex + $runtimeImportMarker.Length
+)
+foreach ($requiredBeforeImport in @(
+        'STT_SPEECH_GATE_PROFILE',
+        'STT_SILENCE_RMS',
+        'STT_MIN_SPEECH_RMS',
+        'STT_STREAM_LIVE_VAD_FILTER',
+        'STT_STREAM_FINAL_VAD_FILTER'
+    )) {
+    Assert-True ($beforeRuntimeImport.Contains($requiredBeforeImport)) `
+        "$requiredBeforeImport must be sourced before host-local overrides."
+}
+foreach ($requiredAfterImport in @(
+        'STT_SPEECH_GATE_PROFILE',
+        'STT_STREAM_LIVE_VAD_FILTER',
+        'STT_STREAM_FINAL_VAD_FILTER',
+        'STT_STREAM_VAD_THRESHOLD',
+        'STT_STREAM_VAD_MIN_SPEECH_DURATION_MS',
+        'STT_STREAM_VAD_MIN_SILENCE_DURATION_MS',
+        'STT_STREAM_VAD_SPEECH_PAD_MS',
+        'STT_LIVE_INFER_INTERVAL_MS',
+        'STT_LIVE_WINDOW_SEC',
+        'STT_FINAL_WINDOW_SEC',
+        'STT_MIN_INFER_SEC'
+    )) {
+    Assert-True ($afterRuntimeImport.Contains($requiredAfterImport)) `
+        "$requiredAfterImport must be re-asserted after host-local overrides."
+}
+Assert-True ($afterRuntimeImport -notmatch `
+    '\$env:STT_(SILENCE_RMS|MIN_SPEECH_RMS)\s*=') `
+    "The launcher must not overwrite the validated host-local RMS pair."
+
 function New-TestLiveSttAcl {
     param([switch]$Directory)
 
@@ -266,6 +309,85 @@ try {
         Import-LiveSttRuntimeEnvironment -ConfigPath $configPath -SkipAclValidation
     } "Duplicate config keys must be rejected."
 
+    $schema = Get-LiveSttRuntimeConfigSchema
+    foreach ($rmsKey in @("STT_SILENCE_RMS", "STT_MIN_SPEECH_RMS")) {
+        foreach ($invalidRms in @("NaN", "Infinity", "1e-3", "0,001", "+0.001", `
+                " 0.001", "0.000500", "0.00001", "0.051")) {
+            Assert-Throws {
+                ConvertFrom-LiveSttRuntimeValue -Key $rmsKey `
+                    -Value $invalidRms -Spec $schema[$rmsKey]
+            } "Non-canonical or out-of-range RMS must be rejected."
+        }
+        foreach ($boundaryRms in @("0.0001", "0.05")) {
+            $converted = ConvertFrom-LiveSttRuntimeValue -Key $rmsKey `
+                -Value $boundaryRms -Spec $schema[$rmsKey]
+            Assert-True ($converted -eq $boundaryRms) `
+                "Inclusive RMS boundary was not accepted exactly."
+        }
+    }
+
+    $env:STT_SILENCE_RMS = "0.0005"
+    $env:STT_MIN_SPEECH_RMS = "0.0005"
+    $env:STT_SPEECH_GATE_RMS_SOURCE = "source-baseline"
+    foreach ($partialRms in @(
+            "STT_SILENCE_RMS=0.0001",
+            "STT_MIN_SPEECH_RMS=0.001"
+        )) {
+        [IO.File]::WriteAllText(
+            $configPath,
+            $partialRms,
+            (New-Object Text.UTF8Encoding($false))
+        )
+        Assert-Throws {
+            Import-LiveSttRuntimeEnvironment -ConfigPath $configPath -SkipAclValidation
+        } "A one-sided RMS override must fail atomically."
+        Assert-True ($env:STT_SILENCE_RMS -eq "0.0005" -and `
+            $env:STT_MIN_SPEECH_RMS -eq "0.0005") `
+            "A rejected RMS pair partially mutated the process environment."
+        Assert-True ($env:STT_SPEECH_GATE_RMS_SOURCE -eq "source-baseline") `
+            "A rejected RMS pair changed the public RMS source marker."
+    }
+
+    foreach ($boundedPair in @(
+            "STT_SILENCE_RMS=0.0001`nSTT_MIN_SPEECH_RMS=0.0001",
+            "STT_SILENCE_RMS=0.05`nSTT_MIN_SPEECH_RMS=0.05"
+        )) {
+        [IO.File]::WriteAllText(
+            $configPath,
+            $boundedPair,
+            (New-Object Text.UTF8Encoding($false))
+        )
+        Assert-True (Import-LiveSttRuntimeEnvironment -ConfigPath $configPath `
+            -SkipAclValidation) "An inclusive RMS boundary pair must import."
+        $env:STT_SILENCE_RMS = "0.0005"
+        $env:STT_MIN_SPEECH_RMS = "0.0005"
+        $env:STT_SPEECH_GATE_RMS_SOURCE = "source-baseline"
+    }
+
+    [IO.File]::WriteAllText(
+        $configPath,
+        "STT_SILENCE_RMS=0.02`nSTT_MIN_SPEECH_RMS=0.01",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    Assert-Throws {
+        Import-LiveSttRuntimeEnvironment -ConfigPath $configPath -SkipAclValidation
+    } "A reversed RMS pair must fail atomically."
+
+    [IO.File]::WriteAllText(
+        $configPath,
+        "STT_SILENCE_RMS=0.01`nSTT_MIN_SPEECH_RMS=0.015",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    Assert-True (Import-LiveSttRuntimeEnvironment -ConfigPath $configPath `
+        -SkipAclValidation) "A valid bounded RMS pair must import."
+    Assert-True ($env:STT_SILENCE_RMS -eq "0.01" -and `
+        $env:STT_MIN_SPEECH_RMS -eq "0.015") `
+        "The validated RMS override did not replace the source baseline."
+    Assert-True ($env:STT_SPEECH_GATE_RMS_SOURCE -eq "host-override") `
+        "A validated RMS override did not expose its public source marker."
+    Clear-LiveSttManagedProcessEnvironment
+    Remove-Item Env:STT_SPEECH_GATE_RMS_SOURCE -ErrorAction SilentlyContinue
+
     $redis = "redis://:synthetic-ci-secret@127.0.0.1:6379/0"
     $ciphertext = [Security.Cryptography.ProtectedData]::Protect(
         [Text.Encoding]::UTF8.GetBytes($redis),
@@ -307,6 +429,9 @@ try {
         "deploy\gpu-host\configure-live-stt.ps1") -Destination $configureScript
     Copy-Item -LiteralPath (Join-Path $repoRoot `
         "deploy\gpu-host\live-stt-runtime-env.ps1") -Destination $configureRuntimeModule
+    Copy-Item -LiteralPath (Join-Path $repoRoot `
+        "deploy\gpu-host\live-stt-runtime-contract.ps1") -Destination `
+        (Join-Path $configureDeployRoot "live-stt-runtime-contract.ps1")
     $configureSource = [IO.File]::ReadAllText($configureScript)
     Assert-True (-not ($configureSource -match '(?m)^\s*\[string\]\$ConfigPath')) `
         "The live STT provisioner must not expose a configurable runtime path."
@@ -343,6 +468,9 @@ try {
         "The runtime config contains a plaintext Redis credential."
     Assert-True ($firstContent.Contains("STT_REDIS_URL_DPAPI=")) `
         "The runtime config misses its DPAPI Redis blob."
+    Assert-True (-not $firstContent.Contains("STT_SILENCE_RMS=") -and `
+        -not $firstContent.Contains("STT_MIN_SPEECH_RMS=")) `
+        "Source RMS defaults must not be persisted as host-local overrides."
     Clear-LiveSttManagedProcessEnvironment
     Assert-True (Import-LiveSttRuntimeEnvironment -ConfigPath $configuredPath) `
         "The provisioned runtime config did not pass strict readback."
@@ -358,6 +486,22 @@ try {
         "An idempotent run changed existing public config or the DPAPI blob."
     Assert-True (-not (($secondOutput | Out-String).Contains($firstRedis))) `
         "Idempotent provisioning output exposed the Redis credential."
+
+    Assert-Throws {
+        & $configureScript -RepoRoot $configureFixtureRoot `
+            -SilenceRms "0.001" 6>&1
+    } "Provisioning must reject a one-sided RMS override."
+    Assert-True ([IO.File]::ReadAllText($configuredPath) -ceq $firstContent) `
+        "Rejected one-sided RMS provisioning changed the persisted config."
+
+    $rmsOutput = @(& $configureScript -RepoRoot $configureFixtureRoot `
+        -SilenceRms "0.001" -MinSpeechRms "0.0015" 6>&1)
+    $rmsContent = [IO.File]::ReadAllText($configuredPath)
+    Assert-True ($rmsContent.Contains("STT_SILENCE_RMS=0.001") -and `
+        $rmsContent.Contains("STT_MIN_SPEECH_RMS=0.0015")) `
+        "Explicit RMS overrides were not persisted."
+    Assert-True (-not (($rmsOutput | Out-String).Contains($firstRedis))) `
+        "RMS provisioning output exposed the Redis credential."
 
     $rotatedRedis = "rediss://:synthetic-provision-secret-two@redis.internal:6380/0"
     $rotatedSecure = ConvertTo-SecureString $rotatedRedis -AsPlainText -Force

@@ -1,0 +1,14 @@
+{
+  "quiet_speech": {
+    "source": "sample-tr-cv17-001.wav",
+    "start_sec": 1.2,
+    "duration_sec": 3.2,
+    "target_rms": 0.002
+  },
+  "above_floor_non_speech": {
+    "kind": "sine",
+    "frequency_hz": 440.0,
+    "duration_sec": 3.0,
+    "target_rms": 0.002
+  }
+}

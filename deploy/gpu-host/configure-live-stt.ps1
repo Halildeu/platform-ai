@@ -8,6 +8,8 @@ param(
     [Security.SecureString]$RedisUrl,
     [ValidateSet("", "true", "false")][string]$ChunkConsumerEnabled = "",
     [ValidateRange(0, 300)][int]$RequestTimeout = 0,
+    [string]$SilenceRms = "",
+    [string]$MinSpeechRms = "",
     [string]$ChunkStreamPrefix = "",
     [ValidateRange(0, 100)][int]$ChunkPartitionCount = 0,
     [string]$ChunkConsumerGroup = "",
@@ -34,6 +36,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 $scriptDir = Split-Path $PSCommandPath -Parent
 . (Join-Path $scriptDir "live-stt-runtime-env.ps1")
+. (Join-Path $scriptDir "live-stt-runtime-contract.ps1")
 
 $RepoRoot = Resolve-LiveSttFixedLocalPath -Path $RepoRoot `
     -Purpose "Platform-ai deploy repository"
@@ -284,6 +287,8 @@ function ConvertTo-LiveSttProvisionContent {
 
     $order = @(
         "STT_REQUEST_TIMEOUT",
+        "STT_SILENCE_RMS",
+        "STT_MIN_SPEECH_RMS",
         "STT_CHUNK_CONSUMER_ENABLED",
         "STT_REDIS_URL_DPAPI",
         "STT_CHUNK_STREAM_PREFIX",
@@ -414,9 +419,18 @@ try {
         [StringComparer]::Ordinal
     )
     foreach ($key in $existing.Keys) { $values.Add($key, $existing[$key]) }
+    $hasSilenceRms = -not [string]::IsNullOrWhiteSpace($SilenceRms)
+    $hasMinSpeechRms = -not [string]::IsNullOrWhiteSpace($MinSpeechRms)
+    if ($hasSilenceRms -xor $hasMinSpeechRms) {
+        throw "SilenceRms and MinSpeechRms must be supplied together."
+    }
     Set-LiveSttPublicValue -Values $values -Key "STT_REQUEST_TIMEOUT" `
         -Supplied $(if ($RequestTimeout -gt 0) { "$RequestTimeout" } else { "" }) `
         -InitialDefault "180"
+    Set-LiveSttPublicValue -Values $values -Key "STT_SILENCE_RMS" `
+        -Supplied $SilenceRms
+    Set-LiveSttPublicValue -Values $values -Key "STT_MIN_SPEECH_RMS" `
+        -Supplied $MinSpeechRms
     Set-LiveSttPublicValue -Values $values -Key "STT_CHUNK_CONSUMER_ENABLED" `
         -Supplied $ChunkConsumerEnabled.ToLowerInvariant() -InitialDefault "false"
     Set-LiveSttPublicValue -Values $values -Key "STT_CHUNK_STREAM_PREFIX" `
@@ -462,6 +476,11 @@ try {
             -Key $key -Value $values[$key] -Spec $schema[$key]
         $validated = $null
     }
+    $sourceRms = @{
+        "STT_SILENCE_RMS" = "$script:LiveSttSilenceRms"
+        "STT_MIN_SPEECH_RMS" = "$script:LiveSttMinSpeechRms"
+    }
+    Assert-LiveSttEffectiveRmsPair -Values $values -FallbackValues $sourceRms
     $content = ConvertTo-LiveSttProvisionContent -Values $values
     Write-LiveSttProvisionConfigAtomic -Path $configPath -Content $content `
         -Expected $values -ExpectedRedisHash $expectedRedisHash

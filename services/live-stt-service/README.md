@@ -78,7 +78,12 @@ Varsayılan canlı UX ayarları:
 | `STT_LIVE_WINDOW_SEC` | `2.0` | Kısa rolling context; kelime-progressive hissi |
 | `STT_LIVE_BEAM_SIZE` | `1` | Live draft decode genişliği; düşük gecikme için ADR-0031 default |
 | `STT_FINAL_BEAM_SIZE` | `1` | Final revision decode genişliği; ölçümlü A/B için env ile artırılabilir |
-| `STT_STREAM_FINAL_VAD_FILTER` | `false` | Direct stream final pass'te Whisper VAD; default kapalı çünkü RMS gate zaten aktif sesi seçer |
+| `STT_SPEECH_GATE_PROFILE` | `development-unpinned` | Local/test varsayılanı; GPU production launcher `silero-balanced-v1` profilini zorunlu kılar |
+| `STT_STREAM_LIVE_VAD_FILTER` / `STT_STREAM_FINAL_VAD_FILTER` | `false` / `false` | Local/test opt-in; production profilinde iki rol de `true` ve fail-closed |
+| `STT_STREAM_VAD_THRESHOLD` | `0.35` | Pinli Silero konuşma olasılığı eşiği; library default driftine bırakılmaz |
+| `STT_STREAM_VAD_MIN_SPEECH_DURATION_MS` | `100` | Kısa fakat gerçek konuşmayı koruyan pinli production profil değeri |
+| `STT_STREAM_VAD_MIN_SILENCE_DURATION_MS` | `300` | 2 sn live pencereden kısa pinli sessizlik ayrımı |
+| `STT_STREAM_VAD_SPEECH_PAD_MS` | `100` | Kelime başı/sonu kırpılmasını azaltan konuşma pedi |
 | `STT_STREAM_LIVE_WORKER_BACKEND` | `process` | Draft modeli native/GPU hang durumunda terminate/kill edilebilen supervised child process'te çalıştırır |
 | `STT_STREAM_LIVE_TIMEOUT_SEC` | `5` | Draft decode için hard deadline; aşımda child process recycle edilir |
 | `STT_MIN_INFER_SEC` | `0.35` | Çok kısa/gürültülü bufferları eleme |
@@ -101,6 +106,20 @@ Bu ayarlar `app.core.config.Settings` içinde bounded Pydantic alanlarıdır:
 `STT_MIN_INFER_SEC <= STT_LIVE_WINDOW_SEC` ve
 `STT_TAIL_OVERLAP_SEC < STT_FINAL_WINDOW_SEC` guard'ları boot sırasında
 geçersiz rollout'u durdurur.
+
+GPU production starter iki RMS değerini explicit `0.0005/0.0005` source
+baseline ile yükler; böylece düşük sesli konuşma decoder'a ulaşmadan atılmaz.
+Provisioner bu baseline'ı ProgramData'ya kopyalamaz. Yalnız operatörün açıkça
+verdiği iki değer, non-executable ve ACL-korumalı ProgramData config üzerinden
+`0.0001..0.05` aralığında canonical noktalı decimal olarak override edilebilir.
+Profil kimliği, iki VAD rolü, VAD parametreleri ve inference/window cadence host
+override'ına açık değildir. `/ready.speech_gate` etkin profile, RMS kaynağına
+(`source-baseline` veya `host-override`), RMS çiftine, cadence'e ve VAD
+parametrelerine transcript/audio/secret taşımadan görünürlük sağlar; `update.ps1`
+bu yüzeyi exact runtime kabulünde fail-closed doğrular.
+Bu profil bir runtime kabul iddiası değildir: pause, normal ses ve quiet/whisper
+sentetik fixture matrisi aynı pinned commit/model üzerinde GPU gate'ini geçmeden
+promotion kanıtı sayılmaz.
 
 `ready` ayrıca `capabilities=["eof"]` ve `supports_eof=true` ilan eder. İstemci
 ses göndermeyi bitirdiğinde yalnızca `{"type":"eof"}` metin kontrolünü bir kez
