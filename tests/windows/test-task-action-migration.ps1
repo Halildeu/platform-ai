@@ -432,6 +432,9 @@ $child.WaitForExit()
         Assert-True $contract.Valid "Exact legacy task action was rejected."
         Assert-True ($contract.RepoClass -eq "legacy-user-repo") `
             "Legacy action was classified incorrectly."
+        Assert-True ($contract.CanonicalArguments -eq `
+            (Get-ActionArguments -TaskName $case.Name -RepoRoot $canonicalRoot)) `
+            "Legacy action did not target the migration root."
     }
     $customRoot = "D:\platform-ai"
     $customArguments = Get-ActionArguments -TaskName "platform-ai-live-stt" `

@@ -272,8 +272,12 @@ function Get-GpuHostTaskActionContract {
         }
         if ($index -ne $tokens.Count) { return $result }
 
+        $canonicalActionRoot = $parsedRoot
+        if ($result.RepoClass -eq 'legacy-user-repo') {
+            $canonicalActionRoot = 'C:\platform-ai'
+        }
         $result.CanonicalArguments = New-GpuHostTaskActionArguments `
-            -TaskName $TaskName -RepoRoot $parsedRoot -PythonExe $pythonExe `
+            -TaskName $TaskName -RepoRoot $canonicalActionRoot -PythonExe $pythonExe `
             -HfHome $hfHome -CudaBin $cudaBin
         $result.PythonExe = $pythonExe
         $result.RepoRoot = $parsedRoot
