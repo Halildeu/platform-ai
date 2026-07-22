@@ -32,6 +32,11 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn('$unpushedRange = "{0}..HEAD" -f $originRef', script)
         self.assertIn("[string]$TargetCommit", script)
         self.assertIn("exactly 40 hex characters", script)
+        self.assertIn("separate exact-target control checkout", script)
+        self.assertIn("Control checkout HEAD must equal", script)
+        self.assertIn("Deploy and control checkouts must use the same origin", script)
+        self.assertIn("LegacyRollbackCompatCommit", script)
+        self.assertIn('ValidateSet("strict-v1", "legacy-512e9cc")', script)
         self.assertIn('"merge-base", "--is-ancestor", $target, $originRef', script)
         self.assertIn('"checkout", "--detach", $target', script)
         self.assertIn('"symbolic-ref", "-q", "HEAD"', script)
@@ -43,7 +48,9 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("[Console]::Error.WriteLine", script)
         self.assertNotIn("Write-Error $Message", script)
         self.assertIn('$env:CI -eq "true"', script)
-        self.assertIn("$StatePath -ne $script:DefaultDeploymentStatePath", script)
+        self.assertIn('$env:GITHUB_ACTIONS -eq "true"', script)
+        self.assertIn('$env:RUNNER_ENVIRONMENT -eq "github-hosted"', script)
+        self.assertIn("$script:ResolvedRunnerTemp", script)
         self.assertIn("PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE", script)
         self.assertIn("PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE", script)
         self.assertNotIn("[switch]$Force", script)
@@ -85,7 +92,14 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Import-LiveSttRuntimeEnvironment", script)
         self.assertIn("Clear-LiveSttManagedProcessEnvironment", script)
         self.assertIn("live-stt-runtime-env.ps1", script)
-        self.assertNotIn("env.local.ps1", script)
+        self.assertIn("Legacy plaintext env.local.ps1 detected", script)
+
+        runtime_env = self._read_script("live-stt-runtime-env.ps1")
+        self.assertIn("must reside on a fixed local volume", runtime_env)
+        self.assertIn("must not traverse a reparse point", runtime_env)
+        self.assertIn("owner must be SYSTEM or BUILTIN Administrators", runtime_env)
+        self.assertIn("principals require FullControl", runtime_env)
+        self.assertIn("Get-LiveSttRuntimeRoot", runtime_env)
 
     def test_live_stt_update_waits_for_stream_readiness_without_sync_gpu_warmup(
         self,
@@ -180,6 +194,8 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertNotIn("Get-Command python", script)
         self.assertIn("automatic-rollback-accepted", script)
         self.assertIn("Invoke-GpuHostRevisionAcceptance", script)
+        self.assertIn('Reason "restart-failed-task-repo-root"', script)
+        self.assertIn("$taskContract.RepoRoot", script)
 
     def test_meeting_ai_launcher_uses_non_executable_dpapi_config(self) -> None:
         script = self._read_script("start-meeting-ai.ps1")

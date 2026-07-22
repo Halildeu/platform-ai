@@ -348,12 +348,14 @@ function Get-GpuHostTaskXmlContract {
         return [pscustomobject]@{
             Valid = $true
             PythonExe = [string]$actionContract.PythonExe
+            RepoRoot = [string]$actionContract.RepoRoot
             Reason = ""
         }
     } catch {
         return [pscustomobject]@{
             Valid = $false
             PythonExe = ""
+            RepoRoot = ""
             Reason = [string]$_.Exception.Message
         }
     }

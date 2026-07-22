@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Legacy GPU-host plaintext overrides may still exist on deployed hosts. Keep
+# them ignored until the operator migrates values into the DPAPI-backed
+# ProgramData live-stt.env file and securely removes the old file.
+deploy/gpu-host/env.local.ps1

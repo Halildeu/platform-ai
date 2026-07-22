@@ -19,6 +19,36 @@ function Assert-Throws {
     Assert-True $threw $Message
 }
 
+function New-TestLiveSttAcl {
+    param([switch]$Directory)
+
+    $acl = if ($Directory) {
+        New-Object Security.AccessControl.DirectorySecurity
+    } else {
+        New-Object Security.AccessControl.FileSecurity
+    }
+    $system = New-Object Security.Principal.SecurityIdentifier("S-1-5-18")
+    $administrators = New-Object Security.Principal.SecurityIdentifier("S-1-5-32-544")
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner($administrators)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::None
+    if ($Directory) {
+        $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    }
+    foreach ($sid in @($system, $administrators)) {
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$acl.AddAccessRule($rule)
+    }
+    return $acl
+}
+
 $failedQuery = {
     param($port)
     return New-GpuHostOwnerResult -Succeeded $false -Reason "injected"
@@ -150,6 +180,14 @@ $validTaskXml = Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
     -TaskXml $taskXml -SkipPythonPathValidation
 Assert-True $validTaskXml.Valid `
     ("Canonical single SYSTEM task action must pass: {0}" -f $validTaskXml.Reason)
+Assert-True ($validTaskXml.RepoRoot -eq "C:\platform-ai") `
+    "Task XML contract did not expose the parsed repository root."
+Assert-True (Test-GpuHostSameLocalPath -Left "C:\platform-ai" `
+    -Right "c:\PLATFORM-AI\") `
+    "Canonical task root comparison must be case-insensitive and slash-stable."
+Assert-True (-not (Test-GpuHostSameLocalPath -Left "C:\platform-ai" `
+    -Right "C:\Users\denetimpc\platform-ai")) `
+    "Legacy task root must not match the canonical deployment checkout."
 $workingDirectoryXml = $taskXml.Replace(
     "</Exec>",
     "<WorkingDirectory>C:\platform-ai</WorkingDirectory></Exec>"
@@ -196,7 +234,25 @@ $configPath = Join-Path $tempRoot "live-stt.env"
 $oldCi = $env:CI
 try {
     $env:CI = "true"
+    Set-Acl -LiteralPath $tempRoot -AclObject (New-TestLiveSttAcl -Directory)
     [IO.File]::WriteAllText($configPath, '$RepoRoot=C:\attacker', (New-Object Text.UTF8Encoding($false)))
+    Set-Acl -LiteralPath $configPath -AclObject (New-TestLiveSttAcl)
+    Assert-LiveSttRuntimeConfigAcl -Path $tempRoot -Directory
+    Assert-LiveSttRuntimeConfigAcl -Path $configPath
+    $wrongOwnerAcl = Get-Acl -LiteralPath $configPath
+    $wrongOwnerAcl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
+    Set-Acl -LiteralPath $configPath -AclObject $wrongOwnerAcl
+    Assert-Throws {
+        Assert-LiveSttRuntimeConfigAcl -Path $configPath
+    } "A non-SYSTEM/non-Administrators secret owner must fail closed."
+    Set-Acl -LiteralPath $configPath -AclObject (New-TestLiveSttAcl)
+    $allowedRuntimePath = Join-Path (Get-LiveSttRuntimeRoot) "ci-contract.env"
+    Assert-True ((Assert-LiveSttRuntimeConfigPath -Path $allowedRuntimePath) -eq `
+        [IO.Path]::GetFullPath($allowedRuntimePath)) `
+        "The fixed local ProgramData runtime path should pass."
+    Assert-Throws {
+        Assert-LiveSttRuntimeConfigPath -Path $configPath
+    } "A config outside the hardened ProgramData root must fail closed."
     Assert-Throws {
         Import-LiveSttRuntimeEnvironment -ConfigPath $configPath -SkipAclValidation
     } "Executable PowerShell-like config must be rejected."

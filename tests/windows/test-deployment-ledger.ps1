@@ -99,13 +99,42 @@ function Invoke-ChildPowerShell {
 
 function Invoke-Update {
     param([string[]]$ExtraArgs)
+    $controllerCommit = ""
+    if ($ExtraArgs -contains "-Rollback") {
+        $controllerCommit = "$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim()
+    } else {
+        $targetIndex = [Array]::IndexOf($ExtraArgs, "-TargetCommit")
+        if ($targetIndex -ge 0 -and $targetIndex + 1 -lt $ExtraArgs.Count -and
+            $ExtraArgs[$targetIndex + 1] -match '^[0-9a-f]{40}$') {
+            $controllerCommit = $ExtraArgs[$targetIndex + 1]
+        }
+    }
     $arguments = @(
         "-RepoRoot", $deploy,
         "-StatePath", $statePath,
         "-Branch", "main"
     ) + $ExtraArgs
-    return Invoke-ChildPowerShell -Script $updateScript -ScriptArgs $arguments `
-        -SuppressConfirmation
+    if ([string]::IsNullOrWhiteSpace($controllerCommit)) {
+        return Invoke-ChildPowerShell -Script $updateScript -ScriptArgs $arguments `
+            -SuppressConfirmation
+    }
+    $controller = Join-Path $fixtureRoot (
+        "controller-{0}" -f [Guid]::NewGuid().ToString("N")
+    )
+    try {
+        Invoke-Git $source @("worktree", "add", "--detach", $controller, $controllerCommit) |
+            Out-Null
+        $targetUpdate = Join-Path $controller "deploy\gpu-host\update.ps1"
+        Assert-True (Test-Path -LiteralPath $targetUpdate -PathType Leaf) `
+            "exact-target control worktree is missing update.ps1"
+        return Invoke-ChildPowerShell -Script $targetUpdate -ScriptArgs $arguments `
+            -SuppressConfirmation
+    } finally {
+        if (Test-Path -LiteralPath $controller) {
+            Invoke-Git $source @("worktree", "remove", "--force", $controller) |
+                Out-Null
+        }
+    }
 }
 
 function Invoke-Drift {
@@ -148,6 +177,10 @@ if ($LASTEXITCODE -ne 0) { throw "source clone failed" }
 Invoke-Git $source @("config", "user.email", "ci@example.invalid") | Out-Null
 Invoke-Git $source @("config", "user.name", "CI Fixture") | Out-Null
 Invoke-Git $source @("checkout", "-b", "main") | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $source "deploy") -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $repoRoot "deploy\gpu-host") `
+    -Destination (Join-Path $source "deploy\gpu-host") -Recurse -Force
+Invoke-Git $source @("add", "deploy/gpu-host") | Out-Null
 $commitA = New-SourceCommit -Name "a.txt" -Content "A"
 
 & git clone --branch main $remote $deploy | Out-Null
@@ -184,6 +217,24 @@ Assert-True ($state.currentCommit -eq $commitC) "second deploy currentCommit mis
 Assert-True ($state.previousCommit -eq $commitB) "second deploy previousCommit mismatch"
 
 $commitD = New-SourceCommit -Name "d.txt" -Content "D"
+$savedGithubActions = $env:GITHUB_ACTIONS
+$savedRunnerEnvironment = $env:RUNNER_ENVIRONMENT
+try {
+    $env:CI = "true"
+    $env:GITHUB_ACTIONS = "false"
+    $env:RUNNER_ENVIRONMENT = "self-hosted"
+    $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE = "1"
+    $inertFault = Invoke-Update @("-TargetCommit", $commitC, "-NoRestart")
+    Assert-True ($inertFault.ExitCode -eq 0) `
+        "CI=true alone must not activate deployment fault injection"
+} finally {
+    Remove-Item Env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $savedGithubActions) { Remove-Item Env:GITHUB_ACTIONS }
+    else { $env:GITHUB_ACTIONS = $savedGithubActions }
+    if ($null -eq $savedRunnerEnvironment) { Remove-Item Env:RUNNER_ENVIRONMENT }
+    else { $env:RUNNER_ENVIRONMENT = $savedRunnerEnvironment }
+}
 $whatIf = Invoke-Update @("-TargetCommit", $commitD, "-NoRestart", "-WhatIf")
 Assert-True ($whatIf.ExitCode -eq 0) "WhatIf validation failed"
 $state = Read-DeploymentState -StatePath $statePath
@@ -234,7 +285,7 @@ Assert-True ($secondRollback.ExitCode -eq 2) `
     "second rollback must fail closed instead of ping-pong"
 
 # Deterministically exercise the post-pin ledger failure paths. These hooks are
-# inert unless CI=true and a non-default custom StatePath is in use.
+# inert outside a GitHub-hosted runner and a StatePath rooted under RUNNER_TEMP.
 $env:CI = "true"
 $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE = "1"
 $restoredFailure = Invoke-Update @(
@@ -289,15 +340,22 @@ Assert-DeploymentStateAcl -Path $statePath
 
 # Fault injection rejects both target and rollback acceptance. Source must still
 # restore and the ledger must distinguish rollback-failed from target rejection.
+$anchorDeploy = Invoke-Update @("-TargetCommit", $commitC, "-NoRestart")
+Assert-True ($anchorDeploy.ExitCode -eq 0) `
+    "rollback-anchor fixture deploy failed"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC -and
+    $state.previousCommit -eq $commitB) `
+    "rollback-anchor fixture did not create current=C, previous=B"
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-twice"
 $restartFailure = Invoke-Update @("-TargetCommit", $commitD)
 Assert-True ($restartFailure.ExitCode -eq 4) `
     "target plus rollback acceptance failure must return exit 4"
 $state = Read-DeploymentState -StatePath $statePath
-Assert-True ($state.currentCommit -eq $commitB) `
+Assert-True ($state.currentCommit -eq $commitC) `
     "automatic rollback did not restore the previous source commit"
-Assert-True ($null -eq $state.previousCommit) `
-    "rejected revision must not remain as a ping-pong rollback target"
+Assert-True ($state.previousCommit -eq $commitB) `
+    "failed deploy must preserve the pre-existing valid rollback anchor"
 Assert-True ($state.lastResult -eq `
     "automatic-rollback-failed-injected-acceptance-failure") `
     "rollback acceptance failure ledger result mismatch"
@@ -308,8 +366,10 @@ $acceptedRollback = Invoke-Update @("-TargetCommit", $commitD)
 Assert-True ($acceptedRollback.ExitCode -eq 3) `
     "rejected target with reaccepted rollback must retain target-failed exit 3"
 $state = Read-DeploymentState -StatePath $statePath
-Assert-True ($state.currentCommit -eq $commitB) `
+Assert-True ($state.currentCommit -eq $commitC) `
     "successful automatic rollback did not restore previous source"
+Assert-True ($state.previousCommit -eq $commitB) `
+    "successful automatic rollback lost the pre-existing valid rollback anchor"
 Assert-True ($state.lastResult -eq "automatic-rollback-accepted") `
     "successful automatic rollback ledger result mismatch"
 Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE

@@ -168,13 +168,26 @@ Loglar: `deploy\gpu-host\logs\` (günlük dosya; **transcript-free** — KVKK #3
 > lokal-only kaldı = single point of failure; bkz. `update.ps1`.)
 
 ```powershell
-cd C:\Users\denetimpc\platform-ai
 $TargetCommit = "<Project #4 evidence alanindaki approved full 40-hex commit>"
-.\deploy\gpu-host\update.ps1 -TargetCommit $TargetCommit -Confirm:$false
+if (-not (Test-Path C:\platform-ai-control\.git)) {
+  git clone https://github.com/Halildeu/platform-ai.git C:\platform-ai-control
+}
+git -C C:\platform-ai-control fetch --prune origin
+git -C C:\platform-ai-control checkout --detach $TargetCommit
+git -C C:\platform-ai-control reset --hard $TargetCommit
+& C:\platform-ai-control\deploy\gpu-host\update.ps1 `
+  -RepoRoot C:\platform-ai -TargetCommit $TargetCommit -Confirm:$false
 ```
 `origin/main` hareketli bir discovery ref'idir; deploy artifact'i degildir. Commit,
 merge edilmis PR'in tam 40-hex SHA'si olarak Project #4 evidence alanina kaydedilir.
-`update.ps1` yeni remote truth'u fetch eder, target'in commit object oldugunu ve
+`C:\platform-ai-control` ayri, operator ACL'li kontrol clone'udur; deploy aninda
+yalniz `fetch` ve exact-commit checkout icin yazilir, Scheduled Task'lar buradan
+calismaz. Controller checkout'unda tracked veya untracked degisiklik varsa deploy
+fail-closed olur. Controller HEAD normal deploy'da target
+commit ile, rollback'te halen kabul edilmis current commit ile exact eslesmeden
+updater mutasyon yapmaz. Bu ayrim ilk rollout'un eski deploy checkout'undaki
+parse edilmis updater koduyla devam etmesini engeller. `update.ps1` yeni remote
+truth'u fetch eder, target'in commit object oldugunu ve
 `origin/main` soyunda kaldigini kanitlar, sonra clone'u o exact commit'te detached
 HEAD'e pinler. Scheduled task restart'i bundan sonra calisir.
 
@@ -194,7 +207,8 @@ On kontrol, source mutation yapmadan ayni object/ancestry/dirty/ledger gate'leri
 calistirir:
 
 ```powershell
-.\deploy\gpu-host\update.ps1 -TargetCommit $TargetCommit -WhatIf
+& C:\platform-ai-control\deploy\gpu-host\update.ps1 `
+  -RepoRoot C:\platform-ai -TargetCommit $TargetCommit -WhatIf
 ```
 
 Bounded rollback operator tarafindan commit secmez; yalniz hardened ledger'daki
@@ -202,7 +216,8 @@ Bounded rollback operator tarafindan commit secmez; yalniz hardened ledger'daki
 arka arkaya rollback ile iki revision arasinda ping-pong olusmaz:
 
 ```powershell
-.\deploy\gpu-host\update.ps1 -Rollback -Confirm:$false
+& C:\platform-ai-control\deploy\gpu-host\update.ps1 `
+  -RepoRoot C:\platform-ai -Rollback -Confirm:$false
 ```
 
 Eski `git pull`, `git checkout main`, `git reset --hard origin/main` ve `-Force`

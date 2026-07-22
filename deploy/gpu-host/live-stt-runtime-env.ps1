@@ -52,20 +52,87 @@ function ConvertTo-LiveSttSidValue {
     }
 }
 
-function Assert-LiveSttRuntimeConfigAcl {
+function Resolve-LiveSttFixedLocalPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Purpose
+    )
+
+    if ($env:OS -ne "Windows_NT") { throw "$Purpose is supported only on Windows." }
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path.StartsWith("\\") -or
+        $Path.StartsWith("\\?\") -or $Path.StartsWith("\\.\") -or
+        -not [IO.Path]::IsPathRooted($Path) -or $Path -match '^[A-Za-z]:[^\\/]') {
+        throw "$Purpose must use an absolute local drive path."
+    }
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full.Length -gt 240 -or ($full.Length -gt 2 -and $full.Substring(2).Contains(":"))) {
+        throw "$Purpose path is unsupported."
+    }
+    $drive = New-Object IO.DriveInfo([IO.Path]::GetPathRoot($full))
+    if ($drive.DriveType -ne [IO.DriveType]::Fixed) {
+        throw "$Purpose must reside on a fixed local volume."
+    }
+    $cursor = $full
+    while ($cursor -and (Test-Path -LiteralPath $cursor)) {
+        $item = Get-Item -LiteralPath $cursor -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Purpose must not traverse a reparse point."
+        }
+        $parent = Split-Path -Parent $cursor
+        if (-not $parent -or $parent -eq $cursor) { break }
+        $cursor = $parent
+    }
+    return $full
+}
+
+function Get-LiveSttRuntimeRoot {
+    return [IO.Path]::GetFullPath(
+        (Join-Path $env:ProgramData "Acik\platform-ai")
+    ).TrimEnd("\")
+}
+
+function Assert-LiveSttRuntimeConfigPath {
     param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = Resolve-LiveSttFixedLocalPath -Path $Path -Purpose "Live STT runtime config"
+    $root = Get-LiveSttRuntimeRoot
+    if (-not $full.StartsWith($root + "\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Live STT runtime config must reside under its hardened ProgramData root."
+    }
+    return $full
+}
+
+function Assert-LiveSttRuntimeConfigAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$Directory
+    )
 
     $acl = Get-Acl -LiteralPath $Path
     if (-not $acl.AreAccessRulesProtected) {
         throw "Live STT runtime config ACL inheritance must be disabled."
     }
     $allowed = @($script:LiveSttSystemSid, $script:LiveSttAdministratorsSid)
+    $owner = New-Object Security.Principal.NTAccount($acl.Owner)
+    $ownerSid = ConvertTo-LiveSttSidValue -IdentityReference $owner
+    if ($allowed -notcontains $ownerSid) {
+        throw "Live STT runtime config owner must be SYSTEM or BUILTIN Administrators."
+    }
     $seen = @{}
     foreach ($rule in @($acl.Access)) {
         $sid = ConvertTo-LiveSttSidValue -IdentityReference $rule.IdentityReference
         if ($rule.IsInherited -or $allowed -notcontains $sid -or
             $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
             throw "Live STT runtime config ACL contains an unexpected rule."
+        }
+        $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+        if (($rule.FileSystemRights -band $fullControl) -ne $fullControl) {
+            throw "Live STT runtime config ACL principals require FullControl."
+        }
+        if ($Directory -and
+            (($rule.InheritanceFlags -band [Security.AccessControl.InheritanceFlags]::ContainerInherit) -eq 0 -or
+             ($rule.InheritanceFlags -band [Security.AccessControl.InheritanceFlags]::ObjectInherit) -eq 0)) {
+            throw "Live STT runtime config directory ACL must protect child objects."
         }
         $seen[$sid] = $true
     }
@@ -150,7 +217,14 @@ function Import-LiveSttRuntimeEnvironment {
     if ($SkipAclValidation -and $env:CI -ne "true") {
         throw "Live STT runtime config ACL validation can be skipped only in CI."
     }
-    if (-not $SkipAclValidation) { Assert-LiveSttRuntimeConfigAcl -Path $ConfigPath }
+    if (-not $SkipAclValidation) {
+        $ConfigPath = Assert-LiveSttRuntimeConfigPath -Path $ConfigPath
+        $vendorRoot = Join-Path $env:ProgramData "Acik"
+        $runtimeRoot = Get-LiveSttRuntimeRoot
+        Assert-LiveSttRuntimeConfigAcl -Path $vendorRoot -Directory
+        Assert-LiveSttRuntimeConfigAcl -Path $runtimeRoot -Directory
+        Assert-LiveSttRuntimeConfigAcl -Path $ConfigPath
+    }
 
     $bytes = [IO.File]::ReadAllBytes($ConfigPath)
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and

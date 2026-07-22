@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import queue
 import threading
@@ -28,6 +29,7 @@ from app.core import config as config_module
 from app.core.config import Settings
 from app.services import streaming_models as streaming_models_module
 from app.services.hallucination import is_hallucination
+from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import (
     DirectWhisperService,
     SupervisedFinalWhisperService,
@@ -53,6 +55,47 @@ def test_hallucination_filter_blocks_known_artifacts() -> None:
     assert is_hallucination("Altyazı M.K.") is True
     assert is_hallucination("Videoyu beğenmeyi unutmayın arkadaşlar") is True
     assert is_hallucination("Neroba") is True
+
+
+def test_preload_failure_rejects_websocket_without_lazy_model_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production admission must not bypass the exhausted startup budget."""
+
+    class _WebSocket:
+        def __init__(self) -> None:
+            state = StreamingPreloadState(enabled=True)
+            state.mark_failed("live")
+            self.app = SimpleNamespace(state=SimpleNamespace(streaming_preload=state))
+            self.query_params = {"protocol": stream_api.STREAM_PROTOCOL}
+            self.events: list[dict[str, object]] = []
+            self.close_code: int | None = None
+
+        async def accept(self) -> None:
+            return None
+
+        async def send_json(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+        async def close(self, *, code: int = 1000) -> None:
+            self.close_code = code
+
+    def unexpected_model_access(_settings: Settings) -> object:
+        raise AssertionError("failed preload must not invoke a lazy model factory")
+
+    monkeypatch.setattr(stream_api, "get_live_service", unexpected_model_access)
+    monkeypatch.setattr(stream_api, "get_final_service", unexpected_model_access)
+    websocket = _WebSocket()
+
+    asyncio.run(
+        stream_api.stream_endpoint(
+            websocket,  # type: ignore[arg-type]
+            Settings(stream_preload_models=True),
+        )
+    )
+
+    assert websocket.events == [{"type": "error", "msg": "service_not_ready"}]
+    assert websocket.close_code == 1013
 
 
 def test_hallucination_filter_keeps_valid_short_turkish_utterances() -> None:

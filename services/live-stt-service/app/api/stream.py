@@ -39,6 +39,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
 from app.services.hallucination import is_hallucination
+from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import (
     SupervisedFinalWhisperService,
     SupervisedLiveWhisperService,
@@ -556,6 +557,17 @@ async def stream_endpoint(
         await websocket.close(code=1008)
         return
 
+    if settings.stream_preload_models:
+        preload_state = getattr(websocket.app.state, "streaming_preload", None)
+        preload_ready = (
+            isinstance(preload_state, StreamingPreloadState)
+            and preload_state.snapshot().ready
+        )
+        if not preload_ready:
+            await websocket.send_json({"type": "error", "msg": "service_not_ready"})
+            await websocket.close(code=1013)
+            return
+
     live_service = get_live_service(settings)
     final_service = get_final_service(settings)
     debug_enabled = settings.stream_debug
@@ -570,10 +582,20 @@ async def stream_endpoint(
     final_worker_generation: int | None = None
 
     try:
-        await websocket.send_json({"type": "loading", "stage": "live_model"})
-        await run_in_threadpool(live_service.ensure_model)
-        await websocket.send_json({"type": "loading", "stage": "final_model"})
-        await run_in_threadpool(final_service.ensure_model)
+        if not settings.stream_preload_models:
+            await websocket.send_json({"type": "loading", "stage": "live_model"})
+            await run_in_threadpool(live_service.ensure_model)
+            await websocket.send_json({"type": "loading", "stage": "final_model"})
+            await run_in_threadpool(final_service.ensure_model)
+        elif not (
+            bool(getattr(live_service, "model_loaded", False))
+            and bool(getattr(final_service, "model_loaded", False))
+            and bool(getattr(live_service, "healthy", True))
+            and bool(getattr(final_service, "healthy", True))
+        ):
+            await websocket.send_json({"type": "error", "msg": "service_not_ready"})
+            await websocket.close(code=1013)
+            return
         if isinstance(final_service, SupervisedFinalWhisperService):
             final_worker_generation = final_service.ready_generation
     except WebSocketDisconnect:

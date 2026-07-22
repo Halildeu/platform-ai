@@ -27,6 +27,10 @@ if (-not (Test-Path -LiteralPath $runtimeEnv -PathType Leaf)) {
     throw "Missing live-stt-runtime-env.ps1"
 }
 . $runtimeEnv
+$legacyRuntimeEnv = Join-Path $RepoRoot "deploy\gpu-host\env.local.ps1"
+if (Test-Path -LiteralPath $legacyRuntimeEnv -PathType Leaf) {
+    throw "Legacy plaintext env.local.ps1 detected. Migrate it to the DPAPI-backed ProgramData live-stt.env file and securely remove the legacy file before restart."
+}
 
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path
 $PythonExe = (Resolve-Path -LiteralPath $PythonExe -ErrorAction Stop).Path

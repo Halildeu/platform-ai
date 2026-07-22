@@ -25,7 +25,8 @@
   eof_ack, and drained before the deployment is accepted.
 
 .PARAMETER RepoRoot
-  Deploy clone path. Defaults to the repo this script lives in (deploy/gpu-host/..).
+  Deploy clone path. Required. This script must execute from a separate,
+  exact-target control checkout so the first rollout uses the target updater.
 
 .PARAMETER Branch
   Tracking branch. Default 'main'. The deploy clone tracks main only.
@@ -40,9 +41,10 @@
   Pin and ledger the working tree but do not restart scheduled tasks.
 
 .EXAMPLE
-  cd C:\Users\denetimpc\platform-ai
+  cd C:\platform-ai-control
   Set-ExecutionPolicy -Scope Process Bypass
-  .\deploy\gpu-host\update.ps1 -TargetCommit <full-40-hex-commit>
+  .\deploy\gpu-host\update.ps1 -RepoRoot C:\platform-ai `
+    -TargetCommit <full-40-hex-commit>
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
 param(
@@ -64,9 +66,25 @@ $script:DeployLockTaken = $false
 $script:TestAcceptanceInvocation = 0
 $script:DefaultDeploymentStatePath = `
   "C:\ProgramData\Acik\platform-ai\deployment-state.json"
+$script:LegacyRollbackCompatCommit = `
+  "512e9cc0fe4368d3cc91759dcd48756e54c2ad63"
+$script:ResolvedRunnerTemp = ""
+if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+  try { $script:ResolvedRunnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP) }
+  catch { $script:ResolvedRunnerTemp = "" }
+}
+$script:ResolvedStatePath = ""
+try { $script:ResolvedStatePath = [IO.Path]::GetFullPath($StatePath) } catch { }
 $script:TestFaultsEnabled = (
   $env:CI -eq "true" -and
-  $StatePath -ne $script:DefaultDeploymentStatePath
+  $env:GITHUB_ACTIONS -eq "true" -and
+  $env:RUNNER_ENVIRONMENT -eq "github-hosted" -and
+  -not [string]::IsNullOrWhiteSpace($script:ResolvedRunnerTemp) -and
+  -not [string]::IsNullOrWhiteSpace($script:ResolvedStatePath) -and
+  $script:ResolvedStatePath.StartsWith(
+    $script:ResolvedRunnerTemp.TrimEnd('\') + '\',
+    [StringComparison]::OrdinalIgnoreCase
+  )
 )
 
 function Stop-Deploy {
@@ -115,22 +133,29 @@ function Invoke-GitStream {
 }
 
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
-  $scriptDir = $PSScriptRoot
-  if ([string]::IsNullOrWhiteSpace($scriptDir) -and $PSCommandPath) {
-    $scriptDir = Split-Path -Parent $PSCommandPath
-  }
-  if ([string]::IsNullOrWhiteSpace($scriptDir) -and $MyInvocation.MyCommand.Path) {
-    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-  }
-  if ([string]::IsNullOrWhiteSpace($scriptDir)) {
-    Stop-Deploy "Could not resolve script directory. Pass -RepoRoot explicitly." `
-      $script:DeployExitGuard
-  }
-  $RepoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
+  Stop-Deploy "RepoRoot is required; run this updater from an exact-target control checkout." `
+    $script:DeployExitGuard
+}
+$controllerRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path
+if ([IO.Path]::GetFullPath($controllerRoot).TrimEnd('\').Equals(
+    [IO.Path]::GetFullPath($RepoRoot).TrimEnd('\'),
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+  Stop-Deploy "Updater must run from a separate exact-target control checkout." `
+    $script:DeployExitGuard
 }
 
 if (-not (Test-Path (Join-Path $RepoRoot ".git"))) {
   Stop-Deploy "RepoRoot '$RepoRoot' is not a git clone. Pass -RepoRoot explicitly." `
+    $script:DeployExitGuard
+}
+if (-not (Test-Path (Join-Path $controllerRoot ".git"))) {
+  Stop-Deploy "ControllerRoot is not a git checkout." $script:DeployExitGuard
+}
+$legacyRuntimeEnv = Join-Path $RepoRoot "deploy\gpu-host\env.local.ps1"
+if (Test-Path -LiteralPath $legacyRuntimeEnv -PathType Leaf) {
+  Stop-Deploy "Legacy plaintext env.local.ps1 exists. Migrate to DPAPI live-stt.env and securely remove it before deploy." `
     $script:DeployExitGuard
 }
 if ($Branch -notmatch '^[A-Za-z0-9._/-]+$') {
@@ -267,6 +292,36 @@ if ($ancestorResult.ExitCode -ne 0) {
     $script:DeployExitGuard
 }
 
+$controllerHead = Invoke-GitCapture -GitArgs @(
+  "-C", $controllerRoot, "rev-parse", "HEAD"
+)
+$expectedControllerCommit = if ($Rollback) { $before } else { $target }
+if ($controllerHead.ExitCode -ne 0 -or $controllerHead.Output.Count -ne 1 -or
+    "$($controllerHead.Output[0])".Trim().ToLowerInvariant() -ne $expectedControllerCommit) {
+  Stop-Deploy "Control checkout HEAD must equal the approved controller commit." `
+    $script:DeployExitGuard
+}
+$controllerDirty = Invoke-GitCapture -GitArgs @(
+  "-C", $controllerRoot, "status", "--porcelain", "--untracked-files=all"
+)
+if ($controllerDirty.ExitCode -ne 0 -or $controllerDirty.Output.Count -gt 0) {
+  Stop-Deploy "Control checkout must be clean, including untracked files." `
+    $script:DeployExitGuard
+}
+$deployOrigin = Invoke-GitCapture -GitArgs @("remote", "get-url", "origin")
+$controllerOrigin = Invoke-GitCapture -GitArgs @(
+  "-C", $controllerRoot, "remote", "get-url", "origin"
+)
+if ($deployOrigin.ExitCode -ne 0 -or $controllerOrigin.ExitCode -ne 0 -or
+    $deployOrigin.Output.Count -ne 1 -or $controllerOrigin.Output.Count -ne 1 -or
+    -not "$($deployOrigin.Output[0])".Trim().Equals(
+      "$($controllerOrigin.Output[0])".Trim(),
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+  Stop-Deploy "Deploy and control checkouts must use the same origin." `
+    $script:DeployExitGuard
+}
+
 if (-not $PSCmdlet.ShouldProcess(
     $RepoRoot,
     ("{0} immutable commit {1}" -f $action, $target)
@@ -350,9 +405,9 @@ function Set-DeploymentLedgerResult {
   }
 }
 
-$runtimeContract = Join-Path $RepoRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
-$taskActionContract = Join-Path $RepoRoot "deploy\gpu-host\task-action-contract.ps1"
-$restartAcceptance = Join-Path $RepoRoot "deploy\gpu-host\restart-acceptance.ps1"
+$runtimeContract = Join-Path $controllerRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
+$taskActionContract = Join-Path $controllerRoot "deploy\gpu-host\task-action-contract.ps1"
+$restartAcceptance = Join-Path $controllerRoot "deploy\gpu-host\restart-acceptance.ps1"
 if (-not $NoRestart) {
   $testAcceptanceInjected = (
     $script:TestFaultsEnabled -and
@@ -432,6 +487,7 @@ function Get-TaskRuntimeContract {
         return [pscustomobject]@{
           Valid = $false
           PythonExe = ""
+          RepoRoot = ""
           Reason = [string]$_.Exception.Message
         }
     }
@@ -442,14 +498,15 @@ function Invoke-LiveSttStreamAcceptance {
     [Parameter(Mandatory = $true)][string]$PythonExe,
     [Parameter(Mandatory = $true)][Diagnostics.Stopwatch]$Clock,
     [Parameter(Mandatory = $true)][double]$DeadlineSec,
-    [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1"
+    [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
+    [int]$ConnectTimeoutCapSec = 30
   )
 
   $oldEap = $ErrorActionPreference
   try {
     $ErrorActionPreference = "Continue"
-    $smoke = Join-Path $RepoRoot "services\live-stt-service\scripts\live_stream_smoke.py"
-    $wav = Join-Path $RepoRoot `
+    $smoke = Join-Path $controllerRoot "services\live-stt-service\scripts\live_stream_smoke.py"
+    $wav = Join-Path $controllerRoot `
       "services\live-stt-service\tests\fixtures\sample-tr-cv17-001.wav"
     if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf) -or
         -not (Test-Path -LiteralPath $smoke -PathType Leaf) -or
@@ -460,7 +517,10 @@ function Invoke-LiveSttStreamAcceptance {
     }
     $remainingSec = $DeadlineSec - $Clock.Elapsed.TotalSeconds
     if ($remainingSec -le 5) { return $false }
-    $connectTimeoutSec = [Math]::Max(1, [Math]::Min(30, [Math]::Floor($remainingSec / 3)))
+    $connectTimeoutSec = [Math]::Max(1, [Math]::Min(
+      $ConnectTimeoutCapSec,
+      [Math]::Floor($remainingSec / 3)
+    ))
     $finalWaitSec = [Math]::Max(1, [Math]::Min(
       120,
       [Math]::Floor($remainingSec - $connectTimeoutSec - 2)
@@ -529,7 +589,11 @@ function New-GpuHostAcceptanceResult {
 }
 
 function Invoke-GpuHostRevisionAcceptance {
-  param([Parameter(Mandatory = $true)][string]$ExpectedCommit)
+  param(
+    [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+    [Parameter(Mandatory = $true)][ValidateSet("strict-v1", "legacy-512e9cc")]
+    [string]$AcceptanceProfile
+  )
 
   if ($script:TestFaultsEnabled -and
       $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
@@ -558,6 +622,11 @@ function Invoke-GpuHostRevisionAcceptance {
     if (-not $taskContract.Valid) {
       return New-GpuHostAcceptanceResult -Succeeded $false `
         -Reason "restart-failed-task-contract"
+    }
+    if (-not (Test-GpuHostSameLocalPath -Left $RepoRoot `
+        -Right ([string]$taskContract.RepoRoot))) {
+      return New-GpuHostAcceptanceResult -Succeeded $false `
+        -Reason "restart-failed-task-repo-root"
     }
     $taskPythonExe = [string]$taskContract.PythonExe
     $previousTaskSnapshot = Get-GpuHostTaskInstanceSnapshot -TaskName $task
@@ -634,10 +703,13 @@ function Invoke-GpuHostRevisionAcceptance {
       -ForegroundColor Green
   }
 
-  Write-Host "[update] waiting for live-stt streaming model readiness..." `
-    -ForegroundColor Cyan
-  $streamReady = $false
-  while ($acceptanceClock.Elapsed.TotalSeconds -lt $script:LiveSttReadinessDeadlineSec) {
+  $streamReady = ($AcceptanceProfile -eq "legacy-512e9cc")
+  if (-not $streamReady) {
+    Write-Host "[update] waiting for live-stt streaming model readiness..." `
+      -ForegroundColor Cyan
+  }
+  while (-not $streamReady -and
+      $acceptanceClock.Elapsed.TotalSeconds -lt $script:LiveSttReadinessDeadlineSec) {
     $remaining = $script:LiveSttReadinessDeadlineSec - $acceptanceClock.Elapsed.TotalSeconds
     $requestTimeout = [Math]::Max(1, [Math]::Min(5, [Math]::Ceiling($remaining)))
     try {
@@ -677,9 +749,12 @@ function Invoke-GpuHostRevisionAcceptance {
     return New-GpuHostAcceptanceResult -Succeeded $false `
       -Reason "readiness-failed-identity-changed"
   }
+  $connectTimeoutCapSec = 30
+  if ($AcceptanceProfile -eq "legacy-512e9cc") { $connectTimeoutCapSec = 300 }
   if (-not (Invoke-LiveSttStreamAcceptance -PythonExe $liveSttPythonExe `
       -Clock $acceptanceClock -DeadlineSec $script:LiveSttReadinessDeadlineSec `
-      -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1")) {
+      -Url "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1" `
+      -ConnectTimeoutCapSec $connectTimeoutCapSec)) {
     return New-GpuHostAcceptanceResult -Succeeded $false -Reason "smoke-failed"
   }
   if (-not (Test-GpuHostTaskInstanceStable -TaskName "platform-ai-live-stt" `
@@ -699,7 +774,8 @@ function Invoke-GpuHostRevisionAcceptance {
 function Invoke-GpuHostAutomaticRollback {
   param(
     [Parameter(Mandatory = $true)][string]$RestoreCommit,
-    [Parameter(Mandatory = $true)][string]$RejectedResult
+    [Parameter(Mandatory = $true)][string]$RejectedResult,
+    [AllowNull()][string]$RestorePreviousCommit
   )
 
   Set-DeploymentLedgerResult -Result $RejectedResult
@@ -716,7 +792,8 @@ function Invoke-GpuHostAutomaticRollback {
     return $false
   }
   $script:DeploymentLedgerRecord = New-DeploymentStateRecord `
-    -CurrentCommit $RestoreCommit -PreviousCommit $null -BranchRef $branchRef `
+    -CurrentCommit $RestoreCommit -PreviousCommit $RestorePreviousCommit `
+    -BranchRef $branchRef `
     -Action "rollback" -Result "automatic-rollback-source-restored"
   try {
     Write-DeploymentStateAtomic -StatePath $StatePath `
@@ -724,8 +801,12 @@ function Invoke-GpuHostAutomaticRollback {
   } catch {
     return $false
   }
+  $rollbackProfile = "strict-v1"
+  if ($RestoreCommit -eq $script:LegacyRollbackCompatCommit) {
+    $rollbackProfile = "legacy-512e9cc"
+  }
   $rollbackAcceptance = Invoke-GpuHostRevisionAcceptance `
-    -ExpectedCommit $RestoreCommit
+    -ExpectedCommit $RestoreCommit -AcceptanceProfile $rollbackProfile
   if (-not $rollbackAcceptance.Succeeded) {
     Set-DeploymentLedgerResult `
       -Result ("automatic-rollback-failed-{0}" -f $rollbackAcceptance.Reason)
@@ -739,10 +820,18 @@ if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
   Set-DeploymentLedgerResult -Result "pinned-no-restart"
 } else {
-  $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target
+  $targetAcceptanceProfile = "strict-v1"
+  if ($Rollback -and $target -eq $script:LegacyRollbackCompatCommit) {
+    $targetAcceptanceProfile = "legacy-512e9cc"
+  }
+  $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target `
+    -AcceptanceProfile $targetAcceptanceProfile
   if (-not $acceptance.Succeeded) {
+    $restorePreviousCommit = $null
+    if ($state) { $restorePreviousCommit = $state.previousCommit }
     if (-not (Invoke-GpuHostAutomaticRollback -RestoreCommit $before `
-        -RejectedResult $acceptance.Reason)) {
+        -RejectedResult $acceptance.Reason `
+        -RestorePreviousCommit $restorePreviousCommit)) {
       Stop-Deploy "Revision acceptance and automatic rollback acceptance failed." `
         $script:DeployExitRollbackFailed
     }

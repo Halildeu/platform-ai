@@ -104,6 +104,21 @@ function Get-GpuHostWindowsPowerShellPath {
     return Join-Path $systemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 }
 
+function Test-GpuHostSameLocalPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+
+    try {
+        $leftFull = [IO.Path]::GetFullPath($Left).TrimEnd('\')
+        $rightFull = [IO.Path]::GetFullPath($Right).TrimEnd('\')
+        return $leftFull.Equals($rightFull, [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
 function Get-GpuHostTaskSpec {
     param([Parameter(Mandatory = $true)][string]$TaskName)
 
@@ -185,6 +200,7 @@ function Get-GpuHostTaskActionContract {
     $result = [ordered]@{
         Valid = $false
         RepoClass = 'other'
+        RepoRoot = ''
         CanonicalArguments = ''
         PythonExe = ''
         HfHome = ''
@@ -258,6 +274,7 @@ function Get-GpuHostTaskActionContract {
             -TaskName $TaskName -RepoRoot $canonicalRoot -PythonExe $pythonExe `
             -HfHome $hfHome -CudaBin $cudaBin
         $result.PythonExe = $pythonExe
+        $result.RepoRoot = $tokens[7]
         $result.HfHome = $hfHome
         $result.CudaBin = $cudaBin
         $result.Valid = $true
