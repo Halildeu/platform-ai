@@ -39,7 +39,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn('$unpushedRange = "{0}..HEAD" -f $originRef', script)
         self.assertIn("[string]$TargetCommit", script)
         self.assertIn("[switch]$ReconcileLedgerDrift", script)
-        self.assertIn("[string]$RecoveryControllerCommit", script)
+        self.assertIn("[string]$ControllerCommit", script)
         self.assertIn(
             "Observed drift HEAD is not an ancestor of $originRef", script
         )
@@ -48,7 +48,11 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            "if ($ReconcileLedgerDrift) { $previous = $state.currentCommit }",
+            "if ($ReconcileLedgerDrift -and $target -eq $state.currentCommit)",
+            script,
+        )
+        self.assertIn(
+            "elseif ($ReconcileLedgerDrift) { $previous = $state.currentCommit }",
             script,
         )
         self.assertIn(
@@ -68,14 +72,23 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            "Recovery controller is unavailable or outside origin ancestry",
+            "Controller commit is unavailable or outside origin ancestry",
             script,
         )
         controller_guard = script[
-            script.index("$expectedControllerCommit = if ($ReconcileLedgerDrift)"):
+            script.index("$expectedControllerCommit = if ("):
             script.index("$controllerDirty =")
         ]
-        self.assertIn("$RecoveryControllerCommit", controller_guard)
+        self.assertIn("$ControllerCommit", controller_guard)
+        self.assertIn("function Stop-GpuHostRuntimeFailClosed", script)
+        self.assertIn(
+            "trusted source restored and runtime reaccepted",
+            script,
+        )
+        self.assertGreater(
+            script.index("Invoke-GpuHostSourceAndLedgerMutation\n"),
+            script.index("function Invoke-GpuHostAutomaticRollback"),
+        )
         self.assertIn("exactly 40 hex characters", script)
         self.assertIn("separate exact-target control checkout", script)
         self.assertIn("Control checkout HEAD must equal", script)

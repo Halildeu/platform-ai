@@ -310,24 +310,29 @@ ledger `currentCommit`'ini koruyarak hedef commit'e gecebilir:
 ```powershell
 $DeployRoot = "C:\Users\denetimpc\platform-ai"
 $TargetCommit = "<approved-full-40-hex-commit>"
-$RecoveryControllerCommit = "<merged-recovery-full-40-hex-commit>"
+$ControllerCommit = "<merged-controller-full-40-hex-commit>"
 .\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
   -TargetCommit $TargetCommit -ReconcileLedgerDrift `
-  -RecoveryControllerCommit $RecoveryControllerCommit -WhatIf
+  -ControllerCommit $ControllerCommit -WhatIf
 .\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
   -TargetCommit $TargetCommit -ReconcileLedgerDrift `
-  -RecoveryControllerCommit $RecoveryControllerCommit -NoConfirm
+  -ControllerCommit $ControllerCommit -NoConfirm
 ```
 
 Recovery modu yalniz gercek bir `HEAD != currentCommit` durumunda ve mevcut
 valid ledger ile calisir. Controller checkout HEAD'i
-`RecoveryControllerCommit` ile birebir eslesir; bu merged commit temiz, ayni
+`ControllerCommit` ile birebir eslesir; bu merged commit temiz, ayni
 origin'de ve `origin/main` soyunda olmalidir. Deployment `TargetCommit` bundan
 bagimsiz olarak exact ve approved kalir. Gozlenen drift commit'ini ledger'a
-benimsemez; `previousCommit` trusted ledger `currentCommit` olur. Ikinci komut
+benimsemez. Target farkliysa `previousCommit` trusted ledger `currentCommit`
+olur; target zaten trusted `currentCommit` ise mevcut `previousCommit` korunur.
+Ikinci komut
 normal restart ve acceptance zincirini de kosar. Recovery ile `-NoRestart`
 birlikte kullanilamaz. Hedef kabul edilmezse source ve ledger, gozlenen drift'e
 degil onceki trusted ledger `currentCommit`/`previousCommit` ciftine geri doner.
+Ilk ledger yazimi basarisiz olursa trusted source geri getirilir ve runtime
+yeniden kabul edilir; yeniden kabul de basarisizsa iki runtime task'i
+fail-closed durdurulur ve exit 4 doner.
 
 Ledger `C:\ProgramData\Acik\platform-ai\deployment-state.json` altinda schema v1
 olarak tutulur. Dizin ve dosya inheritance kapali, yalniz `SYSTEM` ve
@@ -347,9 +352,17 @@ Bounded rollback operator tarafindan commit secmez; yalniz hardened ledger'daki
 arka arkaya rollback ile iki revision arasinda ping-pong olusmaz:
 
 ```powershell
+git -C C:\platform-ai-control fetch --prune origin
+git -C C:\platform-ai-control checkout --detach $ControllerCommit
+git -C C:\platform-ai-control reset --hard $ControllerCommit
 & C:\platform-ai-control\deploy\gpu-host\update.ps1 `
-  -RepoRoot C:\platform-ai -Rollback -Confirm:$false
+  -RepoRoot C:\platform-ai -Rollback `
+  -ControllerCommit $ControllerCommit -Confirm:$false
 ```
+
+`ControllerCommit` deploy target'indan bagimsiz updater authority'sidir ve
+normal deploy ile rollback'te de kullanilabilir. Boylece recovery ile eski bir
+target'a donulmesi, sonraki rollback'i eski target'in updater koduna baglamaz.
 
 Eski `git pull`, `git checkout main`, `git reset --hard origin/main` ve `-Force`
 yontemleri immutable source kanitini bozdugu icin kullanilmaz.

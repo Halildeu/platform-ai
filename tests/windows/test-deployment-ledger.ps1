@@ -14,6 +14,7 @@ $source = Join-Path $fixtureRoot "source"
 $deploy = Join-Path $fixtureRoot "deploy"
 $statePath = Join-Path $fixtureRoot "state\deployment-state.json"
 $logDir = Join-Path $fixtureRoot "logs"
+$script:ControllerAuthorityCommit = ""
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -100,14 +101,19 @@ function Invoke-ChildPowerShell {
 function Invoke-Update {
     param([string[]]$ExtraArgs)
     $controllerCommit = ""
-    $recoveryControllerIndex = [Array]::IndexOf(
+    $controllerIndex = [Array]::IndexOf(
         $ExtraArgs,
-        "-RecoveryControllerCommit"
+        "-ControllerCommit"
     )
-    if ($recoveryControllerIndex -ge 0 -and
-        $recoveryControllerIndex + 1 -lt $ExtraArgs.Count -and
-        $ExtraArgs[$recoveryControllerIndex + 1] -match '^[0-9a-f]{40}$') {
-        $controllerCommit = $ExtraArgs[$recoveryControllerIndex + 1]
+    if ($controllerIndex -ge 0 -and
+        $controllerIndex + 1 -lt $ExtraArgs.Count -and
+        $ExtraArgs[$controllerIndex + 1] -match '^[0-9a-f]{40}$') {
+        $controllerCommit = $ExtraArgs[$controllerIndex + 1]
+    } elseif (-not [string]::IsNullOrWhiteSpace(
+        $script:ControllerAuthorityCommit
+    )) {
+        $controllerCommit = $script:ControllerAuthorityCommit
+        $ExtraArgs += @("-ControllerCommit", $controllerCommit)
     } elseif ($ExtraArgs -contains "-Rollback") {
         $controllerCommit = "$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim()
     } else {
@@ -224,9 +230,29 @@ $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitC) "second deploy currentCommit mismatch"
 Assert-True ($state.previousCommit -eq $commitB) "second deploy previousCommit mismatch"
 
-$commitD = New-SourceCommit -Name "d.txt" -Content "D"
+# Model an approved old deployment target that does not contain the recovery
+# updater. The later controller commit restores the current exact updater and
+# remains the authority for recovery and its subsequent bounded rollback.
+[IO.File]::WriteAllText(
+    (Join-Path $source "deploy\gpu-host\update.ps1"),
+    "# legacy target intentionally lacks the recovery controller contract",
+    (New-Object Text.UTF8Encoding($false))
+)
+[IO.File]::WriteAllText(
+    (Join-Path $source "d.txt"),
+    "D",
+    (New-Object Text.UTF8Encoding($false))
+)
+Invoke-Git $source @("add", "deploy/gpu-host/update.ps1", "d.txt") | Out-Null
+Invoke-Git $source @("commit", "-m", "fixture legacy deployment target") | Out-Null
+Invoke-Git $source @("push", "origin", "main") | Out-Null
+$commitD = "$(Invoke-Git $source @('rev-parse', 'HEAD'))".Trim().ToLowerInvariant()
+Copy-Item -LiteralPath $updateScript `
+    -Destination (Join-Path $source "deploy\gpu-host\update.ps1") -Force
+Invoke-Git $source @("add", "deploy/gpu-host/update.ps1") | Out-Null
 $recoveryControllerCommit = New-SourceCommit `
-    -Name "recovery-controller.txt" -Content "recovery-controller"
+    -Name "controller-authority.txt" -Content "controller-authority"
+$script:ControllerAuthorityCommit = $recoveryControllerCommit
 $savedGithubActions = $env:GITHUB_ACTIONS
 $savedRunnerEnvironment = $env:RUNNER_ENVIRONMENT
 try {
@@ -262,13 +288,13 @@ Assert-True ($blockedDriftDeploy.ExitCode -eq 2) `
     "normal deploy must reject HEAD/ledger drift"
 $blockedNoRestartRecovery = Invoke-Update @(
     "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
-    "-RecoveryControllerCommit", $recoveryControllerCommit, "-NoRestart"
+    "-ControllerCommit", $recoveryControllerCommit, "-NoRestart"
 )
 Assert-True ($blockedNoRestartRecovery.ExitCode -eq 2) `
     "ledger drift recovery must not bypass restart acceptance"
 $reconcileWhatIf = Invoke-Update @(
     "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
-    "-RecoveryControllerCommit", $recoveryControllerCommit, "-WhatIf"
+    "-ControllerCommit", $recoveryControllerCommit, "-WhatIf"
 )
 Assert-True ($reconcileWhatIf.ExitCode -eq 0) `
     "ledger drift recovery WhatIf validation failed"
@@ -279,14 +305,19 @@ Assert-True ($state.currentCommit -eq $commitC) `
     "ledger drift recovery WhatIf mutated ledger"
 
 # A ledger-write failure after reconciliation pinning must restore the trusted
-# ledger currentCommit, not the observed drift commit.
+# ledger currentCommit, not the observed drift commit, and must reaccept that
+# trusted runtime before returning the ledger failure.
 $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE = "1"
+$env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "accept"
 $reconcileLedgerFailure = Invoke-Update @(
     "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
-    "-RecoveryControllerCommit", $recoveryControllerCommit
+    "-ControllerCommit", $recoveryControllerCommit
 )
 Assert-True ($reconcileLedgerFailure.ExitCode -eq 2) `
     "reconciliation ledger failure with trusted restore must exit 2"
+Assert-True (($reconcileLedgerFailure.Output -join " | ") -match
+    "trusted source restored and runtime reaccepted") `
+    "reconciliation ledger failure did not reaccept the trusted runtime"
 $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitC -and
     $state.previousCommit -eq $commitB) `
@@ -294,6 +325,7 @@ Assert-True ($state.currentCommit -eq $commitC -and
 Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC) `
     "reconciliation ledger failure restored the observed drift commit"
 Remove-Item Env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE
+Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
 Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
 # A rejected reconciliation target must restore the trusted ledger pair, never
@@ -301,7 +333,7 @@ Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-then-accept"
 $rejectedReconcile = Invoke-Update @(
     "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
-    "-RecoveryControllerCommit", $recoveryControllerCommit
+    "-ControllerCommit", $recoveryControllerCommit
 )
 Assert-True ($rejectedReconcile.ExitCode -eq 3) `
     "rejected reconciliation target must preserve target-failed exit 3"
@@ -318,7 +350,7 @@ Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-twice"
 $failedRollbackReconcile = Invoke-Update @(
     "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
-    "-RecoveryControllerCommit", $recoveryControllerCommit
+    "-ControllerCommit", $recoveryControllerCommit
 )
 Assert-True ($failedRollbackReconcile.ExitCode -eq 4) `
     "reconciliation target plus rollback acceptance failure must exit 4"
@@ -335,7 +367,7 @@ Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "accept"
 $reconciled = Invoke-Update @(
     "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
-    "-RecoveryControllerCommit", $recoveryControllerCommit
+    "-ControllerCommit", $recoveryControllerCommit
 )
 Assert-True ($reconciled.ExitCode -eq 0) (
     "ledger drift recovery failed: exit={0}; output={1}" -f `
@@ -349,10 +381,36 @@ Assert-True ($state.previousCommit -eq $commitC) `
 Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitD) `
     "ledger drift recovery HEAD mismatch"
 Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
-# Restore the pre-recovery fixture directly so the independent rollback tests
-# below retain their original C -> B bounded ledger topology.
-Invoke-Git $deploy @("checkout", "--detach", $commitC) | Out-Null
+
+# The same independent controller authority must remain usable for the bounded
+# rollback immediately after an old target has been recovered.
+$postRecoveryRollback = Invoke-Update @(
+    "-Rollback", "-ControllerCommit", $recoveryControllerCommit, "-NoRestart"
+)
+Assert-True ($postRecoveryRollback.ExitCode -eq 0) `
+    "independent controller could not roll back the recovered old target"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC) `
+    "post-recovery rollback did not restore the trusted anchor"
+Assert-True ([string]::IsNullOrWhiteSpace($state.previousCommit)) `
+    "post-recovery rollback did not consume its bounded slot"
+
+# Returning drift directly to the already-trusted current commit must preserve
+# the existing previousCommit instead of writing current=current.
 Write-DeploymentStateAtomic -StatePath $statePath -State $preRecoveryState
+Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
+$env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "accept"
+$sameTargetRecovery = Invoke-Update @(
+    "-TargetCommit", $commitC, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit
+)
+Assert-True ($sameTargetRecovery.ExitCode -eq 0) `
+    "same-target ledger drift recovery failed"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC -and
+    $state.previousCommit -eq $commitB) `
+    "same-target recovery lost the existing bounded rollback anchor"
+Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
 $short = Invoke-Update @("-TargetCommit", $commitD.Substring(0, 12), `
     "-NoRestart")

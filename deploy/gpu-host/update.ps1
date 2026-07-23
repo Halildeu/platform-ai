@@ -42,10 +42,10 @@
   approved TargetCommit. The hardened ledger currentCommit remains the rollback
   anchor; the observed drift commit is never adopted as trusted state.
 
-.PARAMETER RecoveryControllerCommit
-  Exact merged origin commit that supplies the reconciliation updater. Required
-  only with ReconcileLedgerDrift so an older approved TargetCommit can remain
-  independent from the recovery controller authority.
+.PARAMETER ControllerCommit
+  Optional exact merged origin commit that supplies the updater independently
+  from the deployment target. Required with ReconcileLedgerDrift and supported
+  for deploy and rollback so an older target never becomes controller authority.
 
 .PARAMETER NoRestart
   Pin and ledger the working tree but do not restart scheduled tasks.
@@ -69,7 +69,7 @@ param(
   [string]$StatePath = "C:\ProgramData\Acik\platform-ai\deployment-state.json",
   [switch]$Rollback,
   [switch]$ReconcileLedgerDrift,
-  [string]$RecoveryControllerCommit = "",
+  [string]$ControllerCommit = "",
   [switch]$NoRestart,
   [switch]$NoConfirm
 )
@@ -296,11 +296,6 @@ if ($Rollback -and $ReconcileLedgerDrift) {
   Stop-Deploy "-Rollback cannot be combined with -ReconcileLedgerDrift." `
     $script:DeployExitGuard
 }
-if (-not $ReconcileLedgerDrift -and
-    -not [string]::IsNullOrWhiteSpace($RecoveryControllerCommit)) {
-  Stop-Deploy "-RecoveryControllerCommit is valid only with -ReconcileLedgerDrift." `
-    $script:DeployExitGuard
-}
 if ($ReconcileLedgerDrift -and $NoRestart) {
   Stop-Deploy "-ReconcileLedgerDrift requires restart and runtime acceptance." `
     $script:DeployExitGuard
@@ -318,12 +313,16 @@ if ($ReconcileLedgerDrift -and -not $ledgerDriftDetected) {
   Stop-Deploy "-ReconcileLedgerDrift requires an actual HEAD/ledger mismatch." `
     $script:DeployExitGuard
 }
-if ($ReconcileLedgerDrift) {
-  if ($RecoveryControllerCommit.ToLowerInvariant() -notmatch '^[0-9a-f]{40}$') {
-    Stop-Deploy "-ReconcileLedgerDrift requires -RecoveryControllerCommit with exactly 40 hex characters." `
+if ($ReconcileLedgerDrift -and [string]::IsNullOrWhiteSpace($ControllerCommit)) {
+  Stop-Deploy "-ReconcileLedgerDrift requires -ControllerCommit." `
+    $script:DeployExitGuard
+}
+if (-not [string]::IsNullOrWhiteSpace($ControllerCommit)) {
+  if ($ControllerCommit.ToLowerInvariant() -notmatch '^[0-9a-f]{40}$') {
+    Stop-Deploy "-ControllerCommit requires exactly 40 hex characters." `
       $script:DeployExitGuard
   }
-  $RecoveryControllerCommit = $RecoveryControllerCommit.ToLowerInvariant()
+  $ControllerCommit = $ControllerCommit.ToLowerInvariant()
 }
 
 $action = "deploy"
@@ -347,7 +346,10 @@ if ($Rollback) {
   }
   $target = $TargetCommit.ToLowerInvariant()
   if ($state) {
-    if ($ReconcileLedgerDrift) { $previous = $state.currentCommit }
+    if ($ReconcileLedgerDrift -and $target -eq $state.currentCommit) {
+      $previous = $state.previousCommit
+    }
+    elseif ($ReconcileLedgerDrift) { $previous = $state.currentCommit }
     elseif ($target -eq $before) { $previous = $state.previousCommit }
     else { $previous = $before }
   }
@@ -395,17 +397,20 @@ if ($ReconcileLedgerDrift) {
     Stop-Deploy "Ledger recovery anchor is unavailable or outside origin ancestry. No mutation." `
       $script:DeployExitGuard
   }
-  $recoveryObjectSpec = $RecoveryControllerCommit + "^{commit}"
-  $recoveryObject = Invoke-GitCapture -GitArgs @(
-    "rev-parse", "--verify", $recoveryObjectSpec
+}
+if (-not [string]::IsNullOrWhiteSpace($ControllerCommit)) {
+  $controllerObjectSpec = $ControllerCommit + "^{commit}"
+  $controllerObject = Invoke-GitCapture -GitArgs @(
+    "rev-parse", "--verify", $controllerObjectSpec
   )
-  $recoveryAncestor = Invoke-GitCapture -GitArgs @(
-    "merge-base", "--is-ancestor", $RecoveryControllerCommit, $originRef
+  $controllerAncestor = Invoke-GitCapture -GitArgs @(
+    "merge-base", "--is-ancestor", $ControllerCommit, $originRef
   )
-  if ($recoveryObject.ExitCode -ne 0 -or $recoveryObject.Output.Count -ne 1 -or
-      "$($recoveryObject.Output[0])".Trim().ToLowerInvariant() -ne
-        $RecoveryControllerCommit -or $recoveryAncestor.ExitCode -ne 0) {
-    Stop-Deploy "Recovery controller is unavailable or outside origin ancestry. No mutation." `
+  if ($controllerObject.ExitCode -ne 0 -or
+      $controllerObject.Output.Count -ne 1 -or
+      "$($controllerObject.Output[0])".Trim().ToLowerInvariant() -ne
+        $ControllerCommit -or $controllerAncestor.ExitCode -ne 0) {
+    Stop-Deploy "Controller commit is unavailable or outside origin ancestry. No mutation." `
       $script:DeployExitGuard
   }
 }
@@ -413,8 +418,10 @@ if ($ReconcileLedgerDrift) {
 $controllerHead = Invoke-GitCapture -GitArgs @(
   "-C", $controllerRoot, "rev-parse", "HEAD"
 )
-$expectedControllerCommit = if ($ReconcileLedgerDrift) {
-  $RecoveryControllerCommit
+$expectedControllerCommit = if (-not [string]::IsNullOrWhiteSpace(
+    $ControllerCommit
+  )) {
+  $ControllerCommit
 } elseif ($Rollback) {
   $before
 } else {
@@ -463,71 +470,94 @@ if (-not $PSCmdlet.ShouldProcess(
   exit 0
 }
 
-$pinFailedCode = $script:DeployExitRollbackFailed
-if ((Invoke-GitStream -GitArgs @("checkout", "--detach", $target)) -ne 0 -or
-    (Invoke-GitStream -GitArgs @("reset", "--hard", $target)) -ne 0) {
-  Stop-Deploy "Failed to pin target commit $target." $pinFailedCode
-}
-$afterResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
-$symbolicResult = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
-if ($afterResult.ExitCode -ne 0 -or $afterResult.Output.Count -ne 1 -or
-    "$($afterResult.Output[0])".Trim().ToLowerInvariant() -ne $target -or
-    $symbolicResult.ExitCode -eq 0) {
-  Stop-Deploy "Detached exact-pin postcondition failed." $pinFailedCode
-}
+function Invoke-GpuHostSourceAndLedgerMutation {
+  $pinFailedCode = $script:DeployExitRollbackFailed
+  if ((Invoke-GitStream -GitArgs @("checkout", "--detach", $target)) -ne 0 -or
+      (Invoke-GitStream -GitArgs @("reset", "--hard", $target)) -ne 0) {
+    Stop-Deploy "Failed to pin target commit $target." $pinFailedCode
+  }
+  $afterResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+  $symbolicResult = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
+  if ($afterResult.ExitCode -ne 0 -or $afterResult.Output.Count -ne 1 -or
+      "$($afterResult.Output[0])".Trim().ToLowerInvariant() -ne $target -or
+      $symbolicResult.ExitCode -eq 0) {
+    Stop-Deploy "Detached exact-pin postcondition failed." $pinFailedCode
+  }
 
-$script:DeploymentLedgerRecord = New-DeploymentStateRecord -CurrentCommit $target `
-  -PreviousCommit $previous -BranchRef $branchRef -Action $action `
-  -Result "source-pinned"
-try {
-  if ($script:TestFaultsEnabled -and
-      $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE -eq "1") {
-    throw "CI fault injection: deployment ledger write failure"
+  $script:DeploymentLedgerRecord = New-DeploymentStateRecord `
+    -CurrentCommit $target -PreviousCommit $previous -BranchRef $branchRef `
+    -Action $action -Result "source-pinned"
+  try {
+    if ($script:TestFaultsEnabled -and
+        $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE -eq "1") {
+      throw "CI fault injection: deployment ledger write failure"
+    }
+    Write-DeploymentStateAtomic -StatePath $StatePath `
+      -State $script:DeploymentLedgerRecord
+  } catch {
+    $ledgerWriteError = $_.Exception.Message
+    $ledgerWriteRestoreCommit = $before
+    if ($ReconcileLedgerDrift) {
+      $ledgerWriteRestoreCommit = $state.currentCommit
+    }
+    Write-Host ("[update] ledger write failed; restoring trusted commit {0}" -f `
+      $ledgerWriteRestoreCommit) -ForegroundColor Red
+    $restoreOk = $false
+    if (-not ($script:TestFaultsEnabled -and
+        $env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE -eq "1")) {
+      $restoreOk = ((Invoke-GitStream -GitArgs @(
+        "checkout", "--detach", $ledgerWriteRestoreCommit
+      )) -eq 0)
+    }
+    if ($restoreOk) {
+      $restoreOk = ((Invoke-GitStream -GitArgs @(
+        "reset", "--hard", $ledgerWriteRestoreCommit
+      )) -eq 0)
+    }
+    if ($restoreOk) {
+      $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+      $restoreSymbolic = Invoke-GitCapture -GitArgs @(
+        "symbolic-ref", "-q", "HEAD"
+      )
+      $restoreOk = ($restoreHead.ExitCode -eq 0 -and
+        $restoreHead.Output.Count -eq 1 -and
+        "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -eq
+          $ledgerWriteRestoreCommit -and
+        $restoreSymbolic.ExitCode -ne 0)
+    }
+    if (-not $restoreOk) {
+      Stop-Deploy "Ledger write and automatic source restoration failed." `
+        $script:DeployExitRollbackFailed
+    }
+    if ($ReconcileLedgerDrift) {
+      $restoreProfile = "strict-v1"
+      if ($ledgerWriteRestoreCommit -eq $script:LegacyRollbackCompatCommit) {
+        $restoreProfile = "legacy-512e9cc"
+      }
+      $restoreAcceptance = Invoke-GpuHostRevisionAcceptance `
+        -ExpectedCommit $ledgerWriteRestoreCommit `
+        -AcceptanceProfile $restoreProfile
+      if (-not $restoreAcceptance.Succeeded) {
+        $stopped = Stop-GpuHostRuntimeFailClosed
+        $stopResult = if ($stopped) { "runtime stopped" } else {
+          "runtime stop could not be proven"
+        }
+        Stop-Deploy ("Ledger write failed; trusted source restored but runtime acceptance failed ({0}); {1}: {2}" -f `
+          $restoreAcceptance.Reason, $stopResult, $ledgerWriteError) `
+          $script:DeployExitRollbackFailed
+      }
+      Stop-Deploy ("Ledger write failed; trusted source restored and runtime reaccepted: {0}" -f `
+        $ledgerWriteError) $script:DeployExitGuard
+    }
+    Stop-Deploy ("Ledger write failed; source restored: {0}" -f `
+      $ledgerWriteError) $script:DeployExitGuard
   }
-  Write-DeploymentStateAtomic -StatePath $StatePath -State $script:DeploymentLedgerRecord
-} catch {
-  $ledgerWriteRestoreCommit = $before
+  Write-Host "[update] $before -> $target (detached immutable pin)" `
+    -ForegroundColor Green
   if ($ReconcileLedgerDrift) {
-    $ledgerWriteRestoreCommit = $state.currentCommit
+    Write-Host ("[update] ledger drift reconciled; trusted rollback anchor={0}" -f `
+      $previous) -ForegroundColor Green
   }
-  Write-Host ("[update] ledger write failed; restoring trusted commit {0}" -f `
-    $ledgerWriteRestoreCommit) `
-    -ForegroundColor Red
-  $restoreOk = $false
-  if (-not ($script:TestFaultsEnabled -and
-      $env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE -eq "1")) {
-    $restoreOk = ((Invoke-GitStream -GitArgs @(
-      "checkout", "--detach", $ledgerWriteRestoreCommit
-    )) -eq 0)
-  }
-  if ($restoreOk) {
-    $restoreOk = ((Invoke-GitStream -GitArgs @(
-      "reset", "--hard", $ledgerWriteRestoreCommit
-    )) -eq 0)
-  }
-  if ($restoreOk) {
-    $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
-    $restoreSymbolic = Invoke-GitCapture -GitArgs @(
-      "symbolic-ref", "-q", "HEAD"
-    )
-    $restoreOk = ($restoreHead.ExitCode -eq 0 -and
-      $restoreHead.Output.Count -eq 1 -and
-      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -eq
-        $ledgerWriteRestoreCommit -and
-      $restoreSymbolic.ExitCode -ne 0)
-  }
-  if (-not $restoreOk) {
-    Stop-Deploy "Ledger write and automatic source restoration failed." `
-      $script:DeployExitRollbackFailed
-  }
-  Stop-Deploy ("Ledger write failed; source restored: {0}" -f `
-    $_.Exception.Message) $script:DeployExitGuard
-}
-Write-Host "[update] $before -> $target (detached immutable pin)" `
-  -ForegroundColor Green
-if ($ReconcileLedgerDrift) {
-  Write-Host ("[update] ledger drift reconciled; trusted rollback anchor={0}" -f `
-    $previous) -ForegroundColor Green
 }
 
 function Set-DeploymentLedgerResult {
@@ -558,9 +588,8 @@ if (-not $NoRestart) {
       -not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
       -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
       -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf))) {
-    Set-DeploymentLedgerResult -Result "restart-failed"
-    Stop-Deploy "Pinned source is missing a GPU-host runtime/action contract." `
-      $script:DeployExitRestartFailed
+    Stop-Deploy "Controller is missing a GPU-host runtime/action contract. No mutation." `
+      $script:DeployExitGuard
   }
   if (-not $testAcceptanceInjected) {
     . $runtimeContract
@@ -1020,6 +1049,37 @@ function Invoke-GpuHostRevisionAcceptance {
   return New-GpuHostAcceptanceResult -Succeeded $true -Reason "accepted"
 }
 
+function Stop-GpuHostRuntimeFailClosed {
+  if ($script:TestFaultsEnabled) {
+    Write-Host "[update] test contract: runtime tasks stopped fail-closed" `
+      -ForegroundColor Yellow
+    return $true
+  }
+
+  foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
+    [void](Invoke-SchtasksTask -Action "/End" -TaskName $task)
+  }
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  while ($clock.Elapsed.TotalSeconds -lt 30) {
+    $stopped = $true
+    foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
+      $snapshot = Get-GpuHostTaskInstanceSnapshot -TaskName $task
+      if (-not $snapshot.Succeeded -or @($snapshot.Instances).Count -gt 0) {
+        $stopped = $false
+      }
+    }
+    foreach ($port in @(8200, 8300)) {
+      $owners = Get-GpuHostListeningPortOwnerSnapshot -Port $port
+      if (-not $owners.Succeeded -or @($owners.Owners).Count -gt 0) {
+        $stopped = $false
+      }
+    }
+    if ($stopped) { return $true }
+    Start-Sleep -Milliseconds 500
+  }
+  return $false
+}
+
 function Invoke-GpuHostAutomaticRollback {
   param(
     [Parameter(Mandatory = $true)][string]$RestoreCommit,
@@ -1064,6 +1124,8 @@ function Invoke-GpuHostAutomaticRollback {
   Set-DeploymentLedgerResult -Result "automatic-rollback-accepted"
   return $true
 }
+
+Invoke-GpuHostSourceAndLedgerMutation
 
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
