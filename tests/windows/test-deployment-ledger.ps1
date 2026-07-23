@@ -365,6 +365,37 @@ $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitC) `
     "ledger drift recovery WhatIf mutated ledger"
 
+# A checkout that lands the target before reset or pin-postcondition failure is
+# already a source mutation. Both paths must restore trusted C/B and reaccept C;
+# a direct exit would leave enabled tasks able to load unaccepted target files.
+foreach ($pinFault in @(
+    "PLATFORM_AI_TEST_INJECT_PIN_RESET_FAILURE",
+    "PLATFORM_AI_TEST_INJECT_PIN_POSTCONDITION_FAILURE"
+)) {
+    Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
+    [Environment]::SetEnvironmentVariable($pinFault, "1", "Process")
+    $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "accept"
+    $pinFailure = Invoke-Update @(
+        "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+        "-ControllerCommit", $recoveryControllerCommit
+    )
+    Assert-True ($pinFailure.ExitCode -eq 4) `
+        "partial pin failure must retain mutation-failed exit 4: $pinFault"
+    Assert-True (($pinFailure.Output -join " | ") -match
+        "trusted source/ledger restored and runtime reaccepted") `
+        "partial pin failure did not reaccept trusted runtime: $pinFault"
+    $state = Read-DeploymentState -StatePath $statePath
+    Assert-True ($state.currentCommit -eq $commitC -and
+        $state.previousCommit -eq $commitB) `
+        "partial pin failure lost the trusted C/B pair: $pinFault"
+    Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC) `
+        "partial pin failure did not restore trusted source: $pinFault"
+    Assert-TestScheduledTasksEnabled -ExpectedEnabled $true
+    [Environment]::SetEnvironmentVariable($pinFault, $null, "Process")
+    Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
+}
+Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
+
 # A ledger-write failure after reconciliation pinning must restore the trusted
 # ledger currentCommit, not the observed drift commit, and must reaccept that
 # trusted runtime before returning the ledger failure.

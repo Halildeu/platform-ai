@@ -340,6 +340,9 @@ policy'si veya reboot servisi yeniden baslatabilir.
 Pin veya acceptance sonrasindaki `lastResult` yazimi da ayni transaction
 sinirindadir: yazim arizasi helper icinden cikis yapmaz; trusted rollback
 denetleyicisine devredilir ve rollback sonucu kanitlanamazsa runtime fence olur.
+Target checkout'tan detached-pin postcondition'ina kadarki kismi mutasyonlar da
+ayni fail-closed sinirdadir: trusted source/ledger geri yuklenip runtime yeniden
+kabul edilemezse task'lar disable/end edilir ve listener yoklugu dogrulanir.
 
 Fence ancak attended bir sonraki exact immutable deploy/recovery sirasinda
 acikca kaldirilir. Updater iki task'i enable edip dogrular, ardindan normal

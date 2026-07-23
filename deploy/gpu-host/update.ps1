@@ -513,16 +513,55 @@ function Restore-GpuHostTrustedDeploymentState {
 
 function Invoke-GpuHostSourceAndLedgerMutation {
   $pinFailedCode = $script:DeployExitRollbackFailed
-  if ((Invoke-GitStream -GitArgs @("checkout", "--detach", $target)) -ne 0 -or
-      (Invoke-GitStream -GitArgs @("reset", "--hard", $target)) -ne 0) {
-    Stop-Deploy "Failed to pin target commit $target." $pinFailedCode
+  $pinFailureReason = ""
+  $checkoutExit = Invoke-GitStream -GitArgs @("checkout", "--detach", $target)
+  if ($checkoutExit -ne 0) {
+    $pinFailureReason = "checkout-failed"
+  } else {
+    $resetExit = 0
+    if ($script:TestFaultsEnabled -and
+        $env:PLATFORM_AI_TEST_INJECT_PIN_RESET_FAILURE -eq "1") {
+      $resetExit = 1
+    } else {
+      $resetExit = Invoke-GitStream -GitArgs @("reset", "--hard", $target)
+    }
+    if ($resetExit -ne 0) { $pinFailureReason = "reset-failed" }
   }
-  $afterResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
-  $symbolicResult = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
-  if ($afterResult.ExitCode -ne 0 -or $afterResult.Output.Count -ne 1 -or
-      "$($afterResult.Output[0])".Trim().ToLowerInvariant() -ne $target -or
-      $symbolicResult.ExitCode -eq 0) {
-    Stop-Deploy "Detached exact-pin postcondition failed." $pinFailedCode
+
+  if ([string]::IsNullOrWhiteSpace($pinFailureReason)) {
+    $afterResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+    $symbolicResult = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
+    if ($script:TestFaultsEnabled -and
+        $env:PLATFORM_AI_TEST_INJECT_PIN_POSTCONDITION_FAILURE -eq "1") {
+      $pinFailureReason = "postcondition-failed"
+    } elseif ($afterResult.ExitCode -ne 0 -or
+        $afterResult.Output.Count -ne 1 -or
+        "$($afterResult.Output[0])".Trim().ToLowerInvariant() -ne $target -or
+        $symbolicResult.ExitCode -eq 0) {
+      $pinFailureReason = "postcondition-failed"
+    }
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($pinFailureReason)) {
+    $pinRestoreCommit = $before
+    if ($ReconcileLedgerDrift) {
+      $pinRestoreCommit = $state.currentCommit
+    }
+    $pinRecovery = Invoke-GpuHostTrustedPinFailureRecovery `
+      -RestoreCommit $pinRestoreCommit -TrustedState $state `
+      -RequireAcceptance (-not $NoRestart)
+    if ($pinRecovery.Succeeded) {
+      $proof = "trusted source/ledger restored"
+      if (-not $NoRestart) { $proof += " and runtime reaccepted" }
+      Stop-Deploy ("Target pin failed ({0}); {1}." -f `
+        $pinFailureReason, $proof) $pinFailedCode
+    }
+    $fenced = Stop-GpuHostRuntimeFailClosed
+    $fenceResult = if ($fenced) { "runtime fenced" } else {
+      "runtime fence could not be proven"
+    }
+    Stop-Deploy ("Target pin failed ({0}); trusted recovery failed ({1}); {2}." -f `
+      $pinFailureReason, $pinRecovery.Reason, $fenceResult) $pinFailedCode
   }
 
   $script:DeploymentLedgerRecord = New-DeploymentStateRecord `
@@ -1276,6 +1315,61 @@ function Stop-GpuHostRuntimeFailClosed {
       $_.Exception.Message) -ForegroundColor Red
   }
   return $false
+}
+
+function Invoke-GpuHostTrustedPinFailureRecovery {
+  param(
+    [Parameter(Mandatory = $true)][string]$RestoreCommit,
+    [AllowNull()]$TrustedState,
+    [Parameter(Mandatory = $true)][bool]$RequireAcceptance
+  )
+
+  $restoreOk = (
+    (Invoke-GitStream -GitArgs @(
+      "checkout", "--detach", $RestoreCommit
+    )) -eq 0 -and
+    (Invoke-GitStream -GitArgs @(
+      "reset", "--hard", $RestoreCommit
+    )) -eq 0
+  )
+  if (-not $restoreOk) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "source-restore-failed"
+  }
+  $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+  $restoreSymbolic = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
+  if ($restoreHead.ExitCode -ne 0 -or $restoreHead.Output.Count -ne 1 -or
+      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -ne $RestoreCommit -or
+      $restoreSymbolic.ExitCode -eq 0) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "source-restore-postcondition-failed"
+  }
+  if (-not (Restore-GpuHostTrustedDeploymentState -TrustedState $TrustedState)) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "ledger-restore-failed"
+  }
+  if (-not $RequireAcceptance) {
+    return New-GpuHostAcceptanceResult -Succeeded $true `
+      -Reason "trusted-source-ledger-restored"
+  }
+
+  $restoreProfile = "strict-v1"
+  if ($RestoreCommit -eq $script:LegacyRollbackCompatCommit) {
+    $restoreProfile = "legacy-512e9cc"
+  }
+  try {
+    $acceptance = Invoke-GpuHostRevisionAcceptance `
+      -ExpectedCommit $RestoreCommit -AcceptanceProfile $restoreProfile
+  } catch {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
+  }
+  if (-not $acceptance.Succeeded) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason ("runtime-reacceptance-{0}" -f $acceptance.Reason)
+  }
+  return New-GpuHostAcceptanceResult -Succeeded $true `
+    -Reason "trusted-runtime-reaccepted"
 }
 
 function Invoke-GpuHostAutomaticRollback {
