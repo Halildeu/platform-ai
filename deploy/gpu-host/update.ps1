@@ -765,9 +765,15 @@ function Test-SchtasksTaskEnabledState {
       return $false
     }
     [xml]$taskXml = $query.Output -join [Environment]::NewLine
-    $actual = [Convert]::ToBoolean(
-      [string]$taskXml.Task.Settings.Enabled
-    )
+    $enabledNodes = @($taskXml.Task.Settings.ChildNodes | Where-Object {
+      $_.LocalName -eq "Enabled"
+    })
+    $actual = $true
+    if ($enabledNodes.Count -eq 1) {
+      $actual = [Convert]::ToBoolean([string]$enabledNodes[0].InnerText)
+    } elseif ($enabledNodes.Count -gt 1) {
+      return $false
+    }
     return ($actual -eq $ExpectedEnabled)
   } catch {
     return $false

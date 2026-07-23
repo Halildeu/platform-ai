@@ -190,7 +190,12 @@ function Test-TestScheduledTaskEnabled {
     $xmlText = @(& schtasks.exe /Query /TN $TaskName /XML 2> $null)
     if ($LASTEXITCODE -ne 0 -or $xmlText.Count -eq 0) { return $false }
     [xml]$taskXml = $xmlText -join [Environment]::NewLine
-    return [Convert]::ToBoolean([string]$taskXml.Task.Settings.Enabled)
+    $enabledNodes = @($taskXml.Task.Settings.ChildNodes | Where-Object {
+        $_.LocalName -eq "Enabled"
+    })
+    if ($enabledNodes.Count -eq 0) { return $true }
+    if ($enabledNodes.Count -ne 1) { return $false }
+    return [Convert]::ToBoolean([string]$enabledNodes[0].InnerText)
 }
 
 function Initialize-TestScheduledTasks {
