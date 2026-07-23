@@ -220,6 +220,16 @@ function Assert-TestScheduledTasksEnabled {
     }
 }
 
+function Assert-TestFailClosedPortsUnused {
+    $lines = @(& netstat.exe -ano -p TCP 2> $null)
+    Assert-True ($LASTEXITCODE -eq 0) "netstat failed in fail-closed assertion"
+    foreach ($port in @(61234, 61235)) {
+        $pattern = '^\s*TCP\s+\S+:' + $port + '\s+\S+\s+LISTENING\s+\d+\s*$'
+        Assert-True (@($lines | Where-Object { [string]$_ -match $pattern }).Count -eq 0) `
+            "fail-closed test port still has a listener: $port"
+    }
+}
+
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal(
     [Security.Principal.WindowsIdentity]::GetCurrent()
 )).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -651,6 +661,36 @@ $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitC -and
     $state.previousCommit -eq $commitB) `
     "rollback-anchor fixture did not create current=C, previous=B"
+
+# Result writes happen after source pinning. Exercise both the pre-write and
+# post-replace failures at the target-rejected write (invocation 1) and the
+# rollback-failed write (invocation 2). Every path must restore the trusted C/B
+# pair and persistently fence tasks/listeners before exit 4.
+foreach ($faultPoint in @("1-pre", "1-post", "2-pre", "2-post")) {
+    $env:PLATFORM_AI_TEST_INJECT_RESULT_WRITE_FAILURE = $faultPoint
+    if ($faultPoint.StartsWith("1-")) {
+        $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-then-accept"
+    } else {
+        $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-twice"
+    }
+    $resultWriteFailure = Invoke-Update @("-TargetCommit", $commitD)
+    Assert-True ($resultWriteFailure.ExitCode -eq 4) `
+        "result-write failure must exit 4 at $faultPoint"
+    $state = Read-DeploymentState -StatePath $statePath
+    Assert-True ($state.currentCommit -eq $commitC -and
+        $state.previousCommit -eq $commitB) `
+        "result-write failure lost the trusted C/B pair at $faultPoint"
+    Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC) `
+        "result-write failure did not restore trusted source at $faultPoint"
+    Assert-TestScheduledTasksEnabled -ExpectedEnabled $false
+    Assert-TestFailClosedPortsUnused
+    Remove-Item Env:PLATFORM_AI_TEST_INJECT_RESULT_WRITE_FAILURE
+    Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
+    foreach ($taskName in $script:FailClosedTaskNames) {
+        Set-TestScheduledTaskEnabled -TaskName $taskName -Enabled $true
+    }
+}
+
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-twice"
 $restartFailure = Invoke-Update @("-TargetCommit", $commitD)
 Assert-True ($restartFailure.ExitCode -eq 4) `

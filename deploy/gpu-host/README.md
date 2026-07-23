@@ -337,6 +337,9 @@ kabul basarisizsa iki runtime task'i once disable edilir, calisan instance'lar
 sonlandirilir ve listener yoklugu dogrulanir; bu persistent fail-closed fence
 exit 4 ile raporlanir. `/End` tek basina fence degildir, cunku task restart
 policy'si veya reboot servisi yeniden baslatabilir.
+Pin veya acceptance sonrasindaki `lastResult` yazimi da ayni transaction
+sinirindadir: yazim arizasi helper icinden cikis yapmaz; trusted rollback
+denetleyicisine devredilir ve rollback sonucu kanitlanamazsa runtime fence olur.
 
 Fence ancak attended bir sonraki exact immutable deploy/recovery sirasinda
 acikca kaldirilir. Updater iki task'i enable edip dogrular, ardindan normal

@@ -136,6 +136,11 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         )
         self.assertIn("PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE", script)
         self.assertIn("PLATFORM_AI_TEST_INJECT_ACCEPTANCE_EXCEPTION", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_RESULT_WRITE_FAILURE", script)
+        self.assertIn("$resultWriteFailed = $true", script)
+        self.assertNotIn(
+            "Pinned source but ledger result update failed", script
+        )
         self.assertNotIn("[switch]$Force", script)
         self.assertNotIn('"checkout", "-B"', script)
         self.assertNotIn("2>&1 | Out-Host", script)

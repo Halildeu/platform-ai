@@ -89,6 +89,7 @@ $script:DeployExitRollbackFailed = 4
 $script:DeployMutex = $null
 $script:DeployLockTaken = $false
 $script:TestAcceptanceInvocation = 0
+$script:TestResultWriteInvocation = 0
 $script:DefaultDeploymentStatePath = `
   "C:\ProgramData\Acik\platform-ai\deployment-state.json"
 $script:LegacyRollbackCompatCommit = `
@@ -625,14 +626,21 @@ function Invoke-GpuHostSourceAndLedgerMutation {
 function Set-DeploymentLedgerResult {
   param([Parameter(Mandatory = $true)][string]$Result)
 
+  $script:TestResultWriteInvocation += 1
+  $faultPoint = "{0}-pre" -f $script:TestResultWriteInvocation
+  if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_INJECT_RESULT_WRITE_FAILURE -eq $faultPoint) {
+    throw ("CI fault injection: result write failure at {0}" -f $faultPoint)
+  }
   $script:DeploymentLedgerRecord["lastResult"] = $Result
   $script:DeploymentLedgerRecord["timestampUtc"] = [DateTime]::UtcNow.ToString("o")
-  try {
-    Write-DeploymentStateAtomic -StatePath $StatePath `
-      -State $script:DeploymentLedgerRecord
-  } catch {
-    Stop-Deploy ("Pinned source but ledger result update failed: {0}" -f `
-      $_.Exception.Message) $script:DeployExitRollbackFailed
+  Write-DeploymentStateAtomic -StatePath $StatePath `
+    -State $script:DeploymentLedgerRecord
+  $faultPoint = "{0}-post" -f $script:TestResultWriteInvocation
+  if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_INJECT_RESULT_WRITE_FAILURE -eq $faultPoint) {
+    throw ("CI fault injection: result post-write failure at {0}" -f `
+      $faultPoint)
   }
 }
 
@@ -1277,7 +1285,14 @@ function Invoke-GpuHostAutomaticRollback {
     [AllowNull()][string]$RestorePreviousCommit
   )
 
-  Set-DeploymentLedgerResult -Result $RejectedResult
+  $resultWriteFailed = $false
+  try {
+    Set-DeploymentLedgerResult -Result $RejectedResult
+  } catch {
+    $resultWriteFailed = $true
+    Write-Host ("[update] rejected-result ledger write failed; continuing trusted rollback: {0}" -f `
+      $_.Exception.Message) -ForegroundColor Red
+  }
   Write-Host "[update] revision rejected; restoring $RestoreCommit" `
     -ForegroundColor Yellow
   $restoreOk = (
@@ -1312,11 +1327,23 @@ function Invoke-GpuHostAutomaticRollback {
       -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
   }
   if (-not $rollbackAcceptance.Succeeded) {
-    Set-DeploymentLedgerResult `
-      -Result ("automatic-rollback-failed-{0}" -f $rollbackAcceptance.Reason)
+    try {
+      Set-DeploymentLedgerResult `
+        -Result ("automatic-rollback-failed-{0}" -f $rollbackAcceptance.Reason)
+    } catch {
+      Write-Host ("[update] rollback-failure ledger write failed: {0}" -f `
+        $_.Exception.Message) -ForegroundColor Red
+    }
     return $false
   }
-  Set-DeploymentLedgerResult -Result "automatic-rollback-accepted"
+  try {
+    Set-DeploymentLedgerResult -Result "automatic-rollback-accepted"
+  } catch {
+    Write-Host ("[update] rollback-accepted ledger write failed: {0}" -f `
+      $_.Exception.Message) -ForegroundColor Red
+    return $false
+  }
+  if ($resultWriteFailed) { return $false }
   return $true
 }
 
@@ -1330,7 +1357,16 @@ Invoke-GpuHostSourceAndLedgerMutation
 
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
-  Set-DeploymentLedgerResult -Result "pinned-no-restart"
+  try {
+    Set-DeploymentLedgerResult -Result "pinned-no-restart"
+  } catch {
+    $fenced = Stop-GpuHostRuntimeFailClosed
+    $fenceResult = if ($fenced) { "runtime fenced" } else {
+      "runtime fence could not be proven"
+    }
+    Stop-Deploy ("Pinned source result could not be persisted; {0}: {1}" -f `
+      $fenceResult, $_.Exception.Message) $script:DeployExitRollbackFailed
+  }
 } else {
   if ($RecoverFencedRuntime -and
       -not (Set-GpuHostRuntimeTasksEnabled -Enabled $true)) {
@@ -1374,7 +1410,16 @@ if ($NoRestart) {
 
 Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8200/ready ; :8300/health ; ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1 ready" -ForegroundColor Cyan
 if (-not $NoRestart) {
-  Set-DeploymentLedgerResult -Result "tasks-restarted"
+  try {
+    Set-DeploymentLedgerResult -Result "tasks-restarted"
+  } catch {
+    $fenced = Stop-GpuHostRuntimeFailClosed
+    $fenceResult = if ($fenced) { "runtime fenced" } else {
+      "runtime fence could not be proven"
+    }
+    Stop-Deploy ("Accepted runtime result could not be persisted; {0}: {1}" -f `
+      $fenceResult, $_.Exception.Message) $script:DeployExitRollbackFailed
+  }
 }
 if ($script:DeployMutex) {
   if ($script:DeployLockTaken) { $script:DeployMutex.ReleaseMutex() }
