@@ -278,6 +278,24 @@ $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitC) `
     "ledger drift recovery WhatIf mutated ledger"
 
+# A ledger-write failure after reconciliation pinning must restore the trusted
+# ledger currentCommit, not the observed drift commit.
+$env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE = "1"
+$reconcileLedgerFailure = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-RecoveryControllerCommit", $recoveryControllerCommit
+)
+Assert-True ($reconcileLedgerFailure.ExitCode -eq 2) `
+    "reconciliation ledger failure with trusted restore must exit 2"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC -and
+    $state.previousCommit -eq $commitB) `
+    "reconciliation ledger failure mutated the trusted ledger pair"
+Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC) `
+    "reconciliation ledger failure restored the observed drift commit"
+Remove-Item Env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE
+
+Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
 # A rejected reconciliation target must restore the trusted ledger pair, never
 # the observed drift commit.
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-then-accept"

@@ -486,18 +486,23 @@ try {
   }
   Write-DeploymentStateAtomic -StatePath $StatePath -State $script:DeploymentLedgerRecord
 } catch {
-  Write-Host "[update] ledger write failed; restoring pre-deploy commit" `
+  $ledgerWriteRestoreCommit = $before
+  if ($ReconcileLedgerDrift) {
+    $ledgerWriteRestoreCommit = $state.currentCommit
+  }
+  Write-Host ("[update] ledger write failed; restoring trusted commit {0}" -f `
+    $ledgerWriteRestoreCommit) `
     -ForegroundColor Red
   $restoreOk = $false
   if (-not ($script:TestFaultsEnabled -and
       $env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE -eq "1")) {
     $restoreOk = ((Invoke-GitStream -GitArgs @(
-      "checkout", "--detach", $before
+      "checkout", "--detach", $ledgerWriteRestoreCommit
     )) -eq 0)
   }
   if ($restoreOk) {
     $restoreOk = ((Invoke-GitStream -GitArgs @(
-      "reset", "--hard", $before
+      "reset", "--hard", $ledgerWriteRestoreCommit
     )) -eq 0)
   }
   if ($restoreOk) {
@@ -507,7 +512,8 @@ try {
     )
     $restoreOk = ($restoreHead.ExitCode -eq 0 -and
       $restoreHead.Output.Count -eq 1 -and
-      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -eq $before -and
+      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -eq
+        $ledgerWriteRestoreCommit -and
       $restoreSymbolic.ExitCode -ne 0)
   }
   if (-not $restoreOk) {

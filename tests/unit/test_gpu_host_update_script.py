@@ -60,6 +60,10 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             script,
         )
         self.assertIn(
+            "$ledgerWriteRestoreCommit = $state.currentCommit",
+            script,
+        )
+        self.assertIn(
             "Deployment ledger branchRef does not match the requested branch",
             script,
         )
