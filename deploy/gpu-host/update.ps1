@@ -42,6 +42,11 @@
   approved TargetCommit. The hardened ledger currentCommit remains the rollback
   anchor; the observed drift commit is never adopted as trusted state.
 
+.PARAMETER RecoveryControllerCommit
+  Exact merged origin commit that supplies the reconciliation updater. Required
+  only with ReconcileLedgerDrift so an older approved TargetCommit can remain
+  independent from the recovery controller authority.
+
 .PARAMETER NoRestart
   Pin and ledger the working tree but do not restart scheduled tasks.
 
@@ -64,6 +69,7 @@ param(
   [string]$StatePath = "C:\ProgramData\Acik\platform-ai\deployment-state.json",
   [switch]$Rollback,
   [switch]$ReconcileLedgerDrift,
+  [string]$RecoveryControllerCommit = "",
   [switch]$NoRestart,
   [switch]$NoConfirm
 )
@@ -290,6 +296,15 @@ if ($Rollback -and $ReconcileLedgerDrift) {
   Stop-Deploy "-Rollback cannot be combined with -ReconcileLedgerDrift." `
     $script:DeployExitGuard
 }
+if (-not $ReconcileLedgerDrift -and
+    -not [string]::IsNullOrWhiteSpace($RecoveryControllerCommit)) {
+  Stop-Deploy "-RecoveryControllerCommit is valid only with -ReconcileLedgerDrift." `
+    $script:DeployExitGuard
+}
+if ($ReconcileLedgerDrift -and $NoRestart) {
+  Stop-Deploy "-ReconcileLedgerDrift requires restart and runtime acceptance." `
+    $script:DeployExitGuard
+}
 $ledgerDriftDetected = ($state -and $state.currentCommit -ne $before)
 if ($ReconcileLedgerDrift -and -not $state) {
   Stop-Deploy "-ReconcileLedgerDrift requires an existing valid deployment ledger." `
@@ -302,6 +317,13 @@ if ($ledgerDriftDetected -and -not $ReconcileLedgerDrift) {
 if ($ReconcileLedgerDrift -and -not $ledgerDriftDetected) {
   Stop-Deploy "-ReconcileLedgerDrift requires an actual HEAD/ledger mismatch." `
     $script:DeployExitGuard
+}
+if ($ReconcileLedgerDrift) {
+  if ($RecoveryControllerCommit.ToLowerInvariant() -notmatch '^[0-9a-f]{40}$') {
+    Stop-Deploy "-ReconcileLedgerDrift requires -RecoveryControllerCommit with exactly 40 hex characters." `
+      $script:DeployExitGuard
+  }
+  $RecoveryControllerCommit = $RecoveryControllerCommit.ToLowerInvariant()
 }
 
 $action = "deploy"
@@ -346,6 +368,13 @@ if ($ancestorResult.ExitCode -ne 0) {
     $script:DeployExitGuard
 }
 if ($ReconcileLedgerDrift) {
+  if (-not ([string]$state.branchRef).Equals(
+      $branchRef,
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+    Stop-Deploy "Deployment ledger branchRef does not match the requested branch. No mutation." `
+      $script:DeployExitGuard
+  }
   $observedAncestor = Invoke-GitCapture -GitArgs @(
     "merge-base", "--is-ancestor", $before, $originRef
   )
@@ -366,12 +395,31 @@ if ($ReconcileLedgerDrift) {
     Stop-Deploy "Ledger recovery anchor is unavailable or outside origin ancestry. No mutation." `
       $script:DeployExitGuard
   }
+  $recoveryObjectSpec = $RecoveryControllerCommit + "^{commit}"
+  $recoveryObject = Invoke-GitCapture -GitArgs @(
+    "rev-parse", "--verify", $recoveryObjectSpec
+  )
+  $recoveryAncestor = Invoke-GitCapture -GitArgs @(
+    "merge-base", "--is-ancestor", $RecoveryControllerCommit, $originRef
+  )
+  if ($recoveryObject.ExitCode -ne 0 -or $recoveryObject.Output.Count -ne 1 -or
+      "$($recoveryObject.Output[0])".Trim().ToLowerInvariant() -ne
+        $RecoveryControllerCommit -or $recoveryAncestor.ExitCode -ne 0) {
+    Stop-Deploy "Recovery controller is unavailable or outside origin ancestry. No mutation." `
+      $script:DeployExitGuard
+  }
 }
 
 $controllerHead = Invoke-GitCapture -GitArgs @(
   "-C", $controllerRoot, "rev-parse", "HEAD"
 )
-$expectedControllerCommit = if ($Rollback) { $before } else { $target }
+$expectedControllerCommit = if ($ReconcileLedgerDrift) {
+  $RecoveryControllerCommit
+} elseif ($Rollback) {
+  $before
+} else {
+  $target
+}
 if ($controllerHead.ExitCode -ne 0 -or $controllerHead.Output.Count -ne 1 -or
     "$($controllerHead.Output[0])".Trim().ToLowerInvariant() -ne $expectedControllerCommit) {
   Stop-Deploy "Control checkout HEAD must equal the approved controller commit." `
@@ -760,11 +808,12 @@ function Invoke-GpuHostRevisionAcceptance {
 
   if ($script:TestFaultsEnabled -and
       $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
-        "reject-twice", "reject-then-accept"
+        "accept", "reject-twice", "reject-then-accept"
       )) {
     $script:TestAcceptanceInvocation += 1
-    if ($env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -eq "reject-twice" -or
-        $script:TestAcceptanceInvocation -eq 1) {
+    if ($env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -ne "accept" -and (
+        $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -eq "reject-twice" -or
+        $script:TestAcceptanceInvocation -eq 1)) {
       return New-GpuHostAcceptanceResult -Succeeded $false `
         -Reason "injected-acceptance-failure"
     }
@@ -1021,9 +1070,13 @@ if ($NoRestart) {
   $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target `
     -AcceptanceProfile $targetAcceptanceProfile
   if (-not $acceptance.Succeeded) {
+    $restoreCommit = $before
     $restorePreviousCommit = $null
-    if ($state) { $restorePreviousCommit = $state.previousCommit }
-    if (-not (Invoke-GpuHostAutomaticRollback -RestoreCommit $before `
+    if ($state) {
+      $restorePreviousCommit = $state.previousCommit
+      if ($ReconcileLedgerDrift) { $restoreCommit = $state.currentCommit }
+    }
+    if (-not (Invoke-GpuHostAutomaticRollback -RestoreCommit $restoreCommit `
         -RejectedResult $acceptance.Reason `
         -RestorePreviousCommit $restorePreviousCommit)) {
       Stop-Deploy "Revision acceptance and automatic rollback acceptance failed." `

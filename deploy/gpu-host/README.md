@@ -310,17 +310,24 @@ ledger `currentCommit`'ini koruyarak hedef commit'e gecebilir:
 ```powershell
 $DeployRoot = "C:\Users\denetimpc\platform-ai"
 $TargetCommit = "<approved-full-40-hex-commit>"
+$RecoveryControllerCommit = "<merged-recovery-full-40-hex-commit>"
 .\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
-  -TargetCommit $TargetCommit -ReconcileLedgerDrift -WhatIf
+  -TargetCommit $TargetCommit -ReconcileLedgerDrift `
+  -RecoveryControllerCommit $RecoveryControllerCommit -WhatIf
 .\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
-  -TargetCommit $TargetCommit -ReconcileLedgerDrift -NoConfirm
+  -TargetCommit $TargetCommit -ReconcileLedgerDrift `
+  -RecoveryControllerCommit $RecoveryControllerCommit -NoConfirm
 ```
 
-Recovery modu yalniz gercek bir `HEAD != currentCommit` durumunda, mevcut valid
-ledger ve exact target ile calisir. Gozlenen drift commit'ini ledger'a
-benimsemez; `previousCommit` trusted ledger anchor olur. Ikinci komut normal
-restart ve acceptance zincirini de kosar. Canli kanit olmadan yalniz
-`-NoRestart` ile recovery uygulanmaz.
+Recovery modu yalniz gercek bir `HEAD != currentCommit` durumunda ve mevcut
+valid ledger ile calisir. Controller checkout HEAD'i
+`RecoveryControllerCommit` ile birebir eslesir; bu merged commit temiz, ayni
+origin'de ve `origin/main` soyunda olmalidir. Deployment `TargetCommit` bundan
+bagimsiz olarak exact ve approved kalir. Gozlenen drift commit'ini ledger'a
+benimsemez; `previousCommit` trusted ledger `currentCommit` olur. Ikinci komut
+normal restart ve acceptance zincirini de kosar. Recovery ile `-NoRestart`
+birlikte kullanilamaz. Hedef kabul edilmezse source ve ledger, gozlenen drift'e
+degil onceki trusted ledger `currentCommit`/`previousCommit` ciftine geri doner.
 
 Ledger `C:\ProgramData\Acik\platform-ai\deployment-state.json` altinda schema v1
 olarak tutulur. Dizin ve dosya inheritance kapali, yalniz `SYSTEM` ve
