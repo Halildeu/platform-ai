@@ -40,6 +40,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("[string]$TargetCommit", script)
         self.assertIn("[switch]$ReconcileLedgerDrift", script)
         self.assertIn("[string]$ControllerCommit", script)
+        self.assertIn("[switch]$RecoverFencedRuntime", script)
         self.assertIn(
             "Observed drift HEAD is not an ancestor of $originRef", script
         )
@@ -81,6 +82,12 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         ]
         self.assertIn("$ControllerCommit", controller_guard)
         self.assertIn("function Stop-GpuHostRuntimeFailClosed", script)
+        self.assertIn("function Restore-GpuHostTrustedDeploymentState", script)
+        self.assertIn("function Set-GpuHostRuntimeTasksEnabled", script)
+        self.assertIn("Set-SchtasksTaskEnabled", script)
+        self.assertIn('"/Disable"', script)
+        self.assertIn('"/Enable"', script)
+        self.assertIn("runtime task fence is present", script.lower())
         self.assertIn(
             "trusted source restored and runtime reaccepted",
             script,
@@ -124,7 +131,11 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             script.index("$controllerRoot = (Resolve-Path"),
         )
         self.assertIn("PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE", script)
+        self.assertIn(
+            "PLATFORM_AI_TEST_INJECT_LEDGER_POST_WRITE_FAILURE", script
+        )
         self.assertIn("PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_ACCEPTANCE_EXCEPTION", script)
         self.assertNotIn("[switch]$Force", script)
         self.assertNotIn('"checkout", "-B"', script)
         self.assertNotIn("2>&1 | Out-Host", script)

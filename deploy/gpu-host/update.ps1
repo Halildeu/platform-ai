@@ -47,6 +47,11 @@
   from the deployment target. Required with ReconcileLedgerDrift and supported
   for deploy and rollback so an older target never becomes controller authority.
 
+.PARAMETER RecoverFencedRuntime
+  Explicitly re-enable the two GPU-host scheduled tasks during an attended
+  immutable deployment or ledger-drift recovery. A failed acceptance disables
+  them again. This switch cannot be combined with NoRestart.
+
 .PARAMETER NoRestart
   Pin and ledger the working tree but do not restart scheduled tasks.
 
@@ -70,6 +75,7 @@ param(
   [switch]$Rollback,
   [switch]$ReconcileLedgerDrift,
   [string]$ControllerCommit = "",
+  [switch]$RecoverFencedRuntime,
   [switch]$NoRestart,
   [switch]$NoConfirm
 )
@@ -300,6 +306,10 @@ if ($ReconcileLedgerDrift -and $NoRestart) {
   Stop-Deploy "-ReconcileLedgerDrift requires restart and runtime acceptance." `
     $script:DeployExitGuard
 }
+if ($RecoverFencedRuntime -and $NoRestart) {
+  Stop-Deploy "-RecoverFencedRuntime requires restart and runtime acceptance." `
+    $script:DeployExitGuard
+}
 $ledgerDriftDetected = ($state -and $state.currentCommit -ne $before)
 if ($ReconcileLedgerDrift -and -not $state) {
   Stop-Deploy "-ReconcileLedgerDrift requires an existing valid deployment ledger." `
@@ -470,6 +480,36 @@ if (-not $PSCmdlet.ShouldProcess(
   exit 0
 }
 
+function Restore-GpuHostTrustedDeploymentState {
+  param([AllowNull()]$TrustedState)
+
+  try {
+    if ($null -eq $TrustedState) {
+      if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+        Remove-Item -LiteralPath $StatePath -Force -ErrorAction Stop
+      }
+      return (-not (Test-Path -LiteralPath $StatePath -PathType Leaf))
+    }
+
+    Write-DeploymentStateAtomic -StatePath $StatePath -State $TrustedState
+    $verified = Read-DeploymentState -StatePath $StatePath
+    if ($null -eq $verified) { return $false }
+    foreach ($field in @(
+        "schemaVersion", "currentCommit", "previousCommit", "timestampUtc",
+        "branchRef", "lastAction", "lastResult", "host"
+      )) {
+      if ([string]$verified.$field -cne [string]$TrustedState.$field) {
+        return $false
+      }
+    }
+    return $true
+  } catch {
+    Write-Host ("[update] trusted ledger restore failed: {0}" -f `
+      $_.Exception.Message) -ForegroundColor Red
+    return $false
+  }
+}
+
 function Invoke-GpuHostSourceAndLedgerMutation {
   $pinFailedCode = $script:DeployExitRollbackFailed
   if ((Invoke-GitStream -GitArgs @("checkout", "--detach", $target)) -ne 0 -or
@@ -494,6 +534,10 @@ function Invoke-GpuHostSourceAndLedgerMutation {
     }
     Write-DeploymentStateAtomic -StatePath $StatePath `
       -State $script:DeploymentLedgerRecord
+    if ($script:TestFaultsEnabled -and $ReconcileLedgerDrift -and
+        $env:PLATFORM_AI_TEST_INJECT_LEDGER_POST_WRITE_FAILURE -eq "1") {
+      throw "CI fault injection: post-write deployment ledger failure"
+    }
   } catch {
     $ledgerWriteError = $_.Exception.Message
     $ledgerWriteRestoreCommit = $before
@@ -526,21 +570,39 @@ function Invoke-GpuHostSourceAndLedgerMutation {
         $restoreSymbolic.ExitCode -ne 0)
     }
     if (-not $restoreOk) {
-      Stop-Deploy "Ledger write and automatic source restoration failed." `
+      $fenced = Stop-GpuHostRuntimeFailClosed
+      $fenceResult = if ($fenced) { "runtime fenced" } else {
+        "runtime fence could not be proven"
+      }
+      Stop-Deploy ("Ledger write and automatic source restoration failed; {0}." -f `
+        $fenceResult) `
         $script:DeployExitRollbackFailed
+    }
+    if (-not (Restore-GpuHostTrustedDeploymentState -TrustedState $state)) {
+      $fenced = Stop-GpuHostRuntimeFailClosed
+      $fenceResult = if ($fenced) { "runtime fenced" } else {
+        "runtime fence could not be proven"
+      }
+      Stop-Deploy ("Ledger write failed; source restored but trusted ledger could not be restored and verified; {0}." -f `
+        $fenceResult) $script:DeployExitRollbackFailed
     }
     if ($ReconcileLedgerDrift) {
       $restoreProfile = "strict-v1"
       if ($ledgerWriteRestoreCommit -eq $script:LegacyRollbackCompatCommit) {
         $restoreProfile = "legacy-512e9cc"
       }
-      $restoreAcceptance = Invoke-GpuHostRevisionAcceptance `
-        -ExpectedCommit $ledgerWriteRestoreCommit `
-        -AcceptanceProfile $restoreProfile
+      try {
+        $restoreAcceptance = Invoke-GpuHostRevisionAcceptance `
+          -ExpectedCommit $ledgerWriteRestoreCommit `
+          -AcceptanceProfile $restoreProfile
+      } catch {
+        $restoreAcceptance = New-GpuHostAcceptanceResult -Succeeded $false `
+          -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
+      }
       if (-not $restoreAcceptance.Succeeded) {
         $stopped = Stop-GpuHostRuntimeFailClosed
-        $stopResult = if ($stopped) { "runtime stopped" } else {
-          "runtime stop could not be proven"
+        $stopResult = if ($stopped) { "runtime fenced" } else {
+          "runtime fence could not be proven"
         }
         Stop-Deploy ("Ledger write failed; trusted source restored but runtime acceptance failed ({0}); {1}: {2}" -f `
           $restoreAcceptance.Reason, $stopResult, $ledgerWriteError) `
@@ -577,26 +639,15 @@ function Set-DeploymentLedgerResult {
 $runtimeContract = Join-Path $controllerRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
 $taskActionContract = Join-Path $controllerRoot "deploy\gpu-host\task-action-contract.ps1"
 $restartAcceptance = Join-Path $controllerRoot "deploy\gpu-host\restart-acceptance.ps1"
-if (-not $NoRestart) {
-  $testAcceptanceInjected = (
-    $script:TestFaultsEnabled -and
-    $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
-      "reject-twice", "reject-then-accept"
-    )
-  )
-  if (-not $testAcceptanceInjected -and (
-      -not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
-      -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
-      -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf))) {
-    Stop-Deploy "Controller is missing a GPU-host runtime/action contract. No mutation." `
-      $script:DeployExitGuard
-  }
-  if (-not $testAcceptanceInjected) {
-    . $runtimeContract
-    . $taskActionContract
-    . $restartAcceptance
-  }
+if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf)) {
+  Stop-Deploy "Controller is missing a GPU-host runtime/action contract. No mutation." `
+    $script:DeployExitGuard
 }
+. $runtimeContract
+. $taskActionContract
+. $restartAcceptance
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
 #    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
@@ -630,6 +681,23 @@ function Invoke-SchtasksTask {
   }
 }
 
+function Set-SchtasksTaskEnabled {
+  param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][bool]$Enabled
+  )
+
+  $mode = if ($Enabled) { "/Enable" } else { "/Disable" }
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & schtasks.exe /Change /TN $TaskName $mode 1> $null 2> $null
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
 function Get-SchtasksTaskXml {
   param([Parameter(Mandatory = $true)][string]$TaskName)
 
@@ -641,6 +709,108 @@ function Get-SchtasksTaskXml {
   } finally {
     $ErrorActionPreference = $oldEap
   }
+}
+
+function Get-GpuHostManagedTaskNames {
+  if ($script:TestFaultsEnabled -and
+      -not [string]::IsNullOrWhiteSpace(
+        $env:PLATFORM_AI_TEST_FAIL_CLOSED_TASK_NAMES
+      )) {
+    $names = @(
+      $env:PLATFORM_AI_TEST_FAIL_CLOSED_TASK_NAMES.Split(",") |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    if ($names.Count -ne 2 -or @($names | Where-Object {
+          $_ -notmatch '^platform-ai-ci-[A-Za-z0-9-]+$'
+        }).Count -gt 0) {
+      throw "Invalid CI fail-closed task-name seam."
+    }
+    return $names
+  }
+  return @("platform-ai-live-stt", "platform-ai-meeting-ai")
+}
+
+function Get-GpuHostManagedPorts {
+  if ($script:TestFaultsEnabled -and
+      -not [string]::IsNullOrWhiteSpace(
+        $env:PLATFORM_AI_TEST_FAIL_CLOSED_PORTS
+      )) {
+    $ports = @()
+    foreach ($value in $env:PLATFORM_AI_TEST_FAIL_CLOSED_PORTS.Split(",")) {
+      $parsed = 0
+      if (-not [int]::TryParse($value.Trim(), [ref]$parsed) -or
+          $parsed -lt 49152 -or $parsed -gt 65535) {
+        throw "Invalid CI fail-closed port seam."
+      }
+      $ports += $parsed
+    }
+    if ($ports.Count -ne 2) {
+      throw "Invalid CI fail-closed port seam."
+    }
+    return $ports
+  }
+  return @(8200, 8300)
+}
+
+function Test-SchtasksTaskEnabledState {
+  param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][bool]$ExpectedEnabled
+  )
+
+  try {
+    $query = Get-SchtasksTaskXml -TaskName $TaskName
+    if ($query.ExitCode -ne 0 -or $query.Output.Count -eq 0) {
+      return $false
+    }
+    [xml]$taskXml = $query.Output -join [Environment]::NewLine
+    $actual = [Convert]::ToBoolean(
+      [string]$taskXml.Task.Settings.Enabled
+    )
+    return ($actual -eq $ExpectedEnabled)
+  } catch {
+    return $false
+  }
+}
+
+function Set-GpuHostRuntimeTasksEnabled {
+  param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+  try {
+    $tasks = @(Get-GpuHostManagedTaskNames)
+    $changed = $true
+    foreach ($task in $tasks) {
+      if ((Set-SchtasksTaskEnabled -TaskName $task -Enabled $Enabled) -ne 0) {
+        $changed = $false
+      }
+    }
+    foreach ($task in $tasks) {
+      if (-not (Test-SchtasksTaskEnabledState -TaskName $task `
+          -ExpectedEnabled $Enabled)) {
+        $changed = $false
+      }
+    }
+    return $changed
+  } catch {
+    return $false
+  }
+}
+
+function Test-GpuHostRuntimeTaskFencePresent {
+  try {
+    foreach ($task in @(Get-GpuHostManagedTaskNames)) {
+      $query = Get-SchtasksTaskXml -TaskName $task
+      if ($query.ExitCode -eq 0 -and $query.Output.Count -gt 0 -and
+          -not (Test-SchtasksTaskEnabledState -TaskName $task `
+            -ExpectedEnabled $true)) {
+        return $true
+      }
+    }
+  } catch {
+    return $true
+  }
+  return $false
 }
 
 function Get-TaskRuntimeContract {
@@ -841,6 +1011,10 @@ function Invoke-GpuHostRevisionAcceptance {
     [string]$AcceptanceProfile
   )
 
+  if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_INJECT_ACCEPTANCE_EXCEPTION -eq "1") {
+    throw "CI fault injection: acceptance exception"
+  }
   if ($script:TestFaultsEnabled -and
       $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
         "accept", "reject-twice", "reject-then-accept"
@@ -1050,32 +1224,42 @@ function Invoke-GpuHostRevisionAcceptance {
 }
 
 function Stop-GpuHostRuntimeFailClosed {
-  if ($script:TestFaultsEnabled) {
-    Write-Host "[update] test contract: runtime tasks stopped fail-closed" `
-      -ForegroundColor Yellow
-    return $true
-  }
-
-  foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
-    [void](Invoke-SchtasksTask -Action "/End" -TaskName $task)
-  }
-  $clock = [Diagnostics.Stopwatch]::StartNew()
-  while ($clock.Elapsed.TotalSeconds -lt 30) {
-    $stopped = $true
-    foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
-      $snapshot = Get-GpuHostTaskInstanceSnapshot -TaskName $task
-      if (-not $snapshot.Succeeded -or @($snapshot.Instances).Count -gt 0) {
-        $stopped = $false
-      }
+  try {
+    $tasks = @(Get-GpuHostManagedTaskNames)
+    $ports = @(Get-GpuHostManagedPorts)
+    $disabled = Set-GpuHostRuntimeTasksEnabled -Enabled $false
+    foreach ($task in $tasks) {
+      [void](Invoke-SchtasksTask -Action "/End" -TaskName $task)
     }
-    foreach ($port in @(8200, 8300)) {
-      $owners = Get-GpuHostListeningPortOwnerSnapshot -Port $port
-      if (-not $owners.Succeeded -or @($owners.Owners).Count -gt 0) {
-        $stopped = $false
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($clock.Elapsed.TotalSeconds -lt 30) {
+      $stopped = $disabled
+      foreach ($task in $tasks) {
+        if (-not (Test-SchtasksTaskEnabledState -TaskName $task `
+            -ExpectedEnabled $false)) {
+          $stopped = $false
+        }
+        $snapshot = Get-GpuHostTaskInstanceSnapshot -TaskName $task
+        if (-not $snapshot.Succeeded -or @($snapshot.Instances).Count -gt 0) {
+          $stopped = $false
+        }
       }
+      foreach ($port in $ports) {
+        $owners = Get-GpuHostListeningPortOwnerSnapshot -Port $port
+        if (-not $owners.Succeeded -or @($owners.Owners).Count -gt 0) {
+          $stopped = $false
+        }
+      }
+      if ($stopped) {
+        Write-Host "[update] runtime tasks disabled and listeners absent" `
+          -ForegroundColor Yellow
+        return $true
+      }
+      Start-Sleep -Milliseconds 500
     }
-    if ($stopped) { return $true }
-    Start-Sleep -Milliseconds 500
+  } catch {
+    Write-Host ("[update] runtime fence exception: {0}" -f `
+      $_.Exception.Message) -ForegroundColor Red
   }
   return $false
 }
@@ -1114,8 +1298,13 @@ function Invoke-GpuHostAutomaticRollback {
   if ($RestoreCommit -eq $script:LegacyRollbackCompatCommit) {
     $rollbackProfile = "legacy-512e9cc"
   }
-  $rollbackAcceptance = Invoke-GpuHostRevisionAcceptance `
-    -ExpectedCommit $RestoreCommit -AcceptanceProfile $rollbackProfile
+  try {
+    $rollbackAcceptance = Invoke-GpuHostRevisionAcceptance `
+      -ExpectedCommit $RestoreCommit -AcceptanceProfile $rollbackProfile
+  } catch {
+    $rollbackAcceptance = New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
+  }
   if (-not $rollbackAcceptance.Succeeded) {
     Set-DeploymentLedgerResult `
       -Result ("automatic-rollback-failed-{0}" -f $rollbackAcceptance.Reason)
@@ -1125,18 +1314,35 @@ function Invoke-GpuHostAutomaticRollback {
   return $true
 }
 
+if (-not $RecoverFencedRuntime -and
+    (Test-GpuHostRuntimeTaskFencePresent)) {
+  Stop-Deploy "Runtime task fence is present; recovery requires -RecoverFencedRuntime." `
+    $script:DeployExitGuard
+}
+
 Invoke-GpuHostSourceAndLedgerMutation
 
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
   Set-DeploymentLedgerResult -Result "pinned-no-restart"
 } else {
+  if ($RecoverFencedRuntime -and
+      -not (Set-GpuHostRuntimeTasksEnabled -Enabled $true)) {
+    [void](Stop-GpuHostRuntimeFailClosed)
+    Stop-Deploy "Explicit fenced-runtime recovery could not enable and verify both tasks." `
+      $script:DeployExitRollbackFailed
+  }
   $targetAcceptanceProfile = "strict-v1"
   if ($Rollback -and $target -eq $script:LegacyRollbackCompatCommit) {
     $targetAcceptanceProfile = "legacy-512e9cc"
   }
-  $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target `
-    -AcceptanceProfile $targetAcceptanceProfile
+  try {
+    $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target `
+      -AcceptanceProfile $targetAcceptanceProfile
+  } catch {
+    $acceptance = New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
+  }
   if (-not $acceptance.Succeeded) {
     $restoreCommit = $before
     $restorePreviousCommit = $null
@@ -1147,7 +1353,12 @@ if ($NoRestart) {
     if (-not (Invoke-GpuHostAutomaticRollback -RestoreCommit $restoreCommit `
         -RejectedResult $acceptance.Reason `
         -RestorePreviousCommit $restorePreviousCommit)) {
-      Stop-Deploy "Revision acceptance and automatic rollback acceptance failed." `
+      $fenced = Stop-GpuHostRuntimeFailClosed
+      $fenceResult = if ($fenced) { "runtime fenced" } else {
+        "runtime fence could not be proven"
+      }
+      Stop-Deploy ("Revision acceptance and automatic rollback acceptance failed; {0}." -f `
+        $fenceResult) `
         $script:DeployExitRollbackFailed
     }
     Stop-Deploy "Revision acceptance failed; previous revision was restored and reaccepted." `

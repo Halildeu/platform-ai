@@ -15,6 +15,10 @@ $deploy = Join-Path $fixtureRoot "deploy"
 $statePath = Join-Path $fixtureRoot "state\deployment-state.json"
 $logDir = Join-Path $fixtureRoot "logs"
 $script:ControllerAuthorityCommit = ""
+$script:FailClosedTaskNames = @(
+    "platform-ai-ci-ledger-live-stt",
+    "platform-ai-ci-ledger-meeting-ai"
+)
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -173,6 +177,44 @@ function New-SourceCommit {
     return "$(Invoke-Git $source @('rev-parse', 'HEAD'))".Trim().ToLowerInvariant()
 }
 
+function Set-TestScheduledTaskEnabled {
+    param([string]$TaskName, [bool]$Enabled)
+    $mode = if ($Enabled) { "/Enable" } else { "/Disable" }
+    & schtasks.exe /Change /TN $TaskName $mode *> $null
+    Assert-True ($LASTEXITCODE -eq 0) `
+        "failed to change test task enabled state: $TaskName"
+}
+
+function Test-TestScheduledTaskEnabled {
+    param([string]$TaskName)
+    $xmlText = @(& schtasks.exe /Query /TN $TaskName /XML 2> $null)
+    if ($LASTEXITCODE -ne 0 -or $xmlText.Count -eq 0) { return $false }
+    [xml]$taskXml = $xmlText -join [Environment]::NewLine
+    return [Convert]::ToBoolean([string]$taskXml.Task.Settings.Enabled)
+}
+
+function Initialize-TestScheduledTasks {
+    foreach ($taskName in $script:FailClosedTaskNames) {
+        & schtasks.exe /Create /TN $taskName `
+            /TR "cmd.exe /c exit 0" /SC DAILY /ST 23:59 `
+            /RU SYSTEM /RL HIGHEST /F *> $null
+        Assert-True ($LASTEXITCODE -eq 0) `
+            "failed to create fail-closed test task: $taskName"
+        Assert-True (Test-TestScheduledTaskEnabled -TaskName $taskName) `
+            "fail-closed test task was not enabled: $taskName"
+    }
+}
+
+function Assert-TestScheduledTasksEnabled {
+    param([bool]$ExpectedEnabled)
+    foreach ($taskName in $script:FailClosedTaskNames) {
+        Assert-True (
+            (Test-TestScheduledTaskEnabled -TaskName $taskName) -eq
+                $ExpectedEnabled
+        ) "unexpected enabled state for test task: $taskName"
+    }
+}
+
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal(
     [Security.Principal.WindowsIdentity]::GetCurrent()
 )).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -253,6 +295,10 @@ Invoke-Git $source @("add", "deploy/gpu-host/update.ps1") | Out-Null
 $recoveryControllerCommit = New-SourceCommit `
     -Name "controller-authority.txt" -Content "controller-authority"
 $script:ControllerAuthorityCommit = $recoveryControllerCommit
+Initialize-TestScheduledTasks
+$env:PLATFORM_AI_TEST_FAIL_CLOSED_TASK_NAMES = `
+    $script:FailClosedTaskNames -join ","
+$env:PLATFORM_AI_TEST_FAIL_CLOSED_PORTS = "61234,61235"
 $savedGithubActions = $env:GITHUB_ACTIONS
 $savedRunnerEnvironment = $env:RUNNER_ENVIRONMENT
 try {
@@ -327,6 +373,70 @@ Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC)
 Remove-Item Env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE
 Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
+# A failure after the atomic writer has already replaced the ledger must still
+# restore and read back the exact trusted C/B state before runtime acceptance.
+Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
+$env:PLATFORM_AI_TEST_INJECT_LEDGER_POST_WRITE_FAILURE = "1"
+$env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "accept"
+$postWriteLedgerFailure = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit
+)
+Assert-True ($postWriteLedgerFailure.ExitCode -eq 2) `
+    "post-write reconciliation ledger failure must exit 2"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC -and
+    $state.previousCommit -eq $commitB) `
+    "post-write ledger failure did not restore the exact trusted ledger pair"
+Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC) `
+    "post-write ledger failure did not restore the trusted source"
+Remove-Item Env:PLATFORM_AI_TEST_INJECT_LEDGER_POST_WRITE_FAILURE
+Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
+
+# An unexpected acceptance exception after source/ledger restoration must
+# persistently disable both tasks instead of escaping the fail-closed path.
+Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
+$env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE = "1"
+$env:PLATFORM_AI_TEST_INJECT_ACCEPTANCE_EXCEPTION = "1"
+$acceptanceException = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit
+)
+Assert-True ($acceptanceException.ExitCode -eq 4) `
+    "reconciliation acceptance exception must exit 4"
+Assert-TestScheduledTasksEnabled -ExpectedEnabled $false
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC -and
+    $state.previousCommit -eq $commitB) `
+    "acceptance exception changed the trusted ledger pair"
+Remove-Item Env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE
+Remove-Item Env:PLATFORM_AI_TEST_INJECT_ACCEPTANCE_EXCEPTION
+foreach ($taskName in $script:FailClosedTaskNames) {
+    Set-TestScheduledTaskEnabled -TaskName $taskName -Enabled $true
+}
+
+# Source restoration failure is also a persistent runtime fence, even though
+# the target source remains landed and the trusted ledger remains C/B.
+Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
+$env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE = "1"
+$env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE = "1"
+$sourceRestoreFailure = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit
+)
+Assert-True ($sourceRestoreFailure.ExitCode -eq 4) `
+    "reconciliation source-restore failure must exit 4"
+Assert-TestScheduledTasksEnabled -ExpectedEnabled $false
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC -and
+    $state.previousCommit -eq $commitB) `
+    "source-restore failure changed the trusted ledger pair"
+Remove-Item Env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE
+Remove-Item Env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE
+foreach ($taskName in $script:FailClosedTaskNames) {
+    Set-TestScheduledTaskEnabled -TaskName $taskName -Enabled $true
+}
+
 Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
 # A rejected reconciliation target must restore the trusted ledger pair, never
 # the observed drift commit.
@@ -361,13 +471,21 @@ Assert-True ($state.previousCommit -eq $commitB) `
     "failed reconciliation rollback lost the trusted previous anchor"
 Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC) `
     "failed reconciliation rollback did not restore trusted currentCommit"
+Assert-TestScheduledTasksEnabled -ExpectedEnabled $false
 Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
 Invoke-Git $deploy @("checkout", "--detach", $commitA) | Out-Null
+$blockedFencedRecovery = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit
+)
+Assert-True ($blockedFencedRecovery.ExitCode -eq 2) `
+    "fenced runtime recovery must require the explicit recovery switch"
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "accept"
 $reconciled = Invoke-Update @(
     "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
-    "-ControllerCommit", $recoveryControllerCommit
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-RecoverFencedRuntime"
 )
 Assert-True ($reconciled.ExitCode -eq 0) (
     "ledger drift recovery failed: exit={0}; output={1}" -f `
@@ -380,12 +498,16 @@ Assert-True ($state.previousCommit -eq $commitC) `
     "ledger drift recovery adopted drift instead of trusted ledger anchor"
 Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitD) `
     "ledger drift recovery HEAD mismatch"
+Assert-TestScheduledTasksEnabled -ExpectedEnabled $true
 Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
 # The same independent controller authority must remain usable for the bounded
-# rollback immediately after an old target has been recovered.
+# rollback immediately after an old target has been recovered. Do not use
+# -NoRestart here: exercise the rollback acceptance path under the injected
+# deterministic acceptance contract.
+$env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "accept"
 $postRecoveryRollback = Invoke-Update @(
-    "-Rollback", "-ControllerCommit", $recoveryControllerCommit, "-NoRestart"
+    "-Rollback", "-ControllerCommit", $recoveryControllerCommit
 )
 Assert-True ($postRecoveryRollback.ExitCode -eq 0) `
     "independent controller could not roll back the recovered old target"
@@ -394,6 +516,9 @@ Assert-True ($state.currentCommit -eq $commitC) `
     "post-recovery rollback did not restore the trusted anchor"
 Assert-True ([string]::IsNullOrWhiteSpace($state.previousCommit)) `
     "post-recovery rollback did not consume its bounded slot"
+Assert-True ($state.lastResult -eq "tasks-restarted") `
+    "post-recovery rollback did not exercise restart acceptance"
+Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
 # Returning drift directly to the already-trusted current commit must preserve
 # the existing previousCommit instead of writing current=current.
@@ -480,8 +605,12 @@ Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitD)
 $state = Read-DeploymentState -StatePath $statePath
 Assert-True ($state.currentCommit -eq $commitB) `
     "restore-failure fixture unexpectedly rewrote the ledger"
+Assert-TestScheduledTasksEnabled -ExpectedEnabled $false
 Remove-Item Env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE
 Remove-Item Env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE
+foreach ($taskName in $script:FailClosedTaskNames) {
+    Set-TestScheduledTaskEnabled -TaskName $taskName -Enabled $true
+}
 Invoke-Git $deploy @("checkout", "--detach", $commitB) | Out-Null
 
 # A pinned B behind newer main D is expected, not drift.
@@ -529,10 +658,13 @@ Assert-True ($state.previousCommit -eq $commitB) `
 Assert-True ($state.lastResult -eq `
     "automatic-rollback-failed-injected-acceptance-failure") `
     "rollback acceptance failure ledger result mismatch"
+Assert-TestScheduledTasksEnabled -ExpectedEnabled $false
 Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
 
 $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "reject-then-accept"
-$acceptedRollback = Invoke-Update @("-TargetCommit", $commitD)
+$acceptedRollback = Invoke-Update @(
+    "-TargetCommit", $commitD, "-RecoverFencedRuntime"
+)
 Assert-True ($acceptedRollback.ExitCode -eq 3) `
     "rejected target with reaccepted rollback must retain target-failed exit 3"
 $state = Read-DeploymentState -StatePath $statePath
@@ -542,6 +674,15 @@ Assert-True ($state.previousCommit -eq $commitB) `
     "successful automatic rollback lost the pre-existing valid rollback anchor"
 Assert-True ($state.lastResult -eq "automatic-rollback-accepted") `
     "successful automatic rollback ledger result mismatch"
+Assert-TestScheduledTasksEnabled -ExpectedEnabled $true
 Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
+
+foreach ($taskName in $script:FailClosedTaskNames) {
+    & schtasks.exe /Delete /TN $taskName /F *> $null
+}
+Remove-Item Env:PLATFORM_AI_TEST_FAIL_CLOSED_TASK_NAMES `
+    -ErrorAction SilentlyContinue
+Remove-Item Env:PLATFORM_AI_TEST_FAIL_CLOSED_PORTS `
+    -ErrorAction SilentlyContinue
 
 Write-Host "immutable deployment ledger behavior contract: PASS"

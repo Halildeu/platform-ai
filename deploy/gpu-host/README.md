@@ -331,8 +331,24 @@ normal restart ve acceptance zincirini de kosar. Recovery ile `-NoRestart`
 birlikte kullanilamaz. Hedef kabul edilmezse source ve ledger, gozlenen drift'e
 degil onceki trusted ledger `currentCommit`/`previousCommit` ciftine geri doner.
 Ilk ledger yazimi basarisiz olursa trusted source geri getirilir ve runtime
-yeniden kabul edilir; yeniden kabul de basarisizsa iki runtime task'i
-fail-closed durdurulur ve exit 4 doner.
+yeniden kabul edilmeden once eski ledger'in tum alanlari atomic olarak geri
+yazilir ve read-back ile birebir dogrulanir. Source/ledger restore veya yeniden
+kabul basarisizsa iki runtime task'i once disable edilir, calisan instance'lar
+sonlandirilir ve listener yoklugu dogrulanir; bu persistent fail-closed fence
+exit 4 ile raporlanir. `/End` tek basina fence degildir, cunku task restart
+policy'si veya reboot servisi yeniden baslatabilir.
+
+Fence ancak attended bir sonraki exact immutable deploy/recovery sirasinda
+acikca kaldirilir. Updater iki task'i enable edip dogrular, ardindan normal
+runtime acceptance zincirini kosar; acceptance basarisizsa fence yeniden
+uygulanir:
+
+```powershell
+& C:\platform-ai-control\deploy\gpu-host\update.ps1 `
+  -RepoRoot C:\platform-ai -TargetCommit $TargetCommit `
+  -ControllerCommit $ControllerCommit -RecoverFencedRuntime `
+  -Confirm:$false
+```
 
 Ledger `C:\ProgramData\Acik\platform-ai\deployment-state.json` altinda schema v1
 olarak tutulur. Dizin ve dosya inheritance kapali, yalniz `SYSTEM` ve
