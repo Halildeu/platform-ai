@@ -38,6 +38,64 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("function Invoke-GitStream", script)
         self.assertIn('$unpushedRange = "{0}..HEAD" -f $originRef', script)
         self.assertIn("[string]$TargetCommit", script)
+        self.assertIn("[switch]$ReconcileLedgerDrift", script)
+        self.assertIn("[string]$ControllerCommit", script)
+        self.assertIn("[switch]$RecoverFencedRuntime", script)
+        self.assertIn(
+            "Observed drift HEAD is not an ancestor of $originRef", script
+        )
+        self.assertIn(
+            "Ledger recovery anchor is unavailable or outside origin ancestry",
+            script,
+        )
+        self.assertIn(
+            "if ($ReconcileLedgerDrift -and $target -eq $state.currentCommit)",
+            script,
+        )
+        self.assertIn(
+            "elseif ($ReconcileLedgerDrift) { $previous = $state.currentCommit }",
+            script,
+        )
+        self.assertIn(
+            "-ReconcileLedgerDrift requires restart and runtime acceptance",
+            script,
+        )
+        self.assertIn(
+            "if ($ReconcileLedgerDrift) { $restoreCommit = $state.currentCommit }",
+            script,
+        )
+        self.assertIn(
+            "$ledgerWriteRestoreCommit = $state.currentCommit",
+            script,
+        )
+        self.assertIn(
+            "Deployment ledger branchRef does not match the requested branch",
+            script,
+        )
+        self.assertIn(
+            "Controller commit is unavailable or outside origin ancestry",
+            script,
+        )
+        controller_guard = script[
+            script.index("$expectedControllerCommit = if ("):
+            script.index("$controllerDirty =")
+        ]
+        self.assertIn("$ControllerCommit", controller_guard)
+        self.assertIn("function Stop-GpuHostRuntimeFailClosed", script)
+        self.assertIn("function Restore-GpuHostTrustedDeploymentState", script)
+        self.assertIn("function Set-GpuHostRuntimeTasksEnabled", script)
+        self.assertIn("Set-SchtasksTaskEnabled", script)
+        self.assertIn('"/Disable"', script)
+        self.assertIn('"/Enable"', script)
+        self.assertIn("runtime task fence is present", script.lower())
+        self.assertIn(
+            "trusted source restored and runtime reaccepted",
+            script,
+        )
+        self.assertGreater(
+            script.index("Invoke-GpuHostSourceAndLedgerMutation\n"),
+            script.index("function Invoke-GpuHostAutomaticRollback"),
+        )
         self.assertIn("exactly 40 hex characters", script)
         self.assertIn("separate exact-target control checkout", script)
         self.assertIn("Control checkout HEAD must equal", script)
@@ -73,7 +131,16 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             script.index("$controllerRoot = (Resolve-Path"),
         )
         self.assertIn("PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE", script)
+        self.assertIn(
+            "PLATFORM_AI_TEST_INJECT_LEDGER_POST_WRITE_FAILURE", script
+        )
         self.assertIn("PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_ACCEPTANCE_EXCEPTION", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_RESULT_WRITE_FAILURE", script)
+        self.assertIn("$resultWriteFailed = $true", script)
+        self.assertNotIn(
+            "Pinned source but ledger result update failed", script
+        )
         self.assertNotIn("[switch]$Force", script)
         self.assertNotIn('"checkout", "-B"', script)
         self.assertNotIn("2>&1 | Out-Host", script)

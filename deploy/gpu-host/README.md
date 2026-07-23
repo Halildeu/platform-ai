@@ -301,6 +301,61 @@ dev clone'a tasinip push + PR ile korunur. Source pin landed fakat task restart
 basarisizsa ledger `restart-failed` yazar ve **exit 3** doner. Rollback mutation
 veya otomatik source restore basarisizligi **exit 4**'tur.
 
+HEAD ile ledger `currentCommit` out-of-band bir islem nedeniyle ayrismissa
+`git checkout/reset` ile guard elle atlanmaz. Ayrı ve exact-target control
+checkout'taki updater, iki commit'in de `origin/main` soyunda oldugunu ve
+ledger ACL/icerigini dogruladiktan sonra trusted rollback anchor olarak yalniz
+ledger `currentCommit`'ini koruyarak hedef commit'e gecebilir:
+
+```powershell
+$DeployRoot = "C:\Users\denetimpc\platform-ai"
+$TargetCommit = "<approved-full-40-hex-commit>"
+$ControllerCommit = "<merged-controller-full-40-hex-commit>"
+.\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
+  -TargetCommit $TargetCommit -ReconcileLedgerDrift `
+  -ControllerCommit $ControllerCommit -WhatIf
+.\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
+  -TargetCommit $TargetCommit -ReconcileLedgerDrift `
+  -ControllerCommit $ControllerCommit -NoConfirm
+```
+
+Recovery modu yalniz gercek bir `HEAD != currentCommit` durumunda ve mevcut
+valid ledger ile calisir. Controller checkout HEAD'i
+`ControllerCommit` ile birebir eslesir; bu merged commit temiz, ayni
+origin'de ve `origin/main` soyunda olmalidir. Deployment `TargetCommit` bundan
+bagimsiz olarak exact ve approved kalir. Gozlenen drift commit'ini ledger'a
+benimsemez. Target farkliysa `previousCommit` trusted ledger `currentCommit`
+olur; target zaten trusted `currentCommit` ise mevcut `previousCommit` korunur.
+Ikinci komut
+normal restart ve acceptance zincirini de kosar. Recovery ile `-NoRestart`
+birlikte kullanilamaz. Hedef kabul edilmezse source ve ledger, gozlenen drift'e
+degil onceki trusted ledger `currentCommit`/`previousCommit` ciftine geri doner.
+Ilk ledger yazimi basarisiz olursa trusted source geri getirilir ve runtime
+yeniden kabul edilmeden once eski ledger'in tum alanlari atomic olarak geri
+yazilir ve read-back ile birebir dogrulanir. Source/ledger restore veya yeniden
+kabul basarisizsa iki runtime task'i once disable edilir, calisan instance'lar
+sonlandirilir ve listener yoklugu dogrulanir; bu persistent fail-closed fence
+exit 4 ile raporlanir. `/End` tek basina fence degildir, cunku task restart
+policy'si veya reboot servisi yeniden baslatabilir.
+Pin veya acceptance sonrasindaki `lastResult` yazimi da ayni transaction
+sinirindadir: yazim arizasi helper icinden cikis yapmaz; trusted rollback
+denetleyicisine devredilir ve rollback sonucu kanitlanamazsa runtime fence olur.
+Target checkout'tan detached-pin postcondition'ina kadarki kismi mutasyonlar da
+ayni fail-closed sinirdadir: trusted source/ledger geri yuklenip runtime yeniden
+kabul edilemezse task'lar disable/end edilir ve listener yoklugu dogrulanir.
+
+Fence ancak attended bir sonraki exact immutable deploy/recovery sirasinda
+acikca kaldirilir. Updater iki task'i enable edip dogrular, ardindan normal
+runtime acceptance zincirini kosar; acceptance basarisizsa fence yeniden
+uygulanir:
+
+```powershell
+& C:\platform-ai-control\deploy\gpu-host\update.ps1 `
+  -RepoRoot C:\platform-ai -TargetCommit $TargetCommit `
+  -ControllerCommit $ControllerCommit -RecoverFencedRuntime `
+  -Confirm:$false
+```
+
 Ledger `C:\ProgramData\Acik\platform-ai\deployment-state.json` altinda schema v1
 olarak tutulur. Dizin ve dosya inheritance kapali, yalniz `SYSTEM` ve
 `BUILTIN\Administrators` FullControl ACL'lidir; same-volume atomic replace ve
@@ -319,9 +374,17 @@ Bounded rollback operator tarafindan commit secmez; yalniz hardened ledger'daki
 arka arkaya rollback ile iki revision arasinda ping-pong olusmaz:
 
 ```powershell
+git -C C:\platform-ai-control fetch --prune origin
+git -C C:\platform-ai-control checkout --detach $ControllerCommit
+git -C C:\platform-ai-control reset --hard $ControllerCommit
 & C:\platform-ai-control\deploy\gpu-host\update.ps1 `
-  -RepoRoot C:\platform-ai -Rollback -Confirm:$false
+  -RepoRoot C:\platform-ai -Rollback `
+  -ControllerCommit $ControllerCommit -Confirm:$false
 ```
+
+`ControllerCommit` deploy target'indan bagimsiz updater authority'sidir ve
+normal deploy ile rollback'te de kullanilabilir. Boylece recovery ile eski bir
+target'a donulmesi, sonraki rollback'i eski target'in updater koduna baglamaz.
 
 Eski `git pull`, `git checkout main`, `git reset --hard origin/main` ve `-Force`
 yontemleri immutable source kanitini bozdugu icin kullanilmaz.

@@ -37,6 +37,21 @@
 .PARAMETER Rollback
   Roll back only to deployment-state.json previousCommit.
 
+.PARAMETER ReconcileLedgerDrift
+  Recover an out-of-band deploy-clone HEAD drift while deploying an explicit
+  approved TargetCommit. The hardened ledger currentCommit remains the rollback
+  anchor; the observed drift commit is never adopted as trusted state.
+
+.PARAMETER ControllerCommit
+  Optional exact merged origin commit that supplies the updater independently
+  from the deployment target. Required with ReconcileLedgerDrift and supported
+  for deploy and rollback so an older target never becomes controller authority.
+
+.PARAMETER RecoverFencedRuntime
+  Explicitly re-enable the two GPU-host scheduled tasks during an attended
+  immutable deployment or ledger-drift recovery. A failed acceptance disables
+  them again. This switch cannot be combined with NoRestart.
+
 .PARAMETER NoRestart
   Pin and ledger the working tree but do not restart scheduled tasks.
 
@@ -58,6 +73,9 @@ param(
   [string]$TargetCommit = "",
   [string]$StatePath = "C:\ProgramData\Acik\platform-ai\deployment-state.json",
   [switch]$Rollback,
+  [switch]$ReconcileLedgerDrift,
+  [string]$ControllerCommit = "",
+  [switch]$RecoverFencedRuntime,
   [switch]$NoRestart,
   [switch]$NoConfirm
 )
@@ -71,6 +89,7 @@ $script:DeployExitRollbackFailed = 4
 $script:DeployMutex = $null
 $script:DeployLockTaken = $false
 $script:TestAcceptanceInvocation = 0
+$script:TestResultWriteInvocation = 0
 $script:DefaultDeploymentStatePath = `
   "C:\ProgramData\Acik\platform-ai\deployment-state.json"
 $script:LegacyRollbackCompatCommit = `
@@ -280,9 +299,41 @@ try {
   Stop-Deploy ("Deployment ledger rejected: {0}" -f $_.Exception.Message) `
     $script:DeployExitGuard
 }
-if ($state -and $state.currentCommit -ne $before) {
+if ($Rollback -and $ReconcileLedgerDrift) {
+  Stop-Deploy "-Rollback cannot be combined with -ReconcileLedgerDrift." `
+    $script:DeployExitGuard
+}
+if ($ReconcileLedgerDrift -and $NoRestart) {
+  Stop-Deploy "-ReconcileLedgerDrift requires restart and runtime acceptance." `
+    $script:DeployExitGuard
+}
+if ($RecoverFencedRuntime -and $NoRestart) {
+  Stop-Deploy "-RecoverFencedRuntime requires restart and runtime acceptance." `
+    $script:DeployExitGuard
+}
+$ledgerDriftDetected = ($state -and $state.currentCommit -ne $before)
+if ($ReconcileLedgerDrift -and -not $state) {
+  Stop-Deploy "-ReconcileLedgerDrift requires an existing valid deployment ledger." `
+    $script:DeployExitGuard
+}
+if ($ledgerDriftDetected -and -not $ReconcileLedgerDrift) {
   Stop-Deploy "HEAD does not match deployment ledger currentCommit. No mutation." `
     $script:DeployExitGuard
+}
+if ($ReconcileLedgerDrift -and -not $ledgerDriftDetected) {
+  Stop-Deploy "-ReconcileLedgerDrift requires an actual HEAD/ledger mismatch." `
+    $script:DeployExitGuard
+}
+if ($ReconcileLedgerDrift -and [string]::IsNullOrWhiteSpace($ControllerCommit)) {
+  Stop-Deploy "-ReconcileLedgerDrift requires -ControllerCommit." `
+    $script:DeployExitGuard
+}
+if (-not [string]::IsNullOrWhiteSpace($ControllerCommit)) {
+  if ($ControllerCommit.ToLowerInvariant() -notmatch '^[0-9a-f]{40}$') {
+    Stop-Deploy "-ControllerCommit requires exactly 40 hex characters." `
+      $script:DeployExitGuard
+  }
+  $ControllerCommit = $ControllerCommit.ToLowerInvariant()
 }
 
 $action = "deploy"
@@ -306,7 +357,11 @@ if ($Rollback) {
   }
   $target = $TargetCommit.ToLowerInvariant()
   if ($state) {
-    if ($target -eq $before) { $previous = $state.previousCommit }
+    if ($ReconcileLedgerDrift -and $target -eq $state.currentCommit) {
+      $previous = $state.previousCommit
+    }
+    elseif ($ReconcileLedgerDrift) { $previous = $state.currentCommit }
+    elseif ($target -eq $before) { $previous = $state.previousCommit }
     else { $previous = $before }
   }
 }
@@ -325,11 +380,64 @@ if ($ancestorResult.ExitCode -ne 0) {
   Stop-Deploy "Target is not an ancestor of $originRef. No mutation." `
     $script:DeployExitGuard
 }
+if ($ReconcileLedgerDrift) {
+  if (-not ([string]$state.branchRef).Equals(
+      $branchRef,
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+    Stop-Deploy "Deployment ledger branchRef does not match the requested branch. No mutation." `
+      $script:DeployExitGuard
+  }
+  $observedAncestor = Invoke-GitCapture -GitArgs @(
+    "merge-base", "--is-ancestor", $before, $originRef
+  )
+  if ($observedAncestor.ExitCode -ne 0) {
+    Stop-Deploy "Observed drift HEAD is not an ancestor of $originRef. No mutation." `
+      $script:DeployExitGuard
+  }
+  $ledgerObjectSpec = $state.currentCommit + "^{commit}"
+  $ledgerObject = Invoke-GitCapture -GitArgs @(
+    "rev-parse", "--verify", $ledgerObjectSpec
+  )
+  $ledgerAncestor = Invoke-GitCapture -GitArgs @(
+    "merge-base", "--is-ancestor", $state.currentCommit, $originRef
+  )
+  if ($ledgerObject.ExitCode -ne 0 -or $ledgerObject.Output.Count -ne 1 -or
+      "$($ledgerObject.Output[0])".Trim().ToLowerInvariant() -ne
+        $state.currentCommit -or $ledgerAncestor.ExitCode -ne 0) {
+    Stop-Deploy "Ledger recovery anchor is unavailable or outside origin ancestry. No mutation." `
+      $script:DeployExitGuard
+  }
+}
+if (-not [string]::IsNullOrWhiteSpace($ControllerCommit)) {
+  $controllerObjectSpec = $ControllerCommit + "^{commit}"
+  $controllerObject = Invoke-GitCapture -GitArgs @(
+    "rev-parse", "--verify", $controllerObjectSpec
+  )
+  $controllerAncestor = Invoke-GitCapture -GitArgs @(
+    "merge-base", "--is-ancestor", $ControllerCommit, $originRef
+  )
+  if ($controllerObject.ExitCode -ne 0 -or
+      $controllerObject.Output.Count -ne 1 -or
+      "$($controllerObject.Output[0])".Trim().ToLowerInvariant() -ne
+        $ControllerCommit -or $controllerAncestor.ExitCode -ne 0) {
+    Stop-Deploy "Controller commit is unavailable or outside origin ancestry. No mutation." `
+      $script:DeployExitGuard
+  }
+}
 
 $controllerHead = Invoke-GitCapture -GitArgs @(
   "-C", $controllerRoot, "rev-parse", "HEAD"
 )
-$expectedControllerCommit = if ($Rollback) { $before } else { $target }
+$expectedControllerCommit = if (-not [string]::IsNullOrWhiteSpace(
+    $ControllerCommit
+  )) {
+  $ControllerCommit
+} elseif ($Rollback) {
+  $before
+} else {
+  $target
+}
 if ($controllerHead.ExitCode -ne 0 -or $controllerHead.Output.Count -ne 1 -or
     "$($controllerHead.Output[0])".Trim().ToLowerInvariant() -ne $expectedControllerCommit) {
   Stop-Deploy "Control checkout HEAD must equal the approved controller commit." `
@@ -356,9 +464,14 @@ if ($deployOrigin.ExitCode -ne 0 -or $controllerOrigin.ExitCode -ne 0 -or
     $script:DeployExitGuard
 }
 
+$shouldProcessAction = if ($ReconcileLedgerDrift) {
+  "reconcile observed HEAD drift to ledger anchor and deploy"
+} else {
+  $action
+}
 if (-not $PSCmdlet.ShouldProcess(
     $RepoRoot,
-    ("{0} immutable commit {1}" -f $action, $target)
+    ("{0} immutable commit {1}" -f $shouldProcessAction, $target)
   )) {
   Write-Host "[update] WhatIf/declined: validation passed; no mutation." `
     -ForegroundColor Yellow
@@ -368,101 +481,220 @@ if (-not $PSCmdlet.ShouldProcess(
   exit 0
 }
 
-$pinFailedCode = $script:DeployExitRollbackFailed
-if ((Invoke-GitStream -GitArgs @("checkout", "--detach", $target)) -ne 0 -or
-    (Invoke-GitStream -GitArgs @("reset", "--hard", $target)) -ne 0) {
-  Stop-Deploy "Failed to pin target commit $target." $pinFailedCode
-}
-$afterResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
-$symbolicResult = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
-if ($afterResult.ExitCode -ne 0 -or $afterResult.Output.Count -ne 1 -or
-    "$($afterResult.Output[0])".Trim().ToLowerInvariant() -ne $target -or
-    $symbolicResult.ExitCode -eq 0) {
-  Stop-Deploy "Detached exact-pin postcondition failed." $pinFailedCode
+function Restore-GpuHostTrustedDeploymentState {
+  param([AllowNull()]$TrustedState)
+
+  try {
+    if ($null -eq $TrustedState) {
+      if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+        Remove-Item -LiteralPath $StatePath -Force -ErrorAction Stop
+      }
+      return (-not (Test-Path -LiteralPath $StatePath -PathType Leaf))
+    }
+
+    Write-DeploymentStateAtomic -StatePath $StatePath -State $TrustedState
+    $verified = Read-DeploymentState -StatePath $StatePath
+    if ($null -eq $verified) { return $false }
+    foreach ($field in @(
+        "schemaVersion", "currentCommit", "previousCommit", "timestampUtc",
+        "branchRef", "lastAction", "lastResult", "host"
+      )) {
+      if ([string]$verified.$field -cne [string]$TrustedState.$field) {
+        return $false
+      }
+    }
+    return $true
+  } catch {
+    Write-Host ("[update] trusted ledger restore failed: {0}" -f `
+      $_.Exception.Message) -ForegroundColor Red
+    return $false
+  }
 }
 
-$script:DeploymentLedgerRecord = New-DeploymentStateRecord -CurrentCommit $target `
-  -PreviousCommit $previous -BranchRef $branchRef -Action $action `
-  -Result "source-pinned"
-try {
-  if ($script:TestFaultsEnabled -and
-      $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE -eq "1") {
-    throw "CI fault injection: deployment ledger write failure"
+function Invoke-GpuHostSourceAndLedgerMutation {
+  $pinFailedCode = $script:DeployExitRollbackFailed
+  $pinFailureReason = ""
+  $checkoutExit = Invoke-GitStream -GitArgs @("checkout", "--detach", $target)
+  if ($checkoutExit -ne 0) {
+    $pinFailureReason = "checkout-failed"
+  } else {
+    $resetExit = 0
+    if ($script:TestFaultsEnabled -and
+        $env:PLATFORM_AI_TEST_INJECT_PIN_RESET_FAILURE -eq "1") {
+      $resetExit = 1
+    } else {
+      $resetExit = Invoke-GitStream -GitArgs @("reset", "--hard", $target)
+    }
+    if ($resetExit -ne 0) { $pinFailureReason = "reset-failed" }
   }
-  Write-DeploymentStateAtomic -StatePath $StatePath -State $script:DeploymentLedgerRecord
-} catch {
-  Write-Host "[update] ledger write failed; restoring pre-deploy commit" `
-    -ForegroundColor Red
-  $restoreOk = $false
-  if (-not ($script:TestFaultsEnabled -and
-      $env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE -eq "1")) {
-    $restoreOk = ((Invoke-GitStream -GitArgs @(
-      "checkout", "--detach", $before
-    )) -eq 0)
+
+  if ([string]::IsNullOrWhiteSpace($pinFailureReason)) {
+    $afterResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+    $symbolicResult = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
+    if ($script:TestFaultsEnabled -and
+        $env:PLATFORM_AI_TEST_INJECT_PIN_POSTCONDITION_FAILURE -eq "1") {
+      $pinFailureReason = "postcondition-failed"
+    } elseif ($afterResult.ExitCode -ne 0 -or
+        $afterResult.Output.Count -ne 1 -or
+        "$($afterResult.Output[0])".Trim().ToLowerInvariant() -ne $target -or
+        $symbolicResult.ExitCode -eq 0) {
+      $pinFailureReason = "postcondition-failed"
+    }
   }
-  if ($restoreOk) {
-    $restoreOk = ((Invoke-GitStream -GitArgs @(
-      "reset", "--hard", $before
-    )) -eq 0)
+
+  if (-not [string]::IsNullOrWhiteSpace($pinFailureReason)) {
+    $pinRestoreCommit = $before
+    if ($ReconcileLedgerDrift) {
+      $pinRestoreCommit = $state.currentCommit
+    }
+    $pinRecovery = Invoke-GpuHostTrustedPinFailureRecovery `
+      -RestoreCommit $pinRestoreCommit -TrustedState $state `
+      -RequireAcceptance (-not $NoRestart)
+    if ($pinRecovery.Succeeded) {
+      $proof = "trusted source/ledger restored"
+      if (-not $NoRestart) { $proof += " and runtime reaccepted" }
+      Stop-Deploy ("Target pin failed ({0}); {1}." -f `
+        $pinFailureReason, $proof) $pinFailedCode
+    }
+    $fenced = Stop-GpuHostRuntimeFailClosed
+    $fenceResult = if ($fenced) { "runtime fenced" } else {
+      "runtime fence could not be proven"
+    }
+    Stop-Deploy ("Target pin failed ({0}); trusted recovery failed ({1}); {2}." -f `
+      $pinFailureReason, $pinRecovery.Reason, $fenceResult) $pinFailedCode
   }
-  if ($restoreOk) {
-    $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
-    $restoreSymbolic = Invoke-GitCapture -GitArgs @(
-      "symbolic-ref", "-q", "HEAD"
-    )
-    $restoreOk = ($restoreHead.ExitCode -eq 0 -and
-      $restoreHead.Output.Count -eq 1 -and
-      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -eq $before -and
-      $restoreSymbolic.ExitCode -ne 0)
+
+  $script:DeploymentLedgerRecord = New-DeploymentStateRecord `
+    -CurrentCommit $target -PreviousCommit $previous -BranchRef $branchRef `
+    -Action $action -Result "source-pinned"
+  try {
+    if ($script:TestFaultsEnabled -and
+        $env:PLATFORM_AI_TEST_INJECT_LEDGER_WRITE_FAILURE -eq "1") {
+      throw "CI fault injection: deployment ledger write failure"
+    }
+    Write-DeploymentStateAtomic -StatePath $StatePath `
+      -State $script:DeploymentLedgerRecord
+    if ($script:TestFaultsEnabled -and $ReconcileLedgerDrift -and
+        $env:PLATFORM_AI_TEST_INJECT_LEDGER_POST_WRITE_FAILURE -eq "1") {
+      throw "CI fault injection: post-write deployment ledger failure"
+    }
+  } catch {
+    $ledgerWriteError = $_.Exception.Message
+    $ledgerWriteRestoreCommit = $before
+    if ($ReconcileLedgerDrift) {
+      $ledgerWriteRestoreCommit = $state.currentCommit
+    }
+    Write-Host ("[update] ledger write failed; restoring trusted commit {0}" -f `
+      $ledgerWriteRestoreCommit) -ForegroundColor Red
+    $restoreOk = $false
+    if (-not ($script:TestFaultsEnabled -and
+        $env:PLATFORM_AI_TEST_INJECT_RESTORE_FAILURE -eq "1")) {
+      $restoreOk = ((Invoke-GitStream -GitArgs @(
+        "checkout", "--detach", $ledgerWriteRestoreCommit
+      )) -eq 0)
+    }
+    if ($restoreOk) {
+      $restoreOk = ((Invoke-GitStream -GitArgs @(
+        "reset", "--hard", $ledgerWriteRestoreCommit
+      )) -eq 0)
+    }
+    if ($restoreOk) {
+      $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+      $restoreSymbolic = Invoke-GitCapture -GitArgs @(
+        "symbolic-ref", "-q", "HEAD"
+      )
+      $restoreOk = ($restoreHead.ExitCode -eq 0 -and
+        $restoreHead.Output.Count -eq 1 -and
+        "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -eq
+          $ledgerWriteRestoreCommit -and
+        $restoreSymbolic.ExitCode -ne 0)
+    }
+    if (-not $restoreOk) {
+      $fenced = Stop-GpuHostRuntimeFailClosed
+      $fenceResult = if ($fenced) { "runtime fenced" } else {
+        "runtime fence could not be proven"
+      }
+      Stop-Deploy ("Ledger write and automatic source restoration failed; {0}." -f `
+        $fenceResult) `
+        $script:DeployExitRollbackFailed
+    }
+    if (-not (Restore-GpuHostTrustedDeploymentState -TrustedState $state)) {
+      $fenced = Stop-GpuHostRuntimeFailClosed
+      $fenceResult = if ($fenced) { "runtime fenced" } else {
+        "runtime fence could not be proven"
+      }
+      Stop-Deploy ("Ledger write failed; source restored but trusted ledger could not be restored and verified; {0}." -f `
+        $fenceResult) $script:DeployExitRollbackFailed
+    }
+    if ($ReconcileLedgerDrift) {
+      $restoreProfile = "strict-v1"
+      if ($ledgerWriteRestoreCommit -eq $script:LegacyRollbackCompatCommit) {
+        $restoreProfile = "legacy-512e9cc"
+      }
+      try {
+        $restoreAcceptance = Invoke-GpuHostRevisionAcceptance `
+          -ExpectedCommit $ledgerWriteRestoreCommit `
+          -AcceptanceProfile $restoreProfile
+      } catch {
+        $restoreAcceptance = New-GpuHostAcceptanceResult -Succeeded $false `
+          -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
+      }
+      if (-not $restoreAcceptance.Succeeded) {
+        $stopped = Stop-GpuHostRuntimeFailClosed
+        $stopResult = if ($stopped) { "runtime fenced" } else {
+          "runtime fence could not be proven"
+        }
+        Stop-Deploy ("Ledger write failed; trusted source restored but runtime acceptance failed ({0}); {1}: {2}" -f `
+          $restoreAcceptance.Reason, $stopResult, $ledgerWriteError) `
+          $script:DeployExitRollbackFailed
+      }
+      Stop-Deploy ("Ledger write failed; trusted source restored and runtime reaccepted: {0}" -f `
+        $ledgerWriteError) $script:DeployExitGuard
+    }
+    Stop-Deploy ("Ledger write failed; source restored: {0}" -f `
+      $ledgerWriteError) $script:DeployExitGuard
   }
-  if (-not $restoreOk) {
-    Stop-Deploy "Ledger write and automatic source restoration failed." `
-      $script:DeployExitRollbackFailed
+  Write-Host "[update] $before -> $target (detached immutable pin)" `
+    -ForegroundColor Green
+  if ($ReconcileLedgerDrift) {
+    Write-Host ("[update] ledger drift reconciled; trusted rollback anchor={0}" -f `
+      $previous) -ForegroundColor Green
   }
-  Stop-Deploy ("Ledger write failed; source restored: {0}" -f `
-    $_.Exception.Message) $script:DeployExitGuard
 }
-Write-Host "[update] $before -> $target (detached immutable pin)" `
-  -ForegroundColor Green
 
 function Set-DeploymentLedgerResult {
   param([Parameter(Mandatory = $true)][string]$Result)
 
+  $script:TestResultWriteInvocation += 1
+  $faultPoint = "{0}-pre" -f $script:TestResultWriteInvocation
+  if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_INJECT_RESULT_WRITE_FAILURE -eq $faultPoint) {
+    throw ("CI fault injection: result write failure at {0}" -f $faultPoint)
+  }
   $script:DeploymentLedgerRecord["lastResult"] = $Result
   $script:DeploymentLedgerRecord["timestampUtc"] = [DateTime]::UtcNow.ToString("o")
-  try {
-    Write-DeploymentStateAtomic -StatePath $StatePath `
-      -State $script:DeploymentLedgerRecord
-  } catch {
-    Stop-Deploy ("Pinned source but ledger result update failed: {0}" -f `
-      $_.Exception.Message) $script:DeployExitRollbackFailed
+  Write-DeploymentStateAtomic -StatePath $StatePath `
+    -State $script:DeploymentLedgerRecord
+  $faultPoint = "{0}-post" -f $script:TestResultWriteInvocation
+  if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_INJECT_RESULT_WRITE_FAILURE -eq $faultPoint) {
+    throw ("CI fault injection: result post-write failure at {0}" -f `
+      $faultPoint)
   }
 }
 
 $runtimeContract = Join-Path $controllerRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
 $taskActionContract = Join-Path $controllerRoot "deploy\gpu-host\task-action-contract.ps1"
 $restartAcceptance = Join-Path $controllerRoot "deploy\gpu-host\restart-acceptance.ps1"
-if (-not $NoRestart) {
-  $testAcceptanceInjected = (
-    $script:TestFaultsEnabled -and
-    $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
-      "reject-twice", "reject-then-accept"
-    )
-  )
-  if (-not $testAcceptanceInjected -and (
-      -not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
-      -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
-      -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf))) {
-    Set-DeploymentLedgerResult -Result "restart-failed"
-    Stop-Deploy "Pinned source is missing a GPU-host runtime/action contract." `
-      $script:DeployExitRestartFailed
-  }
-  if (-not $testAcceptanceInjected) {
-    . $runtimeContract
-    . $taskActionContract
-    . $restartAcceptance
-  }
+if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf)) {
+  Stop-Deploy "Controller is missing a GPU-host runtime/action contract. No mutation." `
+    $script:DeployExitGuard
 }
+. $runtimeContract
+. $taskActionContract
+. $restartAcceptance
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
 #    always-present schtasks.exe rather than the *-ScheduledTask cmdlets: the
@@ -496,6 +728,23 @@ function Invoke-SchtasksTask {
   }
 }
 
+function Set-SchtasksTaskEnabled {
+  param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][bool]$Enabled
+  )
+
+  $mode = if ($Enabled) { "/Enable" } else { "/Disable" }
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & schtasks.exe /Change /TN $TaskName $mode 1> $null 2> $null
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
 function Get-SchtasksTaskXml {
   param([Parameter(Mandatory = $true)][string]$TaskName)
 
@@ -507,6 +756,114 @@ function Get-SchtasksTaskXml {
   } finally {
     $ErrorActionPreference = $oldEap
   }
+}
+
+function Get-GpuHostManagedTaskNames {
+  if ($script:TestFaultsEnabled -and
+      -not [string]::IsNullOrWhiteSpace(
+        $env:PLATFORM_AI_TEST_FAIL_CLOSED_TASK_NAMES
+      )) {
+    $names = @(
+      $env:PLATFORM_AI_TEST_FAIL_CLOSED_TASK_NAMES.Split(",") |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    if ($names.Count -ne 2 -or @($names | Where-Object {
+          $_ -notmatch '^platform-ai-ci-[A-Za-z0-9-]+$'
+        }).Count -gt 0) {
+      throw "Invalid CI fail-closed task-name seam."
+    }
+    return $names
+  }
+  return @("platform-ai-live-stt", "platform-ai-meeting-ai")
+}
+
+function Get-GpuHostManagedPorts {
+  if ($script:TestFaultsEnabled -and
+      -not [string]::IsNullOrWhiteSpace(
+        $env:PLATFORM_AI_TEST_FAIL_CLOSED_PORTS
+      )) {
+    $ports = @()
+    foreach ($value in $env:PLATFORM_AI_TEST_FAIL_CLOSED_PORTS.Split(",")) {
+      $parsed = 0
+      if (-not [int]::TryParse($value.Trim(), [ref]$parsed) -or
+          $parsed -lt 49152 -or $parsed -gt 65535) {
+        throw "Invalid CI fail-closed port seam."
+      }
+      $ports += $parsed
+    }
+    if ($ports.Count -ne 2) {
+      throw "Invalid CI fail-closed port seam."
+    }
+    return $ports
+  }
+  return @(8200, 8300)
+}
+
+function Test-SchtasksTaskEnabledState {
+  param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][bool]$ExpectedEnabled
+  )
+
+  try {
+    $query = Get-SchtasksTaskXml -TaskName $TaskName
+    if ($query.ExitCode -ne 0 -or $query.Output.Count -eq 0) {
+      return $false
+    }
+    [xml]$taskXml = $query.Output -join [Environment]::NewLine
+    $enabledNodes = @($taskXml.Task.Settings.ChildNodes | Where-Object {
+      $_.LocalName -eq "Enabled"
+    })
+    $actual = $true
+    if ($enabledNodes.Count -eq 1) {
+      $actual = [Convert]::ToBoolean([string]$enabledNodes[0].InnerText)
+    } elseif ($enabledNodes.Count -gt 1) {
+      return $false
+    }
+    return ($actual -eq $ExpectedEnabled)
+  } catch {
+    return $false
+  }
+}
+
+function Set-GpuHostRuntimeTasksEnabled {
+  param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+  try {
+    $tasks = @(Get-GpuHostManagedTaskNames)
+    $changed = $true
+    foreach ($task in $tasks) {
+      if ((Set-SchtasksTaskEnabled -TaskName $task -Enabled $Enabled) -ne 0) {
+        $changed = $false
+      }
+    }
+    foreach ($task in $tasks) {
+      if (-not (Test-SchtasksTaskEnabledState -TaskName $task `
+          -ExpectedEnabled $Enabled)) {
+        $changed = $false
+      }
+    }
+    return $changed
+  } catch {
+    return $false
+  }
+}
+
+function Test-GpuHostRuntimeTaskFencePresent {
+  try {
+    foreach ($task in @(Get-GpuHostManagedTaskNames)) {
+      $query = Get-SchtasksTaskXml -TaskName $task
+      if ($query.ExitCode -eq 0 -and $query.Output.Count -gt 0 -and
+          -not (Test-SchtasksTaskEnabledState -TaskName $task `
+            -ExpectedEnabled $true)) {
+        return $true
+      }
+    }
+  } catch {
+    return $true
+  }
+  return $false
 }
 
 function Get-TaskRuntimeContract {
@@ -708,12 +1065,17 @@ function Invoke-GpuHostRevisionAcceptance {
   )
 
   if ($script:TestFaultsEnabled -and
+      $env:PLATFORM_AI_TEST_INJECT_ACCEPTANCE_EXCEPTION -eq "1") {
+    throw "CI fault injection: acceptance exception"
+  }
+  if ($script:TestFaultsEnabled -and
       $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -in @(
-        "reject-twice", "reject-then-accept"
+        "accept", "reject-twice", "reject-then-accept"
       )) {
     $script:TestAcceptanceInvocation += 1
-    if ($env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -eq "reject-twice" -or
-        $script:TestAcceptanceInvocation -eq 1) {
+    if ($env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -ne "accept" -and (
+        $env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE -eq "reject-twice" -or
+        $script:TestAcceptanceInvocation -eq 1)) {
       return New-GpuHostAcceptanceResult -Succeeded $false `
         -Reason "injected-acceptance-failure"
     }
@@ -914,6 +1276,102 @@ function Invoke-GpuHostRevisionAcceptance {
   return New-GpuHostAcceptanceResult -Succeeded $true -Reason "accepted"
 }
 
+function Stop-GpuHostRuntimeFailClosed {
+  try {
+    $tasks = @(Get-GpuHostManagedTaskNames)
+    $ports = @(Get-GpuHostManagedPorts)
+    $disabled = Set-GpuHostRuntimeTasksEnabled -Enabled $false
+    foreach ($task in $tasks) {
+      [void](Invoke-SchtasksTask -Action "/End" -TaskName $task)
+    }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($clock.Elapsed.TotalSeconds -lt 30) {
+      $stopped = $disabled
+      foreach ($task in $tasks) {
+        if (-not (Test-SchtasksTaskEnabledState -TaskName $task `
+            -ExpectedEnabled $false)) {
+          $stopped = $false
+        }
+        $snapshot = Get-GpuHostTaskInstanceSnapshot -TaskName $task
+        if (-not $snapshot.Succeeded -or @($snapshot.Instances).Count -gt 0) {
+          $stopped = $false
+        }
+      }
+      foreach ($port in $ports) {
+        $owners = Get-GpuHostListeningPortOwnerSnapshot -Port $port
+        if (-not $owners.Succeeded -or @($owners.Owners).Count -gt 0) {
+          $stopped = $false
+        }
+      }
+      if ($stopped) {
+        Write-Host "[update] runtime tasks disabled and listeners absent" `
+          -ForegroundColor Yellow
+        return $true
+      }
+      Start-Sleep -Milliseconds 500
+    }
+  } catch {
+    Write-Host ("[update] runtime fence exception: {0}" -f `
+      $_.Exception.Message) -ForegroundColor Red
+  }
+  return $false
+}
+
+function Invoke-GpuHostTrustedPinFailureRecovery {
+  param(
+    [Parameter(Mandatory = $true)][string]$RestoreCommit,
+    [AllowNull()]$TrustedState,
+    [Parameter(Mandatory = $true)][bool]$RequireAcceptance
+  )
+
+  $restoreOk = (
+    (Invoke-GitStream -GitArgs @(
+      "checkout", "--detach", $RestoreCommit
+    )) -eq 0 -and
+    (Invoke-GitStream -GitArgs @(
+      "reset", "--hard", $RestoreCommit
+    )) -eq 0
+  )
+  if (-not $restoreOk) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "source-restore-failed"
+  }
+  $restoreHead = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
+  $restoreSymbolic = Invoke-GitCapture -GitArgs @("symbolic-ref", "-q", "HEAD")
+  if ($restoreHead.ExitCode -ne 0 -or $restoreHead.Output.Count -ne 1 -or
+      "$($restoreHead.Output[0])".Trim().ToLowerInvariant() -ne $RestoreCommit -or
+      $restoreSymbolic.ExitCode -eq 0) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "source-restore-postcondition-failed"
+  }
+  if (-not (Restore-GpuHostTrustedDeploymentState -TrustedState $TrustedState)) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "ledger-restore-failed"
+  }
+  if (-not $RequireAcceptance) {
+    return New-GpuHostAcceptanceResult -Succeeded $true `
+      -Reason "trusted-source-ledger-restored"
+  }
+
+  $restoreProfile = "strict-v1"
+  if ($RestoreCommit -eq $script:LegacyRollbackCompatCommit) {
+    $restoreProfile = "legacy-512e9cc"
+  }
+  try {
+    $acceptance = Invoke-GpuHostRevisionAcceptance `
+      -ExpectedCommit $RestoreCommit -AcceptanceProfile $restoreProfile
+  } catch {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
+  }
+  if (-not $acceptance.Succeeded) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason ("runtime-reacceptance-{0}" -f $acceptance.Reason)
+  }
+  return New-GpuHostAcceptanceResult -Succeeded $true `
+    -Reason "trusted-runtime-reaccepted"
+}
+
 function Invoke-GpuHostAutomaticRollback {
   param(
     [Parameter(Mandatory = $true)][string]$RestoreCommit,
@@ -921,7 +1379,14 @@ function Invoke-GpuHostAutomaticRollback {
     [AllowNull()][string]$RestorePreviousCommit
   )
 
-  Set-DeploymentLedgerResult -Result $RejectedResult
+  $resultWriteFailed = $false
+  try {
+    Set-DeploymentLedgerResult -Result $RejectedResult
+  } catch {
+    $resultWriteFailed = $true
+    Write-Host ("[update] rejected-result ledger write failed; continuing trusted rollback: {0}" -f `
+      $_.Exception.Message) -ForegroundColor Red
+  }
   Write-Host "[update] revision rejected; restoring $RestoreCommit" `
     -ForegroundColor Yellow
   $restoreOk = (
@@ -948,34 +1413,88 @@ function Invoke-GpuHostAutomaticRollback {
   if ($RestoreCommit -eq $script:LegacyRollbackCompatCommit) {
     $rollbackProfile = "legacy-512e9cc"
   }
-  $rollbackAcceptance = Invoke-GpuHostRevisionAcceptance `
-    -ExpectedCommit $RestoreCommit -AcceptanceProfile $rollbackProfile
+  try {
+    $rollbackAcceptance = Invoke-GpuHostRevisionAcceptance `
+      -ExpectedCommit $RestoreCommit -AcceptanceProfile $rollbackProfile
+  } catch {
+    $rollbackAcceptance = New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
+  }
   if (-not $rollbackAcceptance.Succeeded) {
-    Set-DeploymentLedgerResult `
-      -Result ("automatic-rollback-failed-{0}" -f $rollbackAcceptance.Reason)
+    try {
+      Set-DeploymentLedgerResult `
+        -Result ("automatic-rollback-failed-{0}" -f $rollbackAcceptance.Reason)
+    } catch {
+      Write-Host ("[update] rollback-failure ledger write failed: {0}" -f `
+        $_.Exception.Message) -ForegroundColor Red
+    }
     return $false
   }
-  Set-DeploymentLedgerResult -Result "automatic-rollback-accepted"
+  try {
+    Set-DeploymentLedgerResult -Result "automatic-rollback-accepted"
+  } catch {
+    Write-Host ("[update] rollback-accepted ledger write failed: {0}" -f `
+      $_.Exception.Message) -ForegroundColor Red
+    return $false
+  }
+  if ($resultWriteFailed) { return $false }
   return $true
 }
 
+if (-not $RecoverFencedRuntime -and
+    (Test-GpuHostRuntimeTaskFencePresent)) {
+  Stop-Deploy "Runtime task fence is present; recovery requires -RecoverFencedRuntime." `
+    $script:DeployExitGuard
+}
+
+Invoke-GpuHostSourceAndLedgerMutation
+
 if ($NoRestart) {
   Write-Host "[update] -NoRestart: skipping task restart." -ForegroundColor Yellow
-  Set-DeploymentLedgerResult -Result "pinned-no-restart"
+  try {
+    Set-DeploymentLedgerResult -Result "pinned-no-restart"
+  } catch {
+    $fenced = Stop-GpuHostRuntimeFailClosed
+    $fenceResult = if ($fenced) { "runtime fenced" } else {
+      "runtime fence could not be proven"
+    }
+    Stop-Deploy ("Pinned source result could not be persisted; {0}: {1}" -f `
+      $fenceResult, $_.Exception.Message) $script:DeployExitRollbackFailed
+  }
 } else {
+  if ($RecoverFencedRuntime -and
+      -not (Set-GpuHostRuntimeTasksEnabled -Enabled $true)) {
+    [void](Stop-GpuHostRuntimeFailClosed)
+    Stop-Deploy "Explicit fenced-runtime recovery could not enable and verify both tasks." `
+      $script:DeployExitRollbackFailed
+  }
   $targetAcceptanceProfile = "strict-v1"
   if ($Rollback -and $target -eq $script:LegacyRollbackCompatCommit) {
     $targetAcceptanceProfile = "legacy-512e9cc"
   }
-  $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target `
-    -AcceptanceProfile $targetAcceptanceProfile
+  try {
+    $acceptance = Invoke-GpuHostRevisionAcceptance -ExpectedCommit $target `
+      -AcceptanceProfile $targetAcceptanceProfile
+  } catch {
+    $acceptance = New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
+  }
   if (-not $acceptance.Succeeded) {
+    $restoreCommit = $before
     $restorePreviousCommit = $null
-    if ($state) { $restorePreviousCommit = $state.previousCommit }
-    if (-not (Invoke-GpuHostAutomaticRollback -RestoreCommit $before `
+    if ($state) {
+      $restorePreviousCommit = $state.previousCommit
+      if ($ReconcileLedgerDrift) { $restoreCommit = $state.currentCommit }
+    }
+    if (-not (Invoke-GpuHostAutomaticRollback -RestoreCommit $restoreCommit `
         -RejectedResult $acceptance.Reason `
         -RestorePreviousCommit $restorePreviousCommit)) {
-      Stop-Deploy "Revision acceptance and automatic rollback acceptance failed." `
+      $fenced = Stop-GpuHostRuntimeFailClosed
+      $fenceResult = if ($fenced) { "runtime fenced" } else {
+        "runtime fence could not be proven"
+      }
+      Stop-Deploy ("Revision acceptance and automatic rollback acceptance failed; {0}." -f `
+        $fenceResult) `
         $script:DeployExitRollbackFailed
     }
     Stop-Deploy "Revision acceptance failed; previous revision was restored and reaccepted." `
@@ -985,7 +1504,16 @@ if ($NoRestart) {
 
 Write-Host "[update] done. Verify: Invoke-RestMethod http://127.0.0.1:8200/health ; :8200/ready ; :8300/health ; ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1 ready" -ForegroundColor Cyan
 if (-not $NoRestart) {
-  Set-DeploymentLedgerResult -Result "tasks-restarted"
+  try {
+    Set-DeploymentLedgerResult -Result "tasks-restarted"
+  } catch {
+    $fenced = Stop-GpuHostRuntimeFailClosed
+    $fenceResult = if ($fenced) { "runtime fenced" } else {
+      "runtime fence could not be proven"
+    }
+    Stop-Deploy ("Accepted runtime result could not be persisted; {0}: {1}" -f `
+      $fenceResult, $_.Exception.Message) $script:DeployExitRollbackFailed
+  }
 }
 if ($script:DeployMutex) {
   if ($script:DeployLockTaken) { $script:DeployMutex.ReleaseMutex() }
