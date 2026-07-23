@@ -37,6 +37,11 @@
 .PARAMETER Rollback
   Roll back only to deployment-state.json previousCommit.
 
+.PARAMETER ReconcileLedgerDrift
+  Recover an out-of-band deploy-clone HEAD drift while deploying an explicit
+  approved TargetCommit. The hardened ledger currentCommit remains the rollback
+  anchor; the observed drift commit is never adopted as trusted state.
+
 .PARAMETER NoRestart
   Pin and ledger the working tree but do not restart scheduled tasks.
 
@@ -58,6 +63,7 @@ param(
   [string]$TargetCommit = "",
   [string]$StatePath = "C:\ProgramData\Acik\platform-ai\deployment-state.json",
   [switch]$Rollback,
+  [switch]$ReconcileLedgerDrift,
   [switch]$NoRestart,
   [switch]$NoConfirm
 )
@@ -280,8 +286,21 @@ try {
   Stop-Deploy ("Deployment ledger rejected: {0}" -f $_.Exception.Message) `
     $script:DeployExitGuard
 }
-if ($state -and $state.currentCommit -ne $before) {
+if ($Rollback -and $ReconcileLedgerDrift) {
+  Stop-Deploy "-Rollback cannot be combined with -ReconcileLedgerDrift." `
+    $script:DeployExitGuard
+}
+$ledgerDriftDetected = ($state -and $state.currentCommit -ne $before)
+if ($ReconcileLedgerDrift -and -not $state) {
+  Stop-Deploy "-ReconcileLedgerDrift requires an existing valid deployment ledger." `
+    $script:DeployExitGuard
+}
+if ($ledgerDriftDetected -and -not $ReconcileLedgerDrift) {
   Stop-Deploy "HEAD does not match deployment ledger currentCommit. No mutation." `
+    $script:DeployExitGuard
+}
+if ($ReconcileLedgerDrift -and -not $ledgerDriftDetected) {
+  Stop-Deploy "-ReconcileLedgerDrift requires an actual HEAD/ledger mismatch." `
     $script:DeployExitGuard
 }
 
@@ -306,7 +325,8 @@ if ($Rollback) {
   }
   $target = $TargetCommit.ToLowerInvariant()
   if ($state) {
-    if ($target -eq $before) { $previous = $state.previousCommit }
+    if ($ReconcileLedgerDrift) { $previous = $state.currentCommit }
+    elseif ($target -eq $before) { $previous = $state.previousCommit }
     else { $previous = $before }
   }
 }
@@ -324,6 +344,28 @@ $ancestorResult = Invoke-GitCapture -GitArgs @(
 if ($ancestorResult.ExitCode -ne 0) {
   Stop-Deploy "Target is not an ancestor of $originRef. No mutation." `
     $script:DeployExitGuard
+}
+if ($ReconcileLedgerDrift) {
+  $observedAncestor = Invoke-GitCapture -GitArgs @(
+    "merge-base", "--is-ancestor", $before, $originRef
+  )
+  if ($observedAncestor.ExitCode -ne 0) {
+    Stop-Deploy "Observed drift HEAD is not an ancestor of $originRef. No mutation." `
+      $script:DeployExitGuard
+  }
+  $ledgerObjectSpec = $state.currentCommit + "^{commit}"
+  $ledgerObject = Invoke-GitCapture -GitArgs @(
+    "rev-parse", "--verify", $ledgerObjectSpec
+  )
+  $ledgerAncestor = Invoke-GitCapture -GitArgs @(
+    "merge-base", "--is-ancestor", $state.currentCommit, $originRef
+  )
+  if ($ledgerObject.ExitCode -ne 0 -or $ledgerObject.Output.Count -ne 1 -or
+      "$($ledgerObject.Output[0])".Trim().ToLowerInvariant() -ne
+        $state.currentCommit -or $ledgerAncestor.ExitCode -ne 0) {
+    Stop-Deploy "Ledger recovery anchor is unavailable or outside origin ancestry. No mutation." `
+      $script:DeployExitGuard
+  }
 }
 
 $controllerHead = Invoke-GitCapture -GitArgs @(
@@ -356,9 +398,14 @@ if ($deployOrigin.ExitCode -ne 0 -or $controllerOrigin.ExitCode -ne 0 -or
     $script:DeployExitGuard
 }
 
+$shouldProcessAction = if ($ReconcileLedgerDrift) {
+  "reconcile observed HEAD drift to ledger anchor and deploy"
+} else {
+  $action
+}
 if (-not $PSCmdlet.ShouldProcess(
     $RepoRoot,
-    ("{0} immutable commit {1}" -f $action, $target)
+    ("{0} immutable commit {1}" -f $shouldProcessAction, $target)
   )) {
   Write-Host "[update] WhatIf/declined: validation passed; no mutation." `
     -ForegroundColor Yellow
@@ -424,6 +471,10 @@ try {
 }
 Write-Host "[update] $before -> $target (detached immutable pin)" `
   -ForegroundColor Green
+if ($ReconcileLedgerDrift) {
+  Write-Host ("[update] ledger drift reconciled; trusted rollback anchor={0}" -f `
+    $previous) -ForegroundColor Green
+}
 
 function Set-DeploymentLedgerResult {
   param([Parameter(Mandatory = $true)][string]$Result)

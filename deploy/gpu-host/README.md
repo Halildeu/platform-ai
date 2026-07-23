@@ -301,6 +301,27 @@ dev clone'a tasinip push + PR ile korunur. Source pin landed fakat task restart
 basarisizsa ledger `restart-failed` yazar ve **exit 3** doner. Rollback mutation
 veya otomatik source restore basarisizligi **exit 4**'tur.
 
+HEAD ile ledger `currentCommit` out-of-band bir islem nedeniyle ayrismissa
+`git checkout/reset` ile guard elle atlanmaz. Ayrı ve exact-target control
+checkout'taki updater, iki commit'in de `origin/main` soyunda oldugunu ve
+ledger ACL/icerigini dogruladiktan sonra trusted rollback anchor olarak yalniz
+ledger `currentCommit`'ini koruyarak hedef commit'e gecebilir:
+
+```powershell
+$DeployRoot = "C:\Users\denetimpc\platform-ai"
+$TargetCommit = "<approved-full-40-hex-commit>"
+.\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
+  -TargetCommit $TargetCommit -ReconcileLedgerDrift -WhatIf
+.\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
+  -TargetCommit $TargetCommit -ReconcileLedgerDrift -NoConfirm
+```
+
+Recovery modu yalniz gercek bir `HEAD != currentCommit` durumunda, mevcut valid
+ledger ve exact target ile calisir. Gozlenen drift commit'ini ledger'a
+benimsemez; `previousCommit` trusted ledger anchor olur. Ikinci komut normal
+restart ve acceptance zincirini de kosar. Canli kanit olmadan yalniz
+`-NoRestart` ile recovery uygulanmaz.
+
 Ledger `C:\ProgramData\Acik\platform-ai\deployment-state.json` altinda schema v1
 olarak tutulur. Dizin ve dosya inheritance kapali, yalniz `SYSTEM` ve
 `BUILTIN\Administrators` FullControl ACL'lidir; same-volume atomic replace ve

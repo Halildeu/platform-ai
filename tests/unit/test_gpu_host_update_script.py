@@ -38,6 +38,18 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("function Invoke-GitStream", script)
         self.assertIn('$unpushedRange = "{0}..HEAD" -f $originRef', script)
         self.assertIn("[string]$TargetCommit", script)
+        self.assertIn("[switch]$ReconcileLedgerDrift", script)
+        self.assertIn(
+            "Observed drift HEAD is not an ancestor of $originRef", script
+        )
+        self.assertIn(
+            "Ledger recovery anchor is unavailable or outside origin ancestry",
+            script,
+        )
+        self.assertIn(
+            "if ($ReconcileLedgerDrift) { $previous = $state.currentCommit }",
+            script,
+        )
         self.assertIn("exactly 40 hex characters", script)
         self.assertIn("separate exact-target control checkout", script)
         self.assertIn("Control checkout HEAD must equal", script)

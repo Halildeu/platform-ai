@@ -242,6 +242,43 @@ Assert-True ($state.currentCommit -eq $commitC) "WhatIf mutated ledger"
 Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitC) `
     "WhatIf mutated HEAD"
 
+# Out-of-band source drift must remain fail-closed unless the operator uses the
+# explicit recovery mode from an exact-target control checkout. Recovery keeps
+# the trusted ledger currentCommit as rollback anchor; it never adopts drift.
+$preRecoveryState = Read-DeploymentState -StatePath $statePath
+Invoke-Git $deploy @("checkout", "--detach", $commitB) | Out-Null
+$blockedDriftDeploy = Invoke-Update @("-TargetCommit", $commitD, "-NoRestart")
+Assert-True ($blockedDriftDeploy.ExitCode -eq 2) `
+    "normal deploy must reject HEAD/ledger drift"
+$reconcileWhatIf = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift", "-NoRestart", "-WhatIf"
+)
+Assert-True ($reconcileWhatIf.ExitCode -eq 0) `
+    "ledger drift recovery WhatIf validation failed"
+Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitB) `
+    "ledger drift recovery WhatIf mutated HEAD"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC) `
+    "ledger drift recovery WhatIf mutated ledger"
+$reconciled = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift", "-NoRestart"
+)
+Assert-True ($reconciled.ExitCode -eq 0) (
+    "ledger drift recovery failed: exit={0}; output={1}" -f `
+    $reconciled.ExitCode, ($reconciled.Output -join " | ")
+)
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitD) `
+    "ledger drift recovery currentCommit mismatch"
+Assert-True ($state.previousCommit -eq $commitC) `
+    "ledger drift recovery adopted drift instead of trusted ledger anchor"
+Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitD) `
+    "ledger drift recovery HEAD mismatch"
+# Restore the pre-recovery fixture directly so the independent rollback tests
+# below retain their original C -> B bounded ledger topology.
+Invoke-Git $deploy @("checkout", "--detach", $commitC) | Out-Null
+Write-DeploymentStateAtomic -StatePath $statePath -State $preRecoveryState
+
 $short = Invoke-Update @("-TargetCommit", $commitD.Substring(0, 12), `
     "-NoRestart")
 Assert-True ($short.ExitCode -eq 2) (
