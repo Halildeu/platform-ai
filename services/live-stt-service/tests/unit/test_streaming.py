@@ -1527,3 +1527,104 @@ def test_stream_router_importable_without_gpu() -> None:
 
     paths = [getattr(r, "path", "") for r in router.routes]
     assert "/ws/stream" in paths
+
+
+# ── #279: a failing draft must not take the connection down ──────────────────
+
+
+def test_draft_timeout_keeps_stream_alive_and_opens_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One slow draft must not end the session; repeated ones must not storm.
+
+    Before the fix the supervised branch re-raised, so a single draft timeout
+    under GPU contention closed the WebSocket — losing audio the final worker
+    could still transcribe. After `DRAFT_FAILURES_BEFORE_CIRCUIT_OPEN`
+    consecutive failures the draft is skipped outright for a cooldown, so the
+    kill/reload cycle cannot be re-entered at the 700ms draft cadence.
+    """
+    settings = Settings(
+        stream_live_worker_backend="inline",
+        stream_final_worker_backend="inline",
+        stream_preload_models=False,
+        live_infer_interval_ms=1,
+        min_infer_sec=0.01,
+        live_window_sec=0.5,
+        silence_rms=0.0001,
+        min_speech_rms=0.0001,
+        stream_debug=True,
+    )
+
+    draft_attempts = 0
+
+    class AlwaysTimingOutLive:
+        hard_timeout = True
+        ready_generation = 1
+
+        def ensure_model(self, **_kwargs: object) -> None:
+            return None
+
+        def transcribe_array(self, *_args: object, **_kwargs: object) -> str:
+            nonlocal draft_attempts
+            draft_attempts += 1
+            raise WorkerTimeoutError("streaming live worker exceeded timeout")
+
+        def transcribe_loaded_array(self, *_args: object, **_kwargs: object) -> str:
+            return self.transcribe_array()
+
+    class HealthyFinal:
+        hard_timeout = False
+        ready_generation = 1
+
+        def ensure_model(self, **_kwargs: object) -> None:
+            return None
+
+        def transcribe_array(self, *_args: object, **_kwargs: object) -> str:
+            return "Geçiş ülkelerinde yaşananlar ise karışık."
+
+        def transcribe_loaded_array(self, *_args: object, **_kwargs: object) -> str:
+            return self.transcribe_array()
+
+    monkeypatch.setattr(stream_api, "get_live_service", lambda _s: AlwaysTimingOutLive())
+    monkeypatch.setattr(stream_api, "get_final_service", lambda _s: HealthyFinal())
+
+    speech = (np.ones(8_000, dtype=np.float32) * 0.05).tobytes()
+    frames = [{"bytes": speech} for _ in range(40)]
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.app = SimpleNamespace(state=SimpleNamespace(streaming_preload=None))
+            self.query_params = {"protocol": stream_api.STREAM_PROTOCOL}
+            self.events: list[dict[str, object]] = []
+            self.close_code: int | None = None
+            self._pending = list(frames)
+
+        async def accept(self) -> None:
+            return None
+
+        async def send_json(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+        async def receive(self) -> dict[str, object]:
+            await asyncio.sleep(0.01)
+            if self._pending:
+                return self._pending.pop(0)
+            return {"type": "websocket.disconnect"}
+
+        async def close(self, *, code: int = 1000) -> None:
+            self.close_code = code
+
+    websocket = FakeWebSocket()
+    asyncio.run(stream_api.stream_endpoint(websocket, settings))  # type: ignore[arg-type]
+
+    kinds = [event.get("type") for event in websocket.events]
+    assert "ready" in kinds, websocket.events[:3]
+    # The connection must never be failed by a draft-only fault.
+    assert "error" not in kinds, [e for e in websocket.events if e.get("type") == "error"]
+
+    debug_events = [e.get("event") for e in websocket.events if e.get("type") == "debug"]
+    assert "draft_circuit_opened" in debug_events, debug_events
+    assert "draft_circuit_open" in debug_events, debug_events
+
+    # The circuit must actually stop the retries, not merely log them.
+    assert draft_attempts == stream_api.DRAFT_FAILURES_BEFORE_CIRCUIT_OPEN, draft_attempts
