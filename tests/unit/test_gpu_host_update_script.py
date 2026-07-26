@@ -286,6 +286,17 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
                 '{"model":"synthetic"}', encoding="utf-8"
             )
             (source / "tokenizer.json").write_text('{"tokens":[]}', encoding="utf-8")
+            # Upper-case entry pins the manifest ordering contract. `sorted()`
+            # over PurePath objects is case-INSENSITIVE on Windows, so this
+            # file used to be emitted after "model.bin" while the manifest
+            # reader enforces plain ASCII ascending order ("R" 0x52 < "m"
+            # 0x6D) and rejected the file this helper had just written:
+            # "model integrity file entry is not canonical". Every real
+            # Hugging Face snapshot ships a README.md, so GPU-host model
+            # staging was blocked outright; a lower-case-only fixture kept it
+            # invisible. The regression only reproduces on a case-insensitive
+            # filesystem — the gpu-host-windows-contract job is what covers it.
+            (source / "README.md").write_text("synthetic model card", encoding="utf-8")
             model_hash = hashlib.sha256(model_bytes).hexdigest()
             common = [
                 "--repository",
@@ -315,7 +326,13 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             )
             self.assertEqual(
                 [entry["path"] for entry in manifest["files"]],
-                ["config.json", "model.bin", "tokenizer.json"],
+                ["README.md", "config.json", "model.bin", "tokenizer.json"],
+            )
+            recorded_paths = [entry["path"] for entry in manifest["files"]]
+            self.assertEqual(
+                recorded_paths,
+                sorted(recorded_paths),
+                "manifest files must be in ASCII ascending order",
             )
             digest_output = root / "tree-digest.txt"
             subprocess.run(

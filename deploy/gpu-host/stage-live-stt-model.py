@@ -56,7 +56,26 @@ def _directory_sha256(root: Path) -> str:
 
 
 def _relative_artifact_files(root: Path) -> Iterable[tuple[str, Path]]:
-    for candidate in sorted(root.rglob("*")):
+    # Order by the POSIX text the manifest contract validates, NOT by Path.
+    #
+    # `sorted(root.rglob("*"))` compares PurePath objects, and on Windows that
+    # comparison is case-insensitive. A snapshot containing `README.md` and
+    # `model.bin` therefore emits them as (model.bin, README.md), while the
+    # reader enforces plain ASCII ascending order ("R" 0x52 < "m" 0x6D) and
+    # rejects the manifest this very function produced:
+    #
+    #   model-integrity-error: model integrity file entry is not canonical
+    #
+    # The bug is invisible on case-sensitive filesystems, so hosted CI never
+    # saw it while it blocked every GPU-host model staging on Windows.
+    for relative_text, candidate in sorted(
+        _walk_artifact_files(root), key=lambda item: item[0]
+    ):
+        yield relative_text, candidate
+
+
+def _walk_artifact_files(root: Path) -> Iterable[tuple[str, Path]]:
+    for candidate in root.rglob("*"):
         relative = candidate.relative_to(root)
         if relative.parts and relative.parts[0] == ".cache":
             continue
