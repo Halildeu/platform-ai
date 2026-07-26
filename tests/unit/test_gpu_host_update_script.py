@@ -751,6 +751,51 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertNotIn("Unregister-ScheduledTask", script)
         self.assertNotIn("Stop-Process", script)
 
+    def test_get_command_executable_resolutions_are_singular(self) -> None:
+        """Every resolved executable path must come from exactly one match.
+
+        `Get-Command git.exe` returns TWO Application entries on any Git for
+        Windows host, because the installer ships git.exe in both cmd\\ and
+        bin\\ and puts both on PATH. PowerShell member enumeration then makes
+        `.Source` an array, and `& $array` joins it with spaces into one
+        unusable command name. The same trap exists for `python` (real install
+        plus the WindowsApps execution alias).
+
+        Neither failure is visible on the Linux test host, so this contract is
+        enforced textually over the whole deploy directory rather than by
+        executing the scripts.
+        """
+        offenders: list[str] = []
+        for path in sorted((ROOT / "deploy/gpu-host").glob("*.ps1")):
+            script = path.read_text(encoding="utf-8")
+            # Collapse PowerShell backtick line continuations so a statement is
+            # one line regardless of how it is wrapped for readability.
+            joined = re.sub(r"`\r?\n\s*", " ", script)
+            for line in joined.splitlines():
+                statement = line.strip()
+                if statement.startswith("#") or "Get-Command" not in statement:
+                    continue
+                assigned = re.match(r"\$(\w+)\s*=", statement)
+                name = assigned.group(1) if assigned else None
+                dereferenced = ".Source" in statement or (
+                    name is not None
+                    and re.search(rf"\${name}\.Source\b", joined) is not None
+                )
+                if not dereferenced:
+                    # Existence probes may stay plural: they are only tested
+                    # for truthiness, never turned into an executable path.
+                    continue
+                if re.search(r"Select(-Object)?\s+-First\s+1", statement):
+                    continue
+                offenders.append("{0}: {1}".format(path.name, statement))
+        self.assertEqual(
+            offenders,
+            [],
+            "Get-Command results feeding .Source must be reduced to a single "
+            "match with `Select-Object -First 1`; otherwise a duplicate on "
+            "PATH yields a space-joined, unusable path.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
