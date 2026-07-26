@@ -894,7 +894,21 @@ function Invoke-LiveSttFixtureAcceptance {
       "sample-tr-cv17-002"
     )][string]$FixtureBaseName,
     [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
-    [int]$ConnectTimeoutCapSec = 30
+    [int]$ConnectTimeoutCapSec = 30,
+    # Content and draft-path are proven by separate runs because no single
+    # stream can judge both fairly on this fixture set:
+    #
+    #   * One 5.5s clip gives the draft pass about two chances and both are
+    #     legitimately filtered as low-confidence, so requiring >=1 partial from
+    #     it is a coin flip - measured 1/4 passes on the GPU host.
+    #   * Repeating the clip fixes that (4/4 partials) but the tiled seams push
+    #     word error rate to 0.20-0.29 against the tiled reference, so content
+    #     cannot be judged on the repeated stream.
+    #
+    # Single pass therefore judges content (measured 4/4 at WER 0.0) and the
+    # repeated pass judges only that the draft path emits.
+    [int]$RepeatAudio = 1,
+    [switch]$DraftPathOnly
   )
 
   $oldEap = $ErrorActionPreference
@@ -923,19 +937,33 @@ function Invoke-LiveSttFixtureAcceptance {
       120,
       [Math]::Floor($remainingSec - $connectTimeoutSec - 2)
     ))
+    if ($DraftPathOnly) {
+      $gateMinPartialEvents = 1
+      $gateMinFinalWordCoverage = 0.0
+      $gateMinReferenceTokenCoverage = 0.0
+      $gateMaxWordErrorRate = 1.0
+      $gateMaxTranscriptGapMs = 0
+    } else {
+      $gateMinPartialEvents = 0
+      $gateMinFinalWordCoverage = 0.8
+      $gateMinReferenceTokenCoverage = 0.8
+      $gateMaxWordErrorRate = 0.25
+      $gateMaxTranscriptGapMs = 6000
+    }
     $arguments = @(
       $smoke,
       "--url", $Url,
       "--wav", $wav,
       "--reference-text", $referenceText,
+      "--repeat-audio", "$RepeatAudio",
       "--timeout-sec", "$connectTimeoutSec",
       "--final-wait-sec", "$finalWaitSec",
-      "--min-final-word-coverage", "0.8",
-      "--min-partial-events", "1",
+      "--min-final-word-coverage", "$gateMinFinalWordCoverage",
+      "--min-partial-events", "$gateMinPartialEvents",
       "--min-final-events", "1",
-      "--min-reference-token-coverage", "0.8",
-      "--max-word-error-rate", "0.25",
-      "--max-transcript-gap-ms", "6000"
+      "--min-reference-token-coverage", "$gateMinReferenceTokenCoverage",
+      "--max-word-error-rate", "$gateMaxWordErrorRate",
+      "--max-transcript-gap-ms", "$gateMaxTranscriptGapMs"
     )
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $PythonExe
@@ -986,26 +1014,32 @@ function Invoke-LiveSttFixtureAcceptance {
         $summary.reference.artifact_id_sha256_12 -eq $referenceNameHash -and
         $summary.reference.text_sha256_12 -eq $referenceTextHash -and
         [int]$summary.reference.words -ge 1 -and
-        [int]$summary.events.partial_count -ge 1 -and
+        (-not $DraftPathOnly -or [int]$summary.events.partial_count -ge 1) -and
         [int]$summary.events.final_count -ge 1 -and
         [int]$summary.events.final_hallucination_count -eq 0 -and
         [int]$summary.events.error_count -eq 0 -and
         $null -ne $summary.events.max_transcript_gap_ms -and
         [int]$summary.events.max_transcript_gap_ms -ge 0 -and
-        [int]$summary.events.max_transcript_gap_ms -le 6000 -and
+        ($DraftPathOnly -or [int]$summary.events.max_transcript_gap_ms -le 6000) -and
         [int]$summary.coverage.reference_words -eq `
           [int]$summary.reference.words -and
         [int]$summary.coverage.final_words -ge 1 -and
-        [double]$summary.coverage.final_word_coverage -ge 0.8 -and
-        [double]$summary.coverage.reference_token_coverage -ge 0.8 -and
-        [double]$summary.coverage.word_error_rate -ge 0.0 -and
-        [double]$summary.coverage.word_error_rate -le 0.25 -and
-        [int]$summary.quality_gate.min_partial_events -eq 1 -and
+        [int]$summary.fixture.repeat_audio -eq $RepeatAudio -and
+        (
+          $DraftPathOnly -or (
+            [double]$summary.coverage.final_word_coverage -ge 0.8 -and
+            [double]$summary.coverage.reference_token_coverage -ge 0.8 -and
+            [double]$summary.coverage.word_error_rate -ge 0.0 -and
+            [double]$summary.coverage.word_error_rate -le 0.25
+          )
+        ) -and
+        [int]$summary.quality_gate.min_partial_events -eq $gateMinPartialEvents -and
         [int]$summary.quality_gate.min_final_events -eq 1 -and
-        [double]$summary.quality_gate.min_final_word_coverage -eq 0.8 -and
-        [double]$summary.quality_gate.min_reference_token_coverage -eq 0.8 -and
-        [double]$summary.quality_gate.max_word_error_rate -eq 0.25 -and
-        [int]$summary.quality_gate.max_transcript_gap_ms -eq 6000 -and
+        [double]$summary.quality_gate.min_final_word_coverage -eq $gateMinFinalWordCoverage -and
+        [double]$summary.quality_gate.min_reference_token_coverage -eq `
+          $gateMinReferenceTokenCoverage -and
+        [double]$summary.quality_gate.max_word_error_rate -eq $gateMaxWordErrorRate -and
+        [int]$summary.quality_gate.max_transcript_gap_ms -eq $gateMaxTranscriptGapMs -and
         @($summary.quality_gate.failures).Count -eq 0 -and
         (@($summary.events.terminal_sequence) -join ",") -eq "eof_ack,drained"
       )
@@ -1030,9 +1064,16 @@ function Invoke-LiveSttStreamAcceptance {
     [int]$ConnectTimeoutCapSec = 30
   )
 
-  $fixtures = @("sample-tr-cv17-001", "sample-tr-cv17-002")
-  for ($index = 0; $index -lt $fixtures.Count; $index++) {
-    $fixturesRemaining = $fixtures.Count - $index
+  # Two content runs (single pass, full content gates) plus one draft-path run
+  # (repeated pass, partial gate only). See Invoke-LiveSttFixtureAcceptance for
+  # why neither property can be judged fairly on the other's stream.
+  $runs = @(
+    @{ Fixture = "sample-tr-cv17-001"; Repeat = 1; DraftPathOnly = $false },
+    @{ Fixture = "sample-tr-cv17-002"; Repeat = 1; DraftPathOnly = $false },
+    @{ Fixture = "sample-tr-cv17-001"; Repeat = 5; DraftPathOnly = $true }
+  )
+  for ($index = 0; $index -lt $runs.Count; $index++) {
+    $fixturesRemaining = $runs.Count - $index
     $remainingSec = $DeadlineSec - $Clock.Elapsed.TotalSeconds
     if ($remainingSec -le (5 * $fixturesRemaining)) { return $false }
     $fixtureBudgetSec = [Math]::Floor($remainingSec / $fixturesRemaining)
@@ -1040,12 +1081,14 @@ function Invoke-LiveSttStreamAcceptance {
       $DeadlineSec,
       $Clock.Elapsed.TotalSeconds + $fixtureBudgetSec
     )
+    $run = $runs[$index]
     if (-not (Invoke-LiveSttFixtureAcceptance -PythonExe $PythonExe `
         -Clock $Clock -DeadlineSec $fixtureDeadlineSec `
-        -FixtureBaseName $fixtures[$index] -Url $Url `
-        -ConnectTimeoutCapSec $ConnectTimeoutCapSec)) {
-      Write-Host ("[update] fixture acceptance failed: {0}" -f $fixtures[$index]) `
-        -ForegroundColor Yellow
+        -FixtureBaseName ([string]$run.Fixture) -Url $Url `
+        -ConnectTimeoutCapSec $ConnectTimeoutCapSec `
+        -RepeatAudio ([int]$run.Repeat) -DraftPathOnly:([bool]$run.DraftPathOnly))) {
+      Write-Host ("[update] fixture acceptance failed: {0} (repeat={1} draftPathOnly={2})" `
+        -f $run.Fixture, $run.Repeat, $run.DraftPathOnly) -ForegroundColor Yellow
       return $false
     }
   }
