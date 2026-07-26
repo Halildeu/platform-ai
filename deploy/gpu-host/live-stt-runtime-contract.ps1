@@ -1,14 +1,33 @@
 # Source-controlled production contract shared by the live-STT launcher and deploy acceptance.
 # Values are public runtime policy, never credentials.
 
-$script:LiveSttModelLoadTimeoutSec = 180
+# Measured on the GPU host (RTX 4070 Laptop, 8 GiB) loading the pinned
+# large-v3-turbo final model (1.54 GiB model.bin) into a spawned worker:
+#
+#   2026-07-26 19:38:14  role=final preloaded  elapsed_sec=160.6
+#   2026-07-26 21:03:52  role=final preloaded  elapsed_sec=167.9
+#   2026-07-26 21:30:47  role=final FAILED     elapsed_sec=180.1  WorkerTimeoutError
+#
+# The previous 180s budget sat ~7% above the observed load time, so ordinary
+# variance (VRAM contention from the already-resident live model, CUDA context
+# init, cold page cache) crossed it. A preload timeout is not a soft failure
+# here: fail-closed readiness means the deploy is rejected, and a rejected
+# deploy whose rollback also fails leaves the runtime fenced with both tasks
+# disabled. The budget is therefore set to ~2x the observed maximum: a too-large
+# ceiling only delays detecting a genuinely stuck load, while a too-small one
+# takes the service down.
+$script:LiveSttModelLoadTimeoutSec = 360
 $script:LiveSttWorkerKillGraceSec = 2
 $script:LiveSttPreloadMaxAttempts = 2
 $script:LiveSttPreloadRetryBaseSec = 1
 $script:LiveSttPreloadRoleCount = 2
 $script:LiveSttSmokeWorstCaseSec = 150
 $script:LiveSttTaskTransitionReserveSec = 60
-$script:LiveSttReadinessDeadlineSec = 960
+# Derived ceiling, not a free parameter: it must stay above
+# LiveSttAcceptanceWorstCaseSec, which the guard at the bottom of this file
+# enforces. With a 360s model-load budget the worst case is
+#   2 roles * ((2 attempts * (360 + 2*2)) + 1 retry backoff) + 150 + 60 = 1668.
+$script:LiveSttReadinessDeadlineSec = 1800
 
 # Production speech-gate profile. RMS stays deliberately low so quiet speech
 # reaches the decoder; pinned Silero VAD parameters reject pause/noise without

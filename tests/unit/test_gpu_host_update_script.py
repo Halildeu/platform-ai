@@ -535,11 +535,80 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         contract.encode("ascii")
         self.assertIn("LiveSttPreloadWorstCaseSec", contract)
         self.assertIn("[Math]::Pow(2", contract)
-        self.assertIn("LiveSttReadinessDeadlineSec = 960", contract)
         self.assertIn("LiveSttAcceptanceWorstCaseSec", contract)
         self.assertIn("exceeds its readiness deadline", contract)
         self.assertIn("live-stt-runtime-contract.ps1", launcher)
         self.assertIn("live-stt-runtime-contract.ps1", update)
+
+    # Slowest successful final-model preload measured on the GPU host, in
+    # seconds. The 180s budget that preceded this guard sat ~7% above it and a
+    # single slow load fenced the runtime (both tasks disabled, ports silent).
+    OBSERVED_FINAL_PRELOAD_SEC = 167.9
+
+    def test_live_stt_preload_budget_keeps_headroom_over_measured_load(
+        self,
+    ) -> None:
+        """Recompute the contract arithmetic instead of pinning literals.
+
+        The readiness deadline is a derived ceiling. Asserting it as a magic
+        number lets someone lower the model-load budget back toward the
+        measured load time without any test noticing.
+        """
+        contract = self._read_script("live-stt-runtime-contract.ps1")
+
+        def value(name: str) -> int:
+            match = re.search(
+                r"^\$script:{0} = (\d+)$".format(name), contract, re.MULTILINE
+            )
+            self.assertIsNotNone(match, "{0} is not a plain integer".format(name))
+            return int(match.group(1))  # type: ignore[union-attr]
+
+        load_timeout = value("LiveSttModelLoadTimeoutSec")
+        kill_grace = value("LiveSttWorkerKillGraceSec")
+        attempts = value("LiveSttPreloadMaxAttempts")
+        retry_base = value("LiveSttPreloadRetryBaseSec")
+        roles = value("LiveSttPreloadRoleCount")
+        smoke = value("LiveSttSmokeWorstCaseSec")
+        reserve = value("LiveSttTaskTransitionReserveSec")
+        deadline = value("LiveSttReadinessDeadlineSec")
+
+        self.assertGreaterEqual(
+            load_timeout,
+            2 * self.OBSERVED_FINAL_PRELOAD_SEC,
+            "The model-load budget must keep at least 2x headroom over the "
+            "slowest preload measured on the GPU host; a preload timeout "
+            "rejects the deploy and can fence the runtime.",
+        )
+
+        retry_worst_case = retry_base * (2 ** (attempts - 1) - 1)
+        preload_worst_case = roles * (
+            attempts * (load_timeout + 2 * kill_grace) + retry_worst_case
+        )
+        acceptance_worst_case = preload_worst_case + smoke + reserve
+        self.assertLessEqual(
+            acceptance_worst_case,
+            deadline,
+            "Acceptance worst case exceeds the readiness deadline; the "
+            "contract would throw at launcher startup.",
+        )
+
+        # update.ps1 requires the runtime to report exactly this budget, and the
+        # service parses it through a bounded pydantic field. A deadline above
+        # that bound would be rejected at startup rather than at review time.
+        config = (
+            ROOT / "services/live-stt-service/app/core/config.py"
+        ).read_text(encoding="utf-8")
+        bound = re.search(
+            r"stream_preload_readiness_budget_sec:.*?le=(\d+(?:\.\d+)?)",
+            config,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(bound, "readiness budget bound not found")
+        self.assertLessEqual(
+            float(deadline),
+            float(bound.group(1)),  # type: ignore[union-attr]
+            "The readiness deadline exceeds the service-side field bound.",
+        )
 
     def test_gpu_host_restart_requires_new_port_owner_and_exact_task_interpreter(
         self,
