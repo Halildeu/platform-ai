@@ -94,7 +94,32 @@ def _regular_model_files(root: Path) -> list[tuple[str, Path, os.stat_result]]:
             if stat.S_ISDIR(entry_stat.st_mode):
                 visit(entry_path, relative_path)
             elif stat.S_ISREG(entry_stat.st_mode):
-                files.append((relative_path.as_posix(), entry_path, entry_stat))
+                # Record a PATH-derived stat, never the scandir entry's.
+                #
+                # The recorded stat is later compared against os.fstat() of the
+                # opened descriptor to prove the file was not swapped between
+                # listing and reading. On Windows the directory-enumeration API
+                # behind os.scandir() does not carry the volume serial or file
+                # index, so entry.stat() reports st_dev=0 and st_ino=0 while
+                # fstat() reports the real values — measured on the GPU host:
+                #
+                #   field      scandir  fstat
+                #   st_dev     0        2659991151
+                #   st_ino     0        2251799815012715
+                #
+                # That made the identity comparison unequal for every file, so
+                # verification failed on Windows always and the hardened model
+                # runtime could never load. os.lstat() on the same path does
+                # populate both fields (measured equal to fstat), so re-statting
+                # keeps the anti-swap guard exact instead of weakening it.
+                #
+                # Invisible on Linux, where scandir carries d_ino.
+                listed_stat = entry_path.lstat()
+                if _is_link_or_reparse(listed_stat) or not stat.S_ISREG(listed_stat.st_mode):
+                    raise ValueError(
+                        "pinned streaming model directory contains a link or reparse point"
+                    )
+                files.append((relative_path.as_posix(), entry_path, listed_stat))
             else:
                 raise ValueError("pinned streaming model directory contains a non-regular file")
         after = directory.lstat()
@@ -391,8 +416,21 @@ def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_q
                 audio = np.frombuffer(raw, dtype="<f4").copy()
                 text = service.transcribe_array(audio, bool(task.get("vad", False)))
             result_queue.put({"job_id": job_id, "ok": True, "text": text})
-        except BaseException as exc:  # noqa: BLE001 - child reports class only
-            result_queue.put({"job_id": job_id, "ok": False, "error_class": type(exc).__name__})
+        except BaseException as exc:  # noqa: BLE001 - inference reports class only
+            response: dict[str, object] = {
+                "job_id": job_id,
+                "ok": False,
+                "error_class": type(exc).__name__,
+            }
+            if task.get("type") == "load":
+                # A load failure happens before any audio has reached this
+                # process, so its message cannot carry transcript content and
+                # the KVKK boundary that keeps inference errors class-only does
+                # not apply. Reporting only the class made a model-verification
+                # failure surface as an opaque "RuntimeError: ValueError" with
+                # no way to tell a bad path from a digest mismatch.
+                response["error_detail"] = str(exc)[:200]
+            result_queue.put(response)
 
 
 class _SupervisedWhisperService:
@@ -613,7 +651,11 @@ class _SupervisedWhisperService:
             if response.get("job_id") != job_id:
                 continue
             if not response.get("ok"):
-                error = RuntimeError(str(response.get("error_class", "RuntimeError")))
+                error_class = str(response.get("error_class", "RuntimeError"))
+                error_detail = str(response.get("error_detail", ""))
+                error = RuntimeError(
+                    f"{error_class}: {error_detail}" if error_detail else error_class
+                )
                 # Any native/CUDA failure can poison allocator or model state.
                 # Invalidate this generation before surfacing the error. An
                 # accepted stream passes restart_on_failure=False, so it never
