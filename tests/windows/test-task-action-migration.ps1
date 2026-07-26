@@ -474,6 +474,50 @@ $child.WaitForExit()
     Assert-ContractInvalid -TaskName "platform-ai-live-stt" -Execute "powershell.exe" `
         -Arguments $liveLegacy -WorkingDirectory $legacyRoot
 
+    # start-meeting-ai.ps1 treats the task action as the authoritative deployed
+    # environment and throws when an approved runtime config declares another
+    # one. A contract that cannot carry -AppEnv therefore cannot describe a host
+    # deployed as "test": canonicalisation would drop the token and silently
+    # fall back to the "stage" parameter default.
+    $meetingTestEnv = New-GpuHostTaskActionArguments `
+        -TaskName "platform-ai-meeting-ai" -RepoRoot $canonicalRoot `
+        -PythonExe $pythonExe -AppEnv "test"
+    Assert-True ($meetingTestEnv -match "-AppEnv test") `
+        "Meeting AI canonical arguments dropped the application environment."
+    $meetingEnvContract = Get-GpuHostTaskActionContract `
+        -TaskName "platform-ai-meeting-ai" `
+        -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -Arguments $meetingTestEnv
+    Assert-True $meetingEnvContract.Valid `
+        "A meeting AI action carrying -AppEnv was rejected."
+    Assert-True ($meetingEnvContract.AppEnv -eq "test") `
+        "The parsed application environment did not survive the contract."
+    Assert-True ($meetingEnvContract.CanonicalArguments -eq $meetingTestEnv) `
+        "Canonicalisation rewrote the deployed application environment."
+
+    # Omitting it stays valid: the launcher default then applies, unchanged.
+    $meetingNoEnv = New-GpuHostTaskActionArguments `
+        -TaskName "platform-ai-meeting-ai" -RepoRoot $canonicalRoot `
+        -PythonExe $pythonExe
+    Assert-True ($meetingNoEnv -notmatch "-AppEnv") `
+        "An unset application environment must not be materialised."
+
+    Assert-ContractInvalid -TaskName "platform-ai-meeting-ai" `
+        -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -Arguments ($meetingNoEnv + " -AppEnv production")
+    Assert-ContractInvalid -TaskName "platform-ai-meeting-ai" `
+        -Execute "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -Arguments ($meetingNoEnv + " -AppEnv")
+
+    $liveEnvRejected = $false
+    try {
+        New-GpuHostTaskActionArguments -TaskName "platform-ai-live-stt" `
+            -RepoRoot $canonicalRoot -PythonExe $pythonExe -HfHome $hfHome `
+            -AppEnv "test" | Out-Null
+    } catch { $liveEnvRejected = $true }
+    Assert-True $liveEnvRejected `
+        "Live STT must not accept an application environment."
+
     $service = New-Object -ComObject "Schedule.Service"
     $service.Connect()
     $folder = $service.GetFolder("\")

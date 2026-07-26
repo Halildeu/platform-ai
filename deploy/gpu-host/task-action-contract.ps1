@@ -3,6 +3,9 @@
 
 Set-StrictMode -Version 2.0
 
+# Must stay identical to the ValidateSet on start-meeting-ai.ps1 -AppEnv.
+$script:GpuHostAppEnvValues = @('test', 'stage', 'prod')
+
 if (-not ("PlatformAi.NativeCommandLine" -as [type])) {
     Add-Type -TypeDefinition @"
 using System;
@@ -127,6 +130,7 @@ function Get-GpuHostTaskSpec {
             return [ordered]@{
                 Script = 'start-live-stt.ps1'
                 LiveStt = $true
+                AppEnv = $false
                 Port = 8200
             }
         }
@@ -134,6 +138,7 @@ function Get-GpuHostTaskSpec {
             return [ordered]@{
                 Script = 'start-meeting-ai.ps1'
                 LiveStt = $false
+                AppEnv = $true
                 Port = 8300
             }
         }
@@ -147,7 +152,15 @@ function New-GpuHostTaskActionArguments {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$PythonExe,
         [string]$HfHome = '',
-        [string]$CudaBin = ''
+        [string]$CudaBin = '',
+        # start-meeting-ai.ps1 treats the Scheduled Task action as the
+        # authoritative deployed environment ("Runtime config may confirm it,
+        # but must never downgrade it") and throws when an approved runtime
+        # config declares a different one. The action must therefore be able to
+        # express it; otherwise canonicalisation silently rewrites a host
+        # deployed as "test" to the "stage" parameter default and the launcher
+        # refuses to start.
+        [string]$AppEnv = ''
     )
 
     $spec = Get-GpuHostTaskSpec -TaskName $TaskName
@@ -168,6 +181,13 @@ function New-GpuHostTaskActionArguments {
         -not (Test-GpuHostValueSafe -Value $CudaBin -AllowSemicolonList)) {
         throw 'CudaBin is not a safe absolute local path list.'
     }
+    if (-not $spec.AppEnv -and -not [string]::IsNullOrWhiteSpace($AppEnv)) {
+        throw 'This task does not accept an application environment.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AppEnv) -and
+        $script:GpuHostAppEnvValues -notcontains $AppEnv) {
+        throw 'AppEnv must match the launcher ValidateSet exactly.'
+    }
 
     $scriptPath = Join-Path (Join-Path $RepoRoot 'deploy\gpu-host') $spec.Script
     $tokens = @(
@@ -182,6 +202,9 @@ function New-GpuHostTaskActionArguments {
         if (-not [string]::IsNullOrWhiteSpace($CudaBin)) {
             $tokens += @('-CudaBin', $CudaBin)
         }
+    }
+    if ($spec.AppEnv -and -not [string]::IsNullOrWhiteSpace($AppEnv)) {
+        $tokens += @('-AppEnv', $AppEnv)
     }
     return (($tokens | ForEach-Object {
         ConvertTo-GpuHostWindowsArgument -Value $_
@@ -205,6 +228,7 @@ function Get-GpuHostTaskActionContract {
         PythonExe = ''
         HfHome = ''
         CudaBin = ''
+        AppEnv = ''
     }
     try {
         $spec = Get-GpuHostTaskSpec -TaskName $TaskName
@@ -253,6 +277,7 @@ function Get-GpuHostTaskActionContract {
         if (-not (Test-GpuHostValueSafe -Value $pythonExe)) { return $result }
         $hfHome = ''
         $cudaBin = ''
+        $appEnv = ''
         $index = 10
         if ($spec.LiveStt) {
             if ($tokens[$index] -ine '-HfHome') { return $result }
@@ -270,6 +295,14 @@ function Get-GpuHostTaskActionContract {
                 $index += 2
             }
         }
+        if ($spec.AppEnv -and $index -lt $tokens.Count) {
+            if ($tokens[$index] -ine '-AppEnv' -or $index + 1 -ge $tokens.Count) {
+                return $result
+            }
+            $appEnv = $tokens[$index + 1]
+            if ($script:GpuHostAppEnvValues -notcontains $appEnv) { return $result }
+            $index += 2
+        }
         if ($index -ne $tokens.Count) { return $result }
 
         $canonicalActionRoot = $parsedRoot
@@ -278,11 +311,12 @@ function Get-GpuHostTaskActionContract {
         }
         $result.CanonicalArguments = New-GpuHostTaskActionArguments `
             -TaskName $TaskName -RepoRoot $canonicalActionRoot -PythonExe $pythonExe `
-            -HfHome $hfHome -CudaBin $cudaBin
+            -HfHome $hfHome -CudaBin $cudaBin -AppEnv $appEnv
         $result.PythonExe = $pythonExe
         $result.RepoRoot = $parsedRoot
         $result.HfHome = $hfHome
         $result.CudaBin = $cudaBin
+        $result.AppEnv = $appEnv
         $result.Valid = $true
         return $result
     } catch {
