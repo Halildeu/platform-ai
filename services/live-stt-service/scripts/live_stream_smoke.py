@@ -226,11 +226,18 @@ def _lcs_length(reference: list[str], candidate: list[str]) -> int:
 def reference_transcript_quality(
     reference_path: Path | None,
     transcript: str | None,
+    *,
+    repeat: int = 1,
 ) -> dict[str, Any]:
-    """Return content-based scores without retaining transcript or reference text."""
+    """Return content-based scores without retaining transcript or reference text.
+
+    `repeat` mirrors --repeat-audio: when the fixture audio is tiled, the
+    expected transcript is the same sentence that many times, so the reference
+    token sequence is tiled with it and coverage/WER keep their meaning.
+    """
     if reference_path is None or transcript is None:
         return {"reference_token_coverage": None, "word_error_rate": None}
-    reference_words = _normalized_words(reference_path.read_text(encoding="utf-8"))
+    reference_words = _normalized_words(reference_path.read_text(encoding="utf-8")) * repeat
     candidate_words = _normalized_words(transcript)
     if not reference_words:
         return {"reference_token_coverage": None, "word_error_rate": None}
@@ -313,7 +320,7 @@ def resolve_reference_text(wav_path: Path, value: str | None) -> Path | None:
     return candidate if candidate.exists() else None
 
 
-def reference_metadata(path: Path | None) -> dict[str, Any]:
+def reference_metadata(path: Path | None, *, repeat: int = 1) -> dict[str, Any]:
     if path is None:
         return {"artifact_id_sha256_12": None, "text_sha256_12": None, "words": None}
 
@@ -321,7 +328,9 @@ def reference_metadata(path: Path | None) -> dict[str, Any]:
     return {
         "artifact_id_sha256_12": text_digest(path.name),
         "text_sha256_12": text_digest(text),
-        "words": _word_count(text),
+        # Digests stay those of the single source sentence; only the expected
+        # word count scales with --repeat-audio.
+        "words": _word_count(text) * repeat,
     }
 
 
@@ -379,15 +388,18 @@ def build_summary(
     final_transcript_text: str | None = None,
     min_reference_token_coverage: float = DEFAULT_MIN_REFERENCE_TOKEN_COVERAGE,
     max_word_error_rate: float = DEFAULT_MAX_WORD_ERROR_RATE,
+    repeat_audio: int = 1,
 ) -> dict[str, Any]:
     final_events = [event for event in transcript_events if event["type"] == "final"]
     partial_events = [event for event in transcript_events if event["type"] == "partial"]
     final_hallucination_count = sum(1 for event in final_events if event.get("hallucination_flag"))
     final_word_count = sum(int(event.get("text_words", 0)) for event in final_events)
-    reference = reference_metadata(reference_text_path)
+    reference = reference_metadata(reference_text_path, repeat=repeat_audio)
     reference_words = reference["words"] if isinstance(reference["words"], int) else None
     final_word_coverage = _safe_ratio(final_word_count, reference_words)
-    content_quality = reference_transcript_quality(reference_text_path, final_transcript_text)
+    content_quality = reference_transcript_quality(
+        reference_text_path, final_transcript_text, repeat=repeat_audio
+    )
     reference_token_coverage = content_quality["reference_token_coverage"]
     word_error_rate = content_quality["word_error_rate"]
     max_gap_ms = _max_event_gap_ms(transcript_events)
@@ -438,6 +450,7 @@ def build_summary(
             "audio_sha256_12": bytes_digest(wav_path.read_bytes()),
             "duration_ms": int(audio_samples / TARGET_SAMPLE_RATE * 1000),
             "sample_rate": TARGET_SAMPLE_RATE,
+            "repeat_audio": repeat_audio,
             "streamed_samples": effective_streamed_samples,
             "streamed_duration_ms": int(effective_streamed_samples / TARGET_SAMPLE_RATE * 1000),
         },
@@ -491,7 +504,11 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     validate_stream_url(args.url)
     wav_path = Path(args.wav).expanduser().resolve()
     reference_text_path = resolve_reference_text(wav_path, args.reference_text)
+    if args.repeat_audio < 1:
+        raise SmokeError("repeat-audio must be at least 1")
     audio = load_wav_float32(wav_path)
+    if args.repeat_audio > 1:
+        audio = np.tile(audio, args.repeat_audio)
     frames = audio_frames(audio, frame_ms=args.frame_ms)
     tail_silence = np.zeros(
         int(TARGET_SAMPLE_RATE * args.tail_silence_sec),
@@ -626,6 +643,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             args.max_transcript_gap_ms if args.max_transcript_gap_ms > 0 else None
         ),
         streamed_samples=samples_sent,
+        repeat_audio=args.repeat_audio,
         final_transcript_text=" ".join(final_transcript_parts),
         min_reference_token_coverage=args.min_reference_token_coverage,
         max_word_error_rate=args.max_word_error_rate,
@@ -641,6 +659,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--wav",
         default=str(Path(__file__).resolve().parents[1] / "tests/fixtures/sample-tr-cv17-001.wav"),
+    )
+    parser.add_argument(
+        "--repeat-audio",
+        type=int,
+        default=1,
+        help=(
+            "Stream the fixture this many times back to back. The draft pass "
+            "only emits once the decoder is confident, so a single short clip "
+            "gives it too few chances to be a fair gate; the reference token "
+            "sequence is tiled with the audio so coverage/WER keep meaning."
+        ),
     )
     parser.add_argument("--frame-ms", type=int, default=DEFAULT_FRAME_MS)
     parser.add_argument("--tail-silence-sec", type=float, default=DEFAULT_TAIL_SILENCE_SEC)

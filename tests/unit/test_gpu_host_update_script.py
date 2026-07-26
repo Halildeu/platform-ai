@@ -432,16 +432,20 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn('"--reference-text", $referenceText', script)
         self.assertIn('"sample-tr-cv17-001"', script)
         self.assertIn('"sample-tr-cv17-002"', script)
-        self.assertIn('"--min-final-word-coverage", "0.8"', script)
-        self.assertIn('"--min-partial-events", "1"', script)
         self.assertIn('"--min-final-events", "1"', script)
-        self.assertIn('"--min-reference-token-coverage", "0.8"', script)
-        self.assertIn('"--max-word-error-rate", "0.25"', script)
-        self.assertIn('"--max-transcript-gap-ms", "6000"', script)
-        self.assertNotIn('"--min-final-word-coverage", "0"', script)
-        self.assertNotIn('"--min-partial-events", "0"', script)
-        self.assertNotIn('"--max-transcript-gap-ms", "0"', script)
-        self.assertIn("[int]$summary.events.partial_count -ge 1", script)
+        # Content thresholds stay exactly as strict as before, now carried in
+        # the content-mode branch instead of inline literals.
+        self.assertIn("$gateMinFinalWordCoverage = 0.8", script)
+        self.assertIn("$gateMinReferenceTokenCoverage = 0.8", script)
+        self.assertIn("$gateMaxWordErrorRate = 0.25", script)
+        self.assertIn("$gateMaxTranscriptGapMs = 6000", script)
+        # The partial requirement lives only on the repeated draft-path run and
+        # must stay conditional; unconditional here is the coin flip this split
+        # exists to remove.
+        self.assertIn(
+            "(-not $DraftPathOnly -or [int]$summary.events.partial_count -ge 1)", script
+        )
+        self.assertNotIn("        [int]$summary.events.partial_count -ge 1 -and", script)
         self.assertIn(
             "[double]$summary.coverage.final_word_coverage -ge 0.8",
             script,
@@ -455,12 +459,15 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            "$summary.quality_gate.min_reference_token_coverage -eq 0.8",
+            "$summary.quality_gate.min_reference_token_coverage -eq `\n"
+            "          $gateMinReferenceTokenCoverage",
             script,
         )
-        self.assertIn("$summary.quality_gate.max_word_error_rate -eq 0.25", script)
         self.assertIn(
-            "[int]$summary.events.max_transcript_gap_ms -le 6000",
+            "$summary.quality_gate.max_word_error_rate -eq $gateMaxWordErrorRate", script
+        )
+        self.assertIn(
+            "($DraftPathOnly -or [int]$summary.events.max_transcript_gap_ms -le 6000)",
             script,
         )
         self.assertIn("$summary.reference.text_sha256_12", script)
@@ -865,6 +872,27 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             "PATH yields a space-joined, unusable path.",
         )
 
+
+    def test_stream_acceptance_splits_content_and_draft_path_runs(self) -> None:
+        """Neither property can be judged fairly on the other's stream.
+
+        A single 5.5s clip gives the draft pass about two chances and both are
+        legitimately filtered as low-confidence, so requiring a partial from it
+        passed only 1 of 4 runs on the GPU host. Repeating the clip fixes that
+        (4/4) but the tiled seams push word error rate to 0.20-0.29, so content
+        cannot be judged on the repeated stream either.
+        """
+        script = self._read_script("update.ps1")
+
+        self.assertIn('@{ Fixture = "sample-tr-cv17-001"; Repeat = 1; DraftPathOnly = $false }', script)
+        self.assertIn('@{ Fixture = "sample-tr-cv17-002"; Repeat = 1; DraftPathOnly = $false }', script)
+        self.assertIn('@{ Fixture = "sample-tr-cv17-001"; Repeat = 5; DraftPathOnly = $true }', script)
+        self.assertIn('"--repeat-audio", "$RepeatAudio"', script)
+        # The multiplier the smoke actually streamed is re-verified, so a run
+        # cannot silently fall back to a single pass and still claim the gate.
+        self.assertIn("[int]$summary.fixture.repeat_audio -eq $RepeatAudio", script)
+        # Content assertions must not run on the repeated stream.
+        self.assertIn("$DraftPathOnly -or (", script)
 
 if __name__ == "__main__":
     unittest.main()

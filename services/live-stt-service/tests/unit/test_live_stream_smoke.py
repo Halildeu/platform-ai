@@ -791,3 +791,65 @@ def test_final_event_count_honors_requested_long_smoke_gate() -> None:
 
     assert smoke.final_event_count(events) == 2
     assert smoke.final_event_count(events) < 3
+
+
+def test_repeat_audio_tiles_reference_so_coverage_and_wer_keep_meaning(
+    tmp_path: Path,
+) -> None:
+    """--repeat-audio must scale the expectation, not just the input.
+
+    The draft pass only emits once the decoder is confident, so a single 5.5s
+    clip gives it about two chances and both are legitimately filtered — making
+    a >=1 partial gate a coin flip (measured 1/4 on the GPU host). Repeating the
+    fixture buys the draft path a fair number of chances, but the expected
+    transcript is then the sentence that many times: if the reference were left
+    at one copy, coverage and WER would silently stop measuring anything.
+    """
+    module = _load_smoke_module()
+    reference = tmp_path / "ref.txt"
+    reference.write_text("geçiş ülkelerinde yaşananlar ise karışık", encoding="utf-8")
+    once = "geçiş ülkelerinde yaşananlar ise karışık"
+
+    assert module.reference_metadata(reference)["words"] == 5
+    assert module.reference_metadata(reference, repeat=3)["words"] == 15
+
+    # A transcript repeated as many times as the audio is a perfect match.
+    tiled = module.reference_transcript_quality(reference, " ".join([once] * 3), repeat=3)
+    assert tiled["word_error_rate"] == 0.0
+    assert tiled["reference_token_coverage"] == 1.0
+
+    # Leaving the reference at one copy would have scored the same transcript as
+    # heavily inserted text instead — the bug this parameter exists to avoid.
+    untiled = module.reference_transcript_quality(reference, " ".join([once] * 3), repeat=1)
+    assert untiled["word_error_rate"] > 1.0
+
+
+def test_repeat_audio_is_recorded_and_rejected_when_below_one() -> None:
+    """The multiplier is part of the evidence, and 0 must not silently stream nothing."""
+    module = _load_smoke_module()
+    summary = module.build_summary(
+        url="ws://127.0.0.1:8200/ws/stream",
+        wav_path=FIXTURE,
+        audio_samples=16000,
+        started_at=time.perf_counter(),
+        loading_events=[],
+        ready_at=time.perf_counter(),
+        transcript_events=[],
+        terminal_events=["eof_ack", "drained"],
+        errors=[],
+        repeat_audio=6,
+    )
+    assert summary["fixture"]["repeat_audio"] == 6
+
+    args = module.parse_args(
+        [
+            "--url",
+            "ws://127.0.0.1:8200/ws/stream",
+            "--wav",
+            str(FIXTURE),
+            "--repeat-audio",
+            "0",
+        ]
+    )
+    with pytest.raises(module.SmokeError):
+        asyncio.run(module.run_smoke(args))
