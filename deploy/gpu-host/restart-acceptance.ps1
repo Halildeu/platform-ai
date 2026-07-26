@@ -318,9 +318,37 @@ function Get-GpuHostTaskXmlContract {
             -not $principalId.Equals($actionContext, [StringComparison]::Ordinal)) {
             throw "action-context-invalid"
         }
-        if ([string]$principal.UserId -notin @("SYSTEM", "S-1-5-18") -or
-            [string]$principal.LogonType -ne "ServiceAccount" -or
-            [string]$principal.RunLevel -ne "HighestAvailable") {
+        # Read every principal child through SelectSingleNode rather than
+        # property access. Task Scheduler omits elements that carry their
+        # default value, and under Set-StrictMode a missing element makes
+        # `$principal.LogonType` throw a raw PowerShell property error instead
+        # of reaching the intended "principal-invalid" verdict — the deploy
+        # then fails with an unreadable reason.
+        #
+        # LogonType is the case that actually occurs: Windows never writes it
+        # for the LocalSystem SID, because LocalSystem has no interactive logon
+        # and ServiceAccount is its only meaning. Requiring the element
+        # literally rejected the exact principal install.ps1 creates.
+        #
+        # An absent element is only ever read as its documented default, so the
+        # security intent is unchanged: a non-SYSTEM user, an explicit
+        # non-ServiceAccount logon, or a missing/lesser RunLevel still fail.
+        $principalValue = {
+            param([string]$Name, [string]$Default)
+            $node = $principal.SelectSingleNode("t:{0}" -f $Name, $namespace)
+            if ($null -eq $node) { return $Default }
+            return [string]$node.InnerText
+        }
+        $userId = & $principalValue "UserId" ""
+        $isLocalSystem = $userId -in @("SYSTEM", "S-1-5-18")
+        # Only LocalSystem may imply its logon type. For any other identity a
+        # missing element is not an implied service logon and must fail.
+        $logonDefault = if ($isLocalSystem) { "ServiceAccount" } else { "" }
+        $logonType = & $principalValue "LogonType" $logonDefault
+        $runLevel = & $principalValue "RunLevel" "LeastPrivilege"
+        if (-not $isLocalSystem -or
+            $logonType -ne "ServiceAccount" -or
+            $runLevel -ne "HighestAvailable") {
             throw "principal-invalid"
         }
         $exec = $execs[0]

@@ -252,6 +252,44 @@ $wrongPrincipal = Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
     -TaskXml $wrongPrincipalXml -SkipPythonPathValidation
 Assert-True (-not $wrongPrincipal.Valid) "Non-SYSTEM principal must fail closed."
 
+# The XML Windows actually emits for a LocalSystem task: Task Scheduler omits
+# elements holding their default value, and it never writes LogonType for
+# S-1-5-18 because LocalSystem has no interactive logon. The fixture above
+# spells it out, which is why CI accepted a reader that could not parse the
+# real thing -- on the GPU host every deploy was rejected with the raw error
+# "The property 'LogonType' cannot be found on this object" instead of a
+# verdict, disabling both tasks.
+$omittedLogonTypeXml = $taskXml.Replace(
+    "<LogonType>ServiceAccount</LogonType>", ""
+)
+$omittedLogonType = Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
+    -TaskXml $omittedLogonTypeXml -SkipPythonPathValidation
+Assert-True $omittedLogonType.Valid `
+    ("A LocalSystem principal without an explicit LogonType is the canonical " +
+     "Windows form and must pass: {0}" -f $omittedLogonType.Reason)
+
+# The implied default is granted to LocalSystem only; every other way of
+# reaching the same state still fails closed.
+$omittedLogonNonSystemXml = $omittedLogonTypeXml.Replace(
+    "S-1-5-18", "S-1-5-32-544"
+)
+Assert-True (-not (Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
+    -TaskXml $omittedLogonNonSystemXml -SkipPythonPathValidation).Valid) `
+    "A missing LogonType must not imply a service logon for a non-SYSTEM user."
+$explicitWrongLogonXml = $taskXml.Replace(
+    "<LogonType>ServiceAccount</LogonType>",
+    "<LogonType>InteractiveToken</LogonType>"
+)
+Assert-True (-not (Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
+    -TaskXml $explicitWrongLogonXml -SkipPythonPathValidation).Valid) `
+    "An explicit non-service LogonType must still fail closed."
+$omittedRunLevelXml = $taskXml.Replace(
+    "<RunLevel>HighestAvailable</RunLevel>", ""
+)
+Assert-True (-not (Get-GpuHostTaskXmlContract -TaskName "platform-ai-live-stt" `
+    -TaskXml $omittedRunLevelXml -SkipPythonPathValidation).Valid) `
+    "A missing RunLevel means LeastPrivilege and must fail closed."
+
 $stableOwner = {
     param($port)
     return New-GpuHostOwnerResult -Succeeded $true -Owners @(100)
