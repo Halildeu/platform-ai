@@ -63,6 +63,22 @@ SHORT_FINAL_PRESERVE_MAX_RATIO = 0.65
 SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO = 0.45
 EOF_CONTROL = {"type": "eof"}
 STREAM_PROTOCOL = "source-ranges-v1"
+
+# Draft-pass circuit breaker (#279).
+#
+# The draft is advisory: the final pass carries the authoritative transcript.
+# A draft failure therefore must not end the connection - the previous code
+# re-raised on the supervised backend, so one slow inference under GPU
+# contention killed the whole session.
+#
+# Repeated failures are still not free: every supervised timeout terminates and
+# respawns the worker, and the next call then pays a multi-minute cold model
+# load while holding the service's single-flight lock. Retrying into that at the
+# draft cadence starves the threadpool and turns one slow pass into a reload
+# storm. So consecutive failures open a circuit: drafts are skipped outright
+# for a cooldown, finals keep flowing, and one half-open probe closes it again.
+DRAFT_FAILURES_BEFORE_CIRCUIT_OPEN = 3
+DRAFT_CIRCUIT_COOLDOWN_SEC = 30.0
 _OVERLAP_SUFFIXES = (
     "lerinizden",
     "larınızdan",
@@ -656,6 +672,8 @@ async def stream_endpoint(
     last_draft = ""
     confirmed_draft = ""
     tentative_draft = ""
+    draft_consecutive_failures = 0
+    draft_circuit_open_until = 0.0
     pcm_chunks = 0
     speech_seen = False
     last_speech_t: float | None = None
@@ -950,6 +968,13 @@ async def stream_endpoint(
 
     async def infer_live_partial() -> None:
         nonlocal last_draft, confirmed_draft, tentative_draft
+        nonlocal draft_consecutive_failures, draft_circuit_open_until
+
+        if time.monotonic() < draft_circuit_open_until:
+            # Circuit open: skip without touching the threadpool, the service
+            # lock, or the worker. Finals are unaffected.
+            await send_debug("draft_circuit_open")
+            return
 
         async with buffer_lock:
             live_samples = int(settings.live_window_sec * SAMPLE_RATE)
@@ -986,13 +1011,33 @@ async def stream_endpoint(
                     timeout=settings.stream_live_timeout_sec,
                 )
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - no draft fault may end the stream (#279)
             # exc_info is transcript-free (code paths only) — KVKK-safe diagnostics.
             logger.warning("Draft pass error err_class=%s", type(exc).__name__, exc_info=True)
-            await send_debug("draft_error", error=type(exc).__name__)
-            if isinstance(live_service, SupervisedLiveWhisperService):
-                raise
+            draft_consecutive_failures += 1
+            await send_debug(
+                "draft_error",
+                error=type(exc).__name__,
+                consecutive=draft_consecutive_failures,
+            )
+            # A failed draft never ends the connection (#279). The final pass is
+            # the authoritative transcript and stays healthy on its own worker;
+            # dropping the session here loses good audio to fix nothing.
+            if draft_consecutive_failures >= DRAFT_FAILURES_BEFORE_CIRCUIT_OPEN:
+                draft_circuit_open_until = time.monotonic() + DRAFT_CIRCUIT_COOLDOWN_SEC
+                logger.warning(
+                    "Draft circuit opened after %d consecutive failures; "
+                    "finals continue, drafts paused for %.0fs",
+                    draft_consecutive_failures,
+                    DRAFT_CIRCUIT_COOLDOWN_SEC,
+                )
+                await send_debug("draft_circuit_opened", consecutive=draft_consecutive_failures)
             return
+
+        # A completed pass closes the circuit; the counter tracks *consecutive*
+        # failures so an occasional slow inference never accumulates toward it.
+        draft_consecutive_failures = 0
+        draft_circuit_open_until = 0.0
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
