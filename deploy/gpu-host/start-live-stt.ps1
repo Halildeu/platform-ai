@@ -162,7 +162,16 @@ $null = Import-LiveSttRuntimeEnvironment
 # Re-assert the complete source-controlled production profile AFTER host-local
 # config. The data file cannot move model identity, device placement,
 # quantization, preload timing, or the runtime commit accepted by the ledger.
-$gitCommand = Get-Command git.exe -CommandType Application -ErrorAction Stop
+# Git for Windows installs git.exe under BOTH cmd\ and bin\, and puts both on
+# the machine PATH. Get-Command then returns two Application entries, member
+# enumeration makes $gitCommand.Source a 2-element array, and `& $array`
+# stringifies it into a single bogus command name:
+#   "C:\Program Files\Git\cmd\git.exe C:\Program Files\Git\bin\git.exe"
+# -> CommandNotFoundException, so the launcher could never resolve the runtime
+# commit and every start failed. Take the first match, as the Python executable
+# resolution in meeting-ai-runtime-env.ps1 already does.
+$gitCommand = Get-Command git.exe -CommandType Application `
+    -ErrorAction Stop | Select-Object -First 1
 $gitExe = $gitCommand.Source
 $oldEap = $ErrorActionPreference
 try {

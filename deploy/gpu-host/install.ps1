@@ -150,7 +150,13 @@ foreach ($t in $tasks) {
 
 # Tasks run as SYSTEM, whose PATH does not see per-user Python installs:
 # resolve the full interpreter path now and bake it into the task action.
-$pythonExe = (Get-Command python -ErrorAction Stop).Source
+# Select-Object -First 1 is load-bearing: Windows commonly exposes several
+# `python` entries (a real install plus the WindowsApps execution alias). Member
+# enumeration over multiple matches would turn .Source into an array and bake a
+# space-joined, unusable interpreter path into the persisted task action.
+$pythonCommand = Get-Command python -CommandType Application `
+    -ErrorAction Stop | Select-Object -First 1
+$pythonExe = $pythonCommand.Source
 Write-Host "Using Python: $pythonExe"
 
 # Streaming models are staged before task creation into a fixed ProgramData
