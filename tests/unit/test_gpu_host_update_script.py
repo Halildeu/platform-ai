@@ -502,20 +502,31 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            "$summary.quality_gate.min_reference_token_coverage -eq `\n"
-            "          $gateMinReferenceTokenCoverage",
-            script,
+            "$summary.quality_gate.min_reference_token_coverage -eq", script
         )
         self.assertIn(
             "$summary.quality_gate.max_word_error_rate -eq $gateMaxWordErrorRate", script
         )
-        self.assertIn(
-            "($DraftPathOnly -or [int]$summary.events.max_transcript_gap_ms -le 6000)",
-            script,
-        )
+        self.assertIn("$DraftPathOnly -or", script)
+        self.assertIn("[int]$summary.events.max_transcript_gap_ms -le 6000", script)
         self.assertIn("$summary.reference.text_sha256_12", script)
         self.assertIn("@($summary.quality_gate.failures).Count -eq 0", script)
         self.assertIn('"eof_ack,drained"', script)
+        # A refused deploy has to name the term that refused it. These gates
+        # used to be one 30-term -and chain that short-circuited to a bare
+        # $false and printed nothing, so a stream rejected on content looked
+        # exactly like a crashed interpreter from the console.
+        self.assertIn("$failed = @($checks.Keys | Where-Object", script)
+        self.assertIn("direct stream acceptance rejected by: {0}", script)
+        for named_check in (
+            "terminal_sequence =",
+            "content_quality =",
+            "no_final_hallucination =",
+            "fixture_repeat_audio =",
+            "smoke_reported_no_failures =",
+        ):
+            self.assertIn(named_check, script)
+        self.assertNotIn("$summary.ok -eq $true -and", script)
         self.assertIn("LiveSttReadinessDeadlineSec", script)
         self.assertIn("[Diagnostics.Stopwatch]::StartNew()", script)
         self.assertIn("$readiness.runtime_commit -eq $ExpectedCommit", script)
@@ -531,6 +542,59 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("$readiness.speech_gate.vad.live_enabled", script)
         self.assertIn("$readiness.speech_gate.vad.final_enabled", script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
+
+    def test_acceptance_evidence_outlives_the_console_that_produced_it(
+        self,
+    ) -> None:
+        """The only copy of the acceptance proof must not be a terminal buffer.
+
+        On 2026-07-27 a fenced-runtime recovery succeeded and its acceptance
+        text - terminal_sequence, coverage, quality gate - existed nowhere on
+        disk: not in ProgramData, not under deploy\\gpu-host\\logs. The
+        postcondition audit could only be answered by asking the operator to
+        paste from the session that happened to run it.
+        """
+        script = self._read_script("update.ps1")
+        writer = self._read_script("acceptance-receipt.ps1")
+        # Windows PowerShell 5.1 reads these without a BOM; non-ASCII here has
+        # bitten the deploy chain before.
+        writer.encode("ascii")
+        self.assertIn("Set-StrictMode -Version 2.0", writer)
+
+        # The writer is its own dot-sourced module so it can be exercised
+        # without running a deploy, the way deployment-state.ps1 already is.
+        self.assertIn('Join-Path $PSScriptRoot "acceptance-receipt.ps1"', script)
+        self.assertIn("Missing acceptance-receipt.ps1 beside update.ps1.", script)
+        self.assertIn("function Write-GpuHostAcceptanceReceipt", writer)
+        self.assertIn('"acceptance-receipts"', writer)
+        # Receipts follow the caller's -StatePath rather than a second
+        # hardcoded root, and inherit the ledger's own ACL.
+        self.assertIn("[string]$StatePath = $script:ResolvedStatePath", writer)
+        self.assertIn("Split-Path -Parent $StatePath", writer)
+        self.assertIn("Initialize-DeploymentStateRoot -StatePath $receiptPath", writer)
+        self.assertIn(
+            "Set-Acl -LiteralPath $receiptPath -AclObject (New-DeploymentStateAcl)",
+            writer,
+        )
+        self.assertIn("Assert-DeploymentStateAcl -Path $receiptPath", writer)
+        self.assertIn("Acceptance receipt readback failed.", writer)
+        # Persisting evidence is never itself a deploy gate.
+        self.assertIn("acceptance receipt could not be written", writer)
+        # Bounded history: three runs per deploy on a host nobody prunes.
+        self.assertIn("$existing.Count -gt 60", writer)
+
+        # The receipt carries the smoke summary, because that is the only place
+        # terminal_sequence, coverage and the quality gate exist.
+        self.assertIn("-Summary $summary", script)
+        # Every terminal verdict leaves evidence, including the paths that used
+        # to return a bare $false.
+        for verdict in (
+            "-Verdict $verdict",
+            '-Verdict "smoke-process-failed"',
+            '-Verdict "invalid-summary"',
+            '-Verdict "not-executed"',
+        ):
+            self.assertIn(verdict, script)
 
     def test_live_stt_production_launcher_reasserts_pinned_runtime_profile(
         self,
