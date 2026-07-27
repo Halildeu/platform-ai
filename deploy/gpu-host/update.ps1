@@ -258,6 +258,15 @@ if (-not (Test-Path -LiteralPath $stateModule -PathType Leaf)) {
 }
 . $stateModule
 
+# Durable acceptance evidence. Depends on the state module above for the
+# hardened ACL, so it is sourced after it.
+$receiptModule = Join-Path $PSScriptRoot "acceptance-receipt.ps1"
+if (-not (Test-Path -LiteralPath $receiptModule -PathType Leaf)) {
+  Stop-Deploy "Missing acceptance-receipt.ps1 beside update.ps1." `
+    $script:DeployExitGuard
+}
+. $receiptModule
+
 $script:DeployMutex = New-Object Threading.Mutex(
   $false,
   "Global\platform-ai-gpu-deploy-v1"
@@ -1087,7 +1096,12 @@ function Invoke-LiveSttFixtureAcceptance {
     $process.Dispose()
     if ($exitCode -ne 0 -or
         -not (Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec)) {
-      Write-Host "[update] direct stream inference acceptance failed" -ForegroundColor Yellow
+      Write-Host ("[update] direct stream inference acceptance failed (exit {0})" -f `
+        $exitCode) -ForegroundColor Yellow
+      Write-GpuHostAcceptanceReceipt -Fixture $FixtureBaseName `
+        -RepeatAudio $RepeatAudio -DraftPathOnly ([bool]$DraftPathOnly) `
+        -Verdict "smoke-process-failed" `
+        -FailedChecks @("smoke_exit_code_or_deadline")
       return $false
     }
     try {
@@ -1105,47 +1119,95 @@ function Invoke-LiveSttFixtureAcceptance {
       } finally {
         $sha256.Dispose()
       }
-      return (
-        $summary.schema -eq "platform-ai.live-stt.stream-smoke.v1" -and
-        $summary.ok -eq $true -and
-        $summary.reference.artifact_id_sha256_12 -eq $referenceNameHash -and
-        $summary.reference.text_sha256_12 -eq $referenceTextHash -and
-        [int]$summary.reference.words -ge 1 -and
-        (-not $DraftPathOnly -or [int]$summary.events.partial_count -ge 1) -and
-        [int]$summary.events.final_count -ge 1 -and
-        [int]$summary.events.final_hallucination_count -eq 0 -and
-        [int]$summary.events.error_count -eq 0 -and
-        $null -ne $summary.events.max_transcript_gap_ms -and
-        [int]$summary.events.max_transcript_gap_ms -ge 0 -and
-        ($DraftPathOnly -or [int]$summary.events.max_transcript_gap_ms -le 6000) -and
-        [int]$summary.coverage.reference_words -eq `
-          [int]$summary.reference.words -and
-        [int]$summary.coverage.final_words -ge 1 -and
-        [int]$summary.fixture.repeat_audio -eq $RepeatAudio -and
-        (
-          $DraftPathOnly -or (
+      # Named, not one 30-term -and chain. The chain short-circuited to a bare
+      # $false and printed nothing, so a refused deploy could not be told apart
+      # from a crashed one without re-running it by hand - which is how a
+      # deploy stalled on 2026-07-27 with the gate returning false while the
+      # same fixture passed when run manually. Each term now carries the name
+      # that appears in the console line and in the receipt.
+      $checks = [ordered]@{
+        schema =
+          $summary.schema -eq "platform-ai.live-stt.stream-smoke.v1"
+        smoke_ok =
+          $summary.ok -eq $true
+        reference_artifact_hash =
+          $summary.reference.artifact_id_sha256_12 -eq $referenceNameHash
+        reference_text_hash =
+          $summary.reference.text_sha256_12 -eq $referenceTextHash
+        reference_words =
+          [int]$summary.reference.words -ge 1
+        partial_events =
+          (-not $DraftPathOnly -or [int]$summary.events.partial_count -ge 1)
+        final_events =
+          [int]$summary.events.final_count -ge 1
+        no_final_hallucination =
+          [int]$summary.events.final_hallucination_count -eq 0
+        no_stream_errors =
+          [int]$summary.events.error_count -eq 0
+        transcript_gap_present =
+          ($null -ne $summary.events.max_transcript_gap_ms -and
+           [int]$summary.events.max_transcript_gap_ms -ge 0)
+        transcript_gap_within_max =
+          ($DraftPathOnly -or
+           [int]$summary.events.max_transcript_gap_ms -le 6000)
+        coverage_reference_words =
+          [int]$summary.coverage.reference_words -eq [int]$summary.reference.words
+        coverage_final_words =
+          [int]$summary.coverage.final_words -ge 1
+        fixture_repeat_audio =
+          [int]$summary.fixture.repeat_audio -eq $RepeatAudio
+        content_quality =
+          ($DraftPathOnly -or (
             [double]$summary.coverage.final_word_coverage -ge 0.8 -and
             [double]$summary.coverage.reference_token_coverage -ge 0.8 -and
             [double]$summary.coverage.word_error_rate -ge 0.0 -and
             [double]$summary.coverage.word_error_rate -le $MaxWordErrorRate
-          )
-        ) -and
-        [int]$summary.quality_gate.min_partial_events -eq $gateMinPartialEvents -and
-        [int]$summary.quality_gate.min_final_events -eq 1 -and
-        [double]$summary.quality_gate.min_final_word_coverage -eq $gateMinFinalWordCoverage -and
-        [double]$summary.quality_gate.min_reference_token_coverage -eq `
-          $gateMinReferenceTokenCoverage -and
-        [double]$summary.quality_gate.max_word_error_rate -eq $gateMaxWordErrorRate -and
-        [int]$summary.quality_gate.max_transcript_gap_ms -eq $gateMaxTranscriptGapMs -and
-        @($summary.quality_gate.failures).Count -eq 0 -and
-        (@($summary.events.terminal_sequence) -join ",") -eq "eof_ack,drained"
-      )
+          ))
+        gate_min_partial_events =
+          [int]$summary.quality_gate.min_partial_events -eq $gateMinPartialEvents
+        gate_min_final_events =
+          [int]$summary.quality_gate.min_final_events -eq 1
+        gate_min_final_word_coverage =
+          [double]$summary.quality_gate.min_final_word_coverage -eq `
+            $gateMinFinalWordCoverage
+        gate_min_reference_token_coverage =
+          [double]$summary.quality_gate.min_reference_token_coverage -eq `
+            $gateMinReferenceTokenCoverage
+        gate_max_word_error_rate =
+          [double]$summary.quality_gate.max_word_error_rate -eq $gateMaxWordErrorRate
+        gate_max_transcript_gap_ms =
+          [int]$summary.quality_gate.max_transcript_gap_ms -eq $gateMaxTranscriptGapMs
+        smoke_reported_no_failures =
+          @($summary.quality_gate.failures).Count -eq 0
+        terminal_sequence =
+          (@($summary.events.terminal_sequence) -join ",") -eq "eof_ack,drained"
+      }
+      $failed = @($checks.Keys | Where-Object { -not $checks[$_] })
+      $verdict = "accepted"
+      if ($failed.Count -gt 0) { $verdict = "rejected" }
+      Write-GpuHostAcceptanceReceipt -Fixture $FixtureBaseName `
+        -RepeatAudio $RepeatAudio -DraftPathOnly ([bool]$DraftPathOnly) `
+        -Verdict $verdict -FailedChecks $failed -Summary $summary
+      if ($failed.Count -gt 0) {
+        Write-Host ("[update] direct stream acceptance rejected by: {0}" -f `
+          ($failed -join ", ")) -ForegroundColor Yellow
+        return $false
+      }
+      return $true
     } catch {
-      Write-Host "[update] direct stream acceptance returned invalid summary" -ForegroundColor Yellow
+      Write-Host ("[update] direct stream acceptance returned invalid summary: {0}" -f `
+        $_.Exception.GetType().Name) -ForegroundColor Yellow
+      Write-GpuHostAcceptanceReceipt -Fixture $FixtureBaseName `
+        -RepeatAudio $RepeatAudio -DraftPathOnly ([bool]$DraftPathOnly) `
+        -Verdict "invalid-summary" `
+        -FailedChecks @("summary_parse_or_shape")
       return $false
     }
   } catch {
     Write-Host "[update] direct stream acceptance could not be executed" -ForegroundColor Yellow
+    Write-GpuHostAcceptanceReceipt -Fixture $FixtureBaseName `
+      -RepeatAudio $RepeatAudio -DraftPathOnly ([bool]$DraftPathOnly) `
+      -Verdict "not-executed" -FailedChecks @("acceptance_invocation")
     return $false
   } finally {
     $ErrorActionPreference = $oldEap
