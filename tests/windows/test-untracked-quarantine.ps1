@@ -21,18 +21,37 @@ function Invoke-Preserve {
     param([string[]]$ExtraArgs)
 
     $id = [Guid]::NewGuid().ToString("N")
+    $wrapper = Join-Path $tempRoot ("preserve-{0}.ps1" -f $id)
     $stdout = Join-Path $tempRoot ("preserve-{0}.stdout" -f $id)
     $stderr = Join-Path $tempRoot ("preserve-{0}.stderr" -f $id)
-    $tokens = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", ('"{0}"' -f $preserveScript),
-        "-RepoRoot", ('"{0}"' -f $source),
-        "-QuarantineRoot", ('"{0}"' -f $quarantine)
+    $scriptArgs = @(
+        "-RepoRoot", $source,
+        "-QuarantineRoot", $quarantine
     ) + $ExtraArgs
+    $commandTokens = @()
+    foreach ($argument in $scriptArgs) {
+        if ($argument.StartsWith("-", [StringComparison]::Ordinal)) {
+            $commandTokens += $argument
+        } else {
+            $commandTokens += ("'{0}'" -f $argument.Replace("'", "''"))
+        }
+    }
+    $command = (
+        "& '{0}' {1} -Confirm:`$false" -f `
+            $preserveScript.Replace("'", "''"), ($commandTokens -join " ")
+    ) + [Environment]::NewLine + "exit `$LASTEXITCODE"
+    [IO.File]::WriteAllText(
+        $wrapper,
+        $command + [Environment]::NewLine,
+        (New-Object Text.UTF8Encoding($false))
+    )
     try {
         $process = Start-Process powershell.exe -NoNewWindow -Wait -PassThru `
-            -ArgumentList $tokens `
+            -ArgumentList @(
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", ('"{0}"' -f $wrapper)
+            ) `
             -RedirectStandardOutput $stdout `
             -RedirectStandardError $stderr
         $output = @()
@@ -47,7 +66,7 @@ function Invoke-Preserve {
             Output = $output
         }
     } finally {
-        Remove-Item -LiteralPath $stdout, $stderr -Force `
+        Remove-Item -LiteralPath $wrapper, $stdout, $stderr -Force `
             -ErrorAction SilentlyContinue
     }
 }
@@ -93,7 +112,10 @@ Assert-True ($LASTEXITCODE -eq 0) "fixture commit failed"
 
 Write-PrivateFixture
 $whatIf = Invoke-Preserve @("-ExpectedCount", "3", "-WhatIf")
-Assert-True ($whatIf.ExitCode -eq 0) "quarantine WhatIf failed"
+Assert-True ($whatIf.ExitCode -eq 0) (
+    "quarantine WhatIf failed: exit={0}; output={1}" -f `
+        $whatIf.ExitCode, ($whatIf.Output -join " | ")
+)
 Assert-True (-not (Test-Path -LiteralPath $quarantine)) `
     "quarantine WhatIf created the destination"
 Assert-True (Test-Path -LiteralPath (Join-Path $source "private-a.wav")) `
