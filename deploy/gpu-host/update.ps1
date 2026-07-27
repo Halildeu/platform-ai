@@ -47,6 +47,17 @@
   from the deployment target. Required with ReconcileLedgerDrift and supported
   for deploy and rollback so an older target never becomes controller authority.
 
+.PARAMETER PreservedPullRequestNumber
+  Optional GitHub pull request number whose durable refs/pull/<N>/head ref
+  preserves an observed drift commit that is not in origin/main ancestry.
+  Requires ReconcileLedgerDrift and PreservedPullRequestHead.
+
+.PARAMETER PreservedPullRequestHead
+  Exact full commit expected at refs/pull/<N>/head. The updater fetches that ref
+  directly, exact-matches it, and proves the observed deploy HEAD is reachable
+  from it before any source mutation. This proof never makes the observed
+  commit a trusted deployment or ledger anchor.
+
 .PARAMETER RecoverFencedRuntime
   Explicitly re-enable the two GPU-host scheduled tasks during an attended
   immutable deployment or ledger-drift recovery. A failed acceptance disables
@@ -75,6 +86,8 @@ param(
   [switch]$Rollback,
   [switch]$ReconcileLedgerDrift,
   [string]$ControllerCommit = "",
+  [int]$PreservedPullRequestNumber = 0,
+  [string]$PreservedPullRequestHead = "",
   [switch]$RecoverFencedRuntime,
   [switch]$NoRestart,
   [switch]$NoConfirm
@@ -214,6 +227,29 @@ if (Test-Path -LiteralPath $legacyRuntimeEnv -PathType Leaf) {
 if ($Branch -notmatch '^[A-Za-z0-9._/-]+$') {
   Stop-Deploy "Branch contains unsupported characters." $script:DeployExitGuard
 }
+$hasPreservedPullNumber = ($PreservedPullRequestNumber -gt 0)
+$hasPreservedPullHead = -not [string]::IsNullOrWhiteSpace(
+  $PreservedPullRequestHead
+)
+if ($PreservedPullRequestNumber -lt 0 -or
+    $hasPreservedPullNumber -ne $hasPreservedPullHead) {
+  Stop-Deploy ("Preserved pull proof requires both a positive " +
+    "-PreservedPullRequestNumber and -PreservedPullRequestHead.") `
+    $script:DeployExitGuard
+}
+$hasPreservedPullProof = $hasPreservedPullNumber -and $hasPreservedPullHead
+if ($hasPreservedPullProof -and -not $ReconcileLedgerDrift) {
+  Stop-Deploy "Preserved pull proof requires -ReconcileLedgerDrift." `
+    $script:DeployExitGuard
+}
+if ($hasPreservedPullProof) {
+  if ($PreservedPullRequestHead.ToLowerInvariant() -notmatch
+      '^[0-9a-f]{40}$') {
+    Stop-Deploy "-PreservedPullRequestHead requires exactly 40 hex characters." `
+      $script:DeployExitGuard
+  }
+  $PreservedPullRequestHead = $PreservedPullRequestHead.ToLowerInvariant()
+}
 
 $stateModule = Join-Path $PSScriptRoot "deployment-state.ps1"
 if (-not (Test-Path -LiteralPath $stateModule -PathType Leaf)) {
@@ -250,6 +286,7 @@ $originRef = "origin/{0}" -f $Branch
 $originRemoteRef = "refs/remotes/{0}" -f $originRef
 $unpushedRange = "{0}..HEAD" -f $originRef
 $branchRef = "refs/remotes/{0}" -f $originRef
+$preservedPullLocalRef = ""
 
 $originCheck = Invoke-GitCapture -GitArgs @(
   "rev-parse", "--verify", "--quiet", $originRemoteRef
@@ -257,6 +294,32 @@ $originCheck = Invoke-GitCapture -GitArgs @(
 if ($originCheck.ExitCode -ne 0) {
   Stop-Deploy "$originRef not found after fetch. No mutation." `
     $script:DeployExitGuard
+}
+
+if ($hasPreservedPullProof) {
+  $preservedPullRemoteRef = "refs/pull/{0}/head" -f `
+    $PreservedPullRequestNumber
+  $preservedPullLocalRef = "refs/remotes/origin/preserved-pull/{0}/head" -f `
+    $PreservedPullRequestNumber
+  $preservedPullRefSpec = "+{0}:{1}" -f `
+    $preservedPullRemoteRef, $preservedPullLocalRef
+  if ((Invoke-GitStream -GitArgs @(
+      "fetch", "--no-tags", "origin", $preservedPullRefSpec
+    )) -ne 0) {
+    Stop-Deploy "Declared preserved pull ref could not be fetched. No mutation." `
+      $script:DeployExitGuard
+  }
+  $preservedPullObjectSpec = $preservedPullLocalRef + "^{commit}"
+  $preservedPullObject = Invoke-GitCapture -GitArgs @(
+    "rev-parse", "--verify", $preservedPullObjectSpec
+  )
+  if ($preservedPullObject.ExitCode -ne 0 -or
+      $preservedPullObject.Output.Count -ne 1 -or
+      "$($preservedPullObject.Output[0])".Trim().ToLowerInvariant() -ne
+        $PreservedPullRequestHead) {
+    Stop-Deploy "Declared preserved pull ref does not exact-match its expected head." `
+      $script:DeployExitGuard
+  }
 }
 
 $headResult = Invoke-GitCapture -GitArgs @("rev-parse", "HEAD")
@@ -276,6 +339,13 @@ $dirtyResult = Invoke-GitCapture -GitArgs @(
 if ($dirtyResult.ExitCode -ne 0) {
   Stop-Deploy "git status failed. No mutation." $script:DeployExitGuard
 }
+$untrackedResult = Invoke-GitCapture -GitArgs @(
+  "ls-files", "--others", "--exclude-standard"
+)
+if ($untrackedResult.ExitCode -ne 0) {
+  Stop-Deploy "git untracked-content scan failed. No mutation." `
+    $script:DeployExitGuard
+}
 
 $unpushedResult = Invoke-GitCapture -GitArgs @("rev-list", $unpushedRange)
 if ($unpushedResult.ExitCode -ne 0) {
@@ -287,7 +357,12 @@ if ($dirtyResult.Output.Count -gt 0) {
   Stop-Deploy "Dirty tracked tree detected. Preserve work before deploy." `
     $script:DeployExitGuard
 }
-if ($unpushedResult.Output.Count -gt 0) {
+if ($hasPreservedPullProof -and $untrackedResult.Output.Count -gt 0) {
+  Stop-Deploy ("Preserved-pull recovery requires zero untracked deployed " +
+    "files. Run preserve-untracked.ps1 and verify its restricted receipt.") `
+    $script:DeployExitGuard
+}
+if ($unpushedResult.Output.Count -gt 0 -and -not $hasPreservedPullProof) {
   Stop-Deploy "Local commit(s) not present in $originRef. Preserve via push + PR." `
     $script:DeployExitGuard
 }
@@ -391,7 +466,17 @@ if ($ReconcileLedgerDrift) {
   $observedAncestor = Invoke-GitCapture -GitArgs @(
     "merge-base", "--is-ancestor", $before, $originRef
   )
-  if ($observedAncestor.ExitCode -ne 0) {
+  if ($hasPreservedPullProof) {
+    $observedPreserved = Invoke-GitCapture -GitArgs @(
+      "merge-base", "--is-ancestor", $before, $preservedPullLocalRef
+    )
+    if ($observedPreserved.ExitCode -ne 0) {
+      Stop-Deploy ("Observed drift HEAD is not reachable from the exact " +
+        "preserved pull ref. No mutation.") $script:DeployExitGuard
+    }
+    Write-Host ("[update] preserved pull proof verified; " +
+      "observed HEAD remains untrusted") -ForegroundColor Cyan
+  } elseif ($observedAncestor.ExitCode -ne 0) {
     Stop-Deploy "Observed drift HEAD is not an ancestor of $originRef. No mutation." `
       $script:DeployExitGuard
   }

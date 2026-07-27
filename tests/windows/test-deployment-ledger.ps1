@@ -606,6 +606,138 @@ $notAncestor = Invoke-Update @("-TargetCommit", $sideCommit, "-NoRestart")
 Assert-True ($notAncestor.ExitCode -eq 2) `
     "non-main-ancestor commit must fail with guard exit 2"
 
+# Model a squash-merged PR whose original head remains durably available under
+# refs/pull/<N>/head while an observed intermediate commit is not in main
+# ancestry. The pull ref proves preservation only; it never becomes a trusted
+# deployment or ledger anchor.
+Invoke-Git $source @("checkout", "-b", "preserved-pull", $commitC) | Out-Null
+[IO.File]::WriteAllText(
+    (Join-Path $source "preserved-observed.txt"),
+    "preserved-observed",
+    (New-Object Text.UTF8Encoding($false))
+)
+Invoke-Git $source @("add", "preserved-observed.txt") | Out-Null
+Invoke-Git $source @("commit", "-m", "fixture preserved observed") | Out-Null
+$preservedObserved = "$(
+    Invoke-Git $source @('rev-parse', 'HEAD')
+)".Trim().ToLowerInvariant()
+[IO.File]::WriteAllText(
+    (Join-Path $source "preserved-head.txt"),
+    "preserved-head",
+    (New-Object Text.UTF8Encoding($false))
+)
+Invoke-Git $source @("add", "preserved-head.txt") | Out-Null
+Invoke-Git $source @("commit", "-m", "fixture preserved head") | Out-Null
+$preservedPullHead = "$(
+    Invoke-Git $source @('rev-parse', 'HEAD')
+)".Trim().ToLowerInvariant()
+Invoke-Git $source @(
+    "push", "origin",
+    ("{0}:refs/pull/235/head" -f $preservedPullHead)
+) | Out-Null
+Invoke-Git $source @("checkout", "main") | Out-Null
+Invoke-Git $deploy @(
+    "fetch", "origin",
+    "+refs/pull/235/head:refs/remotes/origin/test-pull/235/head"
+) | Out-Null
+Invoke-Git $deploy @("checkout", "--detach", $preservedObserved) | Out-Null
+
+$missingProofHead = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-PreservedPullRequestNumber", "235"
+)
+Assert-True ($missingProofHead.ExitCode -eq 2) `
+    "preserved-pull number without exact head must fail before mutation"
+$shortProofHead = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-PreservedPullRequestNumber", "235",
+    "-PreservedPullRequestHead", $preservedPullHead.Substring(0, 12)
+)
+Assert-True ($shortProofHead.ExitCode -eq 2) `
+    "short preserved-pull head must fail before mutation"
+$missingProofRef = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-PreservedPullRequestNumber", "236",
+    "-PreservedPullRequestHead", $preservedPullHead
+)
+Assert-True ($missingProofRef.ExitCode -eq 2) `
+    "missing preserved-pull ref must fail before mutation"
+$mismatchedProofHead = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-PreservedPullRequestNumber", "235",
+    "-PreservedPullRequestHead", $preservedObserved
+)
+Assert-True ($mismatchedProofHead.ExitCode -eq 2) `
+    "moving or mismatched preserved-pull head must fail before mutation"
+
+Invoke-Git $deploy @("checkout", "--detach", $sideCommit) | Out-Null
+$outsideProof = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-PreservedPullRequestNumber", "235",
+    "-PreservedPullRequestHead", $preservedPullHead
+)
+Assert-True ($outsideProof.ExitCode -eq 2) `
+    "observed HEAD outside the preserved pull must fail before mutation"
+
+Invoke-Git $deploy @("checkout", "--detach", $preservedObserved) | Out-Null
+[IO.File]::WriteAllText(
+    (Join-Path $deploy "untracked-private.fixture"),
+    "private",
+    (New-Object Text.UTF8Encoding($false))
+)
+$untrackedProof = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-PreservedPullRequestNumber", "235",
+    "-PreservedPullRequestHead", $preservedPullHead
+)
+Assert-True ($untrackedProof.ExitCode -eq 2) `
+    "preserved-pull recovery must reject untracked deployed content"
+Remove-Item -LiteralPath (Join-Path $deploy "untracked-private.fixture") -Force
+
+$preservedWhatIf = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-PreservedPullRequestNumber", "235",
+    "-PreservedPullRequestHead", $preservedPullHead,
+    "-WhatIf"
+)
+Assert-True ($preservedWhatIf.ExitCode -eq 0) `
+    "exact preserved-pull WhatIf validation failed"
+Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq
+    $preservedObserved) "preserved-pull WhatIf mutated HEAD"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitC -and
+    $state.previousCommit -eq $commitB) `
+    "preserved-pull WhatIf mutated the trusted ledger"
+
+$env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE = "accept"
+$preservedRecovery = Invoke-Update @(
+    "-TargetCommit", $commitD, "-ReconcileLedgerDrift",
+    "-ControllerCommit", $recoveryControllerCommit,
+    "-PreservedPullRequestNumber", "235",
+    "-PreservedPullRequestHead", $preservedPullHead
+)
+Assert-True ($preservedRecovery.ExitCode -eq 0) `
+    "exact preserved-pull recovery failed"
+$state = Read-DeploymentState -StatePath $statePath
+Assert-True ($state.currentCommit -eq $commitD -and
+    $state.previousCommit -eq $commitC) `
+    "preserved-pull recovery adopted the observed commit"
+Assert-True ("$(Invoke-Git $deploy @('rev-parse', 'HEAD'))".Trim() -eq $commitD) `
+    "preserved-pull recovery did not land the trusted target"
+Remove-Item Env:PLATFORM_AI_TEST_ACCEPTANCE_SEQUENCE
+
+# Restore the earlier trusted C/B fixture so the remaining rollback/fault tests
+# retain their original bounded-ledger preconditions.
+Write-DeploymentStateAtomic -StatePath $statePath -State $preRecoveryState
+Invoke-Git $deploy @("checkout", "--detach", $commitC) | Out-Null
+
 Invoke-Git $deploy @("checkout", "-b", "local-only", $commitC) | Out-Null
 [IO.File]::WriteAllText((Join-Path $deploy "local.txt"), "local")
 Invoke-Git $deploy @("add", "local.txt") | Out-Null
