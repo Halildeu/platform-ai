@@ -40,10 +40,34 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("[string]$TargetCommit", script)
         self.assertIn("[switch]$ReconcileLedgerDrift", script)
         self.assertIn("[string]$ControllerCommit", script)
+        self.assertIn("[int]$PreservedPullRequestNumber", script)
+        self.assertIn("[string]$PreservedPullRequestHead", script)
         self.assertIn("[switch]$RecoverFencedRuntime", script)
         self.assertIn(
             "Observed drift HEAD is not an ancestor of $originRef", script
         )
+        self.assertIn('"refs/pull/{0}/head"', script)
+        self.assertIn(
+            '"refs/remotes/origin/preserved-pull/{0}/head"', script
+        )
+        self.assertIn(
+            "Declared preserved pull ref does not exact-match its expected head",
+            script,
+        )
+        self.assertIn(
+            '"Observed drift HEAD is not reachable from the exact "',
+            script,
+        )
+        self.assertIn('"preserved pull ref. No mutation."', script)
+        self.assertIn(
+            '"merge-base", "--is-ancestor", $before, $preservedPullLocalRef',
+            script,
+        )
+        self.assertIn(
+            '"ls-files", "--others", "--exclude-standard"',
+            script,
+        )
+        self.assertIn("Run preserve-untracked.ps1", script)
         self.assertIn(
             "Ledger recovery anchor is unavailable or outside origin ancestry",
             script,
@@ -144,6 +168,29 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertNotIn("[switch]$Force", script)
         self.assertNotIn('"checkout", "-B"', script)
         self.assertNotIn("2>&1 | Out-Host", script)
+
+    def test_untracked_quarantine_is_restricted_and_content_addressed(self) -> None:
+        script = self._read_script("preserve-untracked.ps1")
+
+        script.encode("ascii")
+        self.assertIn("SupportsShouldProcess", script)
+        self.assertIn("[int]$ExpectedCount = -1", script)
+        self.assertIn("ls-files --others --exclude-standard -z", script)
+        self.assertIn("SetAccessRuleProtection($true, $false)", self._read_script(
+            "deployment-state.ps1"
+        ))
+        self.assertIn("New-DeploymentStateAcl", script)
+        self.assertIn("Assert-DeploymentStateAcl", script)
+        self.assertIn("Get-FileHash", script)
+        self.assertIn("-Algorithm SHA256", script)
+        self.assertIn('$objectPath = Join-Path $objectsRoot $record.sha256', script)
+        self.assertIn("Quarantine copy readback failed", script)
+        self.assertIn("Quarantine receipt readback failed", script)
+        self.assertIn("Source changed after quarantine verification", script)
+        self.assertIn("PLATFORM_AI_TEST_INJECT_QUARANTINE_RECEIPT_FAILURE", script)
+        self.assertIn("WhatIf/declined: validation passed; no mutation", script)
+        self.assertNotIn("Write-Host $relativePath", script)
+        self.assertNotIn("Write-Host $record.relativePath", script)
 
     def test_drift_guard_script_is_ps51_safe(self) -> None:
         script = self._read_script("drift-guard.ps1")

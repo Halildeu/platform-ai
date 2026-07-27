@@ -36,6 +36,7 @@ jobs:
         run: |
           foreach ($script in @(
             "deploy/gpu-host/update.ps1",
+            "deploy/gpu-host/preserve-untracked.ps1",
             "deploy/gpu-host/drift-guard.ps1",
             "deploy/gpu-host/deployment-state.ps1",
             "deploy/gpu-host/live-stt-runtime-contract.ps1",
@@ -340,6 +341,7 @@ jobs:
             "deploy/gpu-host/migrate-task-actions.ps1",
             "deploy/gpu-host/install.ps1",
             "tests/windows/test-deployment-ledger.ps1",
+            "tests/windows/test-untracked-quarantine.ps1",
             "tests/windows/test-meeting-ai-runtime.ps1",
             "tests/windows/test-private-gateway-host.ps1",
             "tests/windows/test-task-action-migration.ps1",
@@ -360,6 +362,10 @@ jobs:
       - name: Immutable commit ledger rollout rollback and drift contract
         shell: powershell
         run: .\tests\windows\test-deployment-ledger.ps1
+
+      - name: Restricted untracked deploy-mirror quarantine contract
+        shell: powershell
+        run: .\tests\windows\test-untracked-quarantine.ps1
 
       - name: Live STT fail-closed restart and runtime environment contract
         shell: powershell

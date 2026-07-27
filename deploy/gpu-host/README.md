@@ -337,6 +337,52 @@ kabul basarisizsa iki runtime task'i once disable edilir, calisan instance'lar
 sonlandirilir ve listener yoklugu dogrulanir; bu persistent fail-closed fence
 exit 4 ile raporlanir. `/End` tek basina fence degildir, cunku task restart
 policy'si veya reboot servisi yeniden baslatabilir.
+
+Gozlenen drift commit'i squash-merge nedeniyle `origin/main` soyunda degil ama
+GitHub'in durable pull ref'inde zaten korunuyorsa guard elle atlanmaz. Once
+untracked deploy-mirror icerigi restricted ve content-addressed karantinaya
+alinir. Konsol kaynak dosya adlarini veya icerigini yazmaz; yalniz sayi, toplam
+byte, manifest SHA-256 ve restricted receipt yolunu verir:
+
+```powershell
+$DeployRoot = "C:\Users\denetimpc\platform-ai"
+$QuarantineRoot = "C:\ProgramData\Acik\platform-ai\untracked-quarantine"
+.\deploy\gpu-host\preserve-untracked.ps1 -RepoRoot $DeployRoot `
+  -QuarantineRoot $QuarantineRoot -ExpectedCount 79 -WhatIf
+.\deploy\gpu-host\preserve-untracked.ps1 -RepoRoot $DeployRoot `
+  -QuarantineRoot $QuarantineRoot -ExpectedCount 79 -Confirm:$false
+```
+
+`preserve-untracked.ps1` tracked degisikligi reddeder; NUL-delimited Git
+enumerasyonu kullanir; reparse point ve repo-disina cikan yolu reddeder. Her
+dosyayi SHA-256 ile content-addressed object'e kopyalayip boyut/hash read-back,
+SYSTEM + Administrators-only ACL, restricted manifest ve receipt read-back
+basarili olmadan kaynak kopyalari silmez. `-ExpectedCount`, operatorun iki
+stabil snapshot'inda gozledigi sayinin degismedigini kanitlar.
+
+Karantina sonrasi updater exact PR numarasi ve exact PR head commit'i ile remote
+`refs/pull/<N>/head` ref'ini dogrudan fetch eder. Ref expected head ile birebir
+eslesmeli ve gozlenen HEAD bu PR head'in ancestor'u olmalidir:
+
+```powershell
+$TargetCommit = "<approved-origin-main-full-40-hex-commit>"
+$ControllerCommit = "<merged-controller-full-40-hex-commit>"
+$PreservedPullRequestNumber = 235
+$PreservedPullRequestHead = "<exact-pull-head-full-40-hex-commit>"
+.\deploy\gpu-host\update.ps1 -RepoRoot $DeployRoot `
+  -TargetCommit $TargetCommit -ReconcileLedgerDrift `
+  -ControllerCommit $ControllerCommit `
+  -PreservedPullRequestNumber $PreservedPullRequestNumber `
+  -PreservedPullRequestHead $PreservedPullRequestHead -WhatIf
+```
+
+Eksik/moving pull ref, head mismatch, gozlenen HEAD'in pull ref disinda olmasi
+veya karantina sonrasi kalan untracked icerik mutasyondan once exit 2 ile
+reddedilir. Pull ref yalniz veri-kaybi onleme kanitidir; gozlenen commit'i
+deploy target, controller veya ledger anchor yapmaz. Mutasyon komutu ancak
+WhatIf ayni exact parametrelerle gectikten ve controller commit `origin/main`
+uzerinde merge edilip temiz exact-control checkout'a alindiktan sonra kosulur.
+
 Pin veya acceptance sonrasindaki `lastResult` yazimi da ayni transaction
 sinirindadir: yazim arizasi helper icinden cikis yapmaz; trusted rollback
 denetleyicisine devredilir ve rollback sonucu kanitlanamazsa runtime fence olur.
