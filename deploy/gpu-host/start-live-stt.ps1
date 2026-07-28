@@ -54,7 +54,12 @@ if (-not (Test-Path -LiteralPath $svc -PathType Container) -or
 }
 $logDir = Join-Path $RepoRoot "deploy\gpu-host\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
-$log = Join-Path $logDir ("live-stt-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
+# Spawned model workers inherit stdout/stderr handles. If a launcher is ended
+# while a worker is still unwinding, a daily shared file can stay locked and
+# make the next cmd.exe redirect exit before uvicorn starts. A per-launch file
+# keeps restart recovery independent from stale descendant handles.
+$logStamp = Get-Date -Format "yyyyMMddTHHmmssfff"
+$log = Join-Path $logDir ("live-stt-{0}-pid{1}.log" -f $logStamp, $PID)
 
 # KVKK: logs are transcript-free by design (stream.py); do not enable STT_STREAM_DEBUG in prod.
 $env:STT_LOG_LEVEL = "INFO"

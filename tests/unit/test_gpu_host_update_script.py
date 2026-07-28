@@ -228,6 +228,9 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Clear-LiveSttManagedProcessEnvironment", script)
         self.assertIn("live-stt-runtime-env.ps1", script)
         self.assertIn("Legacy plaintext env.local.ps1 detected", script)
+        self.assertIn('Get-Date -Format "yyyyMMddTHHmmssfff"', script)
+        self.assertIn('"live-stt-{0}-pid{1}.log" -f $logStamp, $PID', script)
+        self.assertNotIn('Get-Date -Format "yyyyMMdd"))', script)
 
         runtime_env = self._read_script("live-stt-runtime-env.ps1")
         self.assertIn("must reside on a fixed local volume", runtime_env)
