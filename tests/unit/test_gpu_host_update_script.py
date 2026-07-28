@@ -488,6 +488,16 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             "$process.WaitForExit($smokeProcessTimeoutSec * 1000)",
             script,
         )
+        stdout_drain = "$stdoutTask = $process.StandardOutput.ReadToEndAsync()"
+        stderr_drain = "$stderrTask = $process.StandardError.ReadToEndAsync()"
+        process_wait = "$process.WaitForExit($smokeProcessTimeoutSec * 1000)"
+        self.assertIn(stdout_drain, script)
+        self.assertIn(stderr_drain, script)
+        self.assertLess(script.index(stdout_drain), script.index(process_wait))
+        self.assertLess(script.index(stderr_drain), script.index(process_wait))
+        self.assertIn("$output = $stdoutTask.GetAwaiter().GetResult()", script)
+        self.assertIn("[void]$stderrTask.GetAwaiter().GetResult()", script)
+        self.assertNotIn("$process.StandardOutput.ReadToEnd()", script)
         self.assertIn(
             "Stop-GpuHostProcessTreeBounded -Process $process -GraceSec 10",
             script,
