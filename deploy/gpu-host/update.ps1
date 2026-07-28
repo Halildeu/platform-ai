@@ -1087,6 +1087,11 @@ function Invoke-LiveSttFixtureAcceptance {
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { return $false }
+    # Drain both redirected pipes while the child runs. Waiting for process
+    # exit first can deadlock once a repeated-fixture JSON summary fills the
+    # finite stdout pipe buffer.
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     [int]$smokeProcessTimeoutSec = [Math]::Max(1, [Math]::Min(
       $SmokeProcessTimeoutCapSec,
       [Math]::Floor($DeadlineSec - $Clock.Elapsed.TotalSeconds)
@@ -1107,7 +1112,8 @@ function Invoke-LiveSttFixtureAcceptance {
         -FailedChecks @("smoke_process_timeout")
       return $false
     }
-    $output = $process.StandardOutput.ReadToEnd()
+    $output = $stdoutTask.GetAwaiter().GetResult()
+    [void]$stderrTask.GetAwaiter().GetResult()
     $exitCode = $process.ExitCode
     $process.Dispose()
     if ($exitCode -ne 0 -or
