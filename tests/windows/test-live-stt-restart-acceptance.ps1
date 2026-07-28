@@ -348,6 +348,19 @@ try {
     } "Duplicate config keys must be rejected."
 
     $schema = Get-LiveSttRuntimeConfigSchema
+    foreach ($invalidBeam in @("0", "11")) {
+        Assert-Throws {
+            ConvertFrom-LiveSttRuntimeValue -Key "STT_FINAL_BEAM_SIZE" `
+                -Value $invalidBeam -Spec $schema["STT_FINAL_BEAM_SIZE"]
+        } "Out-of-range final beam size must be rejected."
+    }
+    foreach ($validBeam in @("1", "10")) {
+        $convertedBeam = ConvertFrom-LiveSttRuntimeValue `
+            -Key "STT_FINAL_BEAM_SIZE" -Value $validBeam `
+            -Spec $schema["STT_FINAL_BEAM_SIZE"]
+        Assert-True ($convertedBeam -eq $validBeam) `
+            "Inclusive final beam size boundary was not accepted exactly."
+    }
     foreach ($rmsKey in @("STT_SILENCE_RMS", "STT_MIN_SPEECH_RMS")) {
         foreach ($invalidRms in @("NaN", "Infinity", "1e-3", "0,001", "+0.001", `
                 " 0.001", "0.000500", "0.00001", "0.051")) {
@@ -483,7 +496,7 @@ try {
     $firstSecure = ConvertTo-SecureString $firstRedis -AsPlainText -Force
     $firstOutput = @(& $configureScript -RepoRoot $configureFixtureRoot `
         -RedisUrl $firstSecure `
-        -ChunkConsumerEnabled true -RequestTimeout 180 `
+        -ChunkConsumerEnabled true -RequestTimeout 180 -FinalBeamSize 1 `
         -ChunkStreamPrefix "audio:chunks:p" -ChunkPartitionCount 32 `
         -ChunkConsumerGroup "live-stt-v1" -ChunkConsumerName "gpu-host-1" `
         -ChunkBlockMs 2000 -ChunkBatchSize 16 -ChunkDedupCacheSize 8192 `
@@ -506,6 +519,8 @@ try {
         "The runtime config contains a plaintext Redis credential."
     Assert-True ($firstContent.Contains("STT_REDIS_URL_DPAPI=")) `
         "The runtime config misses its DPAPI Redis blob."
+    Assert-True ($firstContent.Contains("STT_FINAL_BEAM_SIZE=1")) `
+        "The explicit final beam size was not persisted."
     Assert-True (-not $firstContent.Contains("STT_SILENCE_RMS=") -and `
         -not $firstContent.Contains("STT_MIN_SPEECH_RMS=")) `
         "Source RMS defaults must not be persisted as host-local overrides."
@@ -545,7 +560,7 @@ try {
     $rotatedSecure = ConvertTo-SecureString $rotatedRedis -AsPlainText -Force
     $rotationOutput = @(& $configureScript -RepoRoot $configureFixtureRoot `
         -RedisUrl $rotatedSecure `
-        -RequestTimeout 90 6>&1)
+        -RequestTimeout 90 -FinalBeamSize 5 6>&1)
     $rotatedContent = [IO.File]::ReadAllText($configuredPath)
     Assert-True (-not $rotatedContent.Contains($rotatedRedis)) `
         "Rotated runtime config contains a plaintext Redis credential."
@@ -553,6 +568,8 @@ try {
         "Rotation output exposed the Redis credential."
     Assert-True ($rotatedContent.Contains("STT_REQUEST_TIMEOUT=90")) `
         "Explicit public config rotation was not persisted."
+    Assert-True ($rotatedContent.Contains("STT_FINAL_BEAM_SIZE=5")) `
+        "Explicit final beam size rotation was not persisted."
     Assert-True (-not (Test-Path -LiteralPath "$configuredPath.bak")) `
         "A successful atomic rotation retained its temporary backup."
     Assert-True (@(Get-ChildItem -LiteralPath (Split-Path -Parent $configuredPath) `

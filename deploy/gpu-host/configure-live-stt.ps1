@@ -8,6 +8,7 @@ param(
     [Security.SecureString]$RedisUrl,
     [ValidateSet("", "true", "false")][string]$ChunkConsumerEnabled = "",
     [ValidateRange(0, 300)][int]$RequestTimeout = 0,
+    [ValidateRange(0, 10)][int]$FinalBeamSize = 0,
     [string]$SilenceRms = "",
     [string]$MinSpeechRms = "",
     [string]$ChunkStreamPrefix = "",
@@ -287,6 +288,7 @@ function ConvertTo-LiveSttProvisionContent {
 
     $order = @(
         "STT_REQUEST_TIMEOUT",
+        "STT_FINAL_BEAM_SIZE",
         "STT_SILENCE_RMS",
         "STT_MIN_SPEECH_RMS",
         "STT_CHUNK_CONSUMER_ENABLED",
@@ -427,6 +429,8 @@ try {
     Set-LiveSttPublicValue -Values $values -Key "STT_REQUEST_TIMEOUT" `
         -Supplied $(if ($RequestTimeout -gt 0) { "$RequestTimeout" } else { "" }) `
         -InitialDefault "180"
+    Set-LiveSttPublicValue -Values $values -Key "STT_FINAL_BEAM_SIZE" `
+        -Supplied $(if ($FinalBeamSize -gt 0) { "$FinalBeamSize" } else { "" })
     Set-LiveSttPublicValue -Values $values -Key "STT_SILENCE_RMS" `
         -Supplied $SilenceRms
     Set-LiveSttPublicValue -Values $values -Key "STT_MIN_SPEECH_RMS" `

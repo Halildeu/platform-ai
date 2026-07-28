@@ -25,6 +25,7 @@ function Get-LiveSttRuntimeConfigPath {
 function Get-LiveSttRuntimeConfigSchema {
     return @{
         "STT_REQUEST_TIMEOUT" = @{ Target = "STT_REQUEST_TIMEOUT"; Kind = "integer"; Min = 1; Max = 600 }
+        "STT_FINAL_BEAM_SIZE" = @{ Target = "STT_FINAL_BEAM_SIZE"; Kind = "integer"; Min = 1; Max = 10 }
         "STT_SILENCE_RMS" = @{ Target = "STT_SILENCE_RMS"; Kind = "decimal"; Min = 0.0001; Max = 0.05 }
         "STT_MIN_SPEECH_RMS" = @{ Target = "STT_MIN_SPEECH_RMS"; Kind = "decimal"; Min = 0.0001; Max = 0.05 }
         "STT_CHUNK_CONSUMER_ENABLED" = @{ Target = "STT_CHUNK_CONSUMER_ENABLED"; Kind = "boolean" }
