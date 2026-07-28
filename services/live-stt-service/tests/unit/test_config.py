@@ -8,6 +8,10 @@ from pathlib import Path
 import pytest
 
 from app.core import config as cfg
+from app.services.hallucination import (
+    CONTEXTUAL_ARTIFACT_MAX_RMS,
+    CONTEXTUAL_ARTIFACT_MIN_NO_SPEECH_PROB,
+)
 
 STREAM_MODEL_PINS = {
     "live_model_revision": "c" * 40,
@@ -365,10 +369,15 @@ def test_source_controlled_speech_gate_contract_does_not_drift() -> None:
         "LiveSttSilenceCommitSec": str(settings.silence_commit_sec),
         "LiveSttTailOverlapSec": str(settings.tail_overlap_sec),
         "LiveSttMinInferSec": str(settings.min_infer_sec),
+        "LiveSttContextualArtifactMaxRms": str(CONTEXTUAL_ARTIFACT_MAX_RMS),
+        "LiveSttContextualArtifactMinNoSpeechProb": str(
+            CONTEXTUAL_ARTIFACT_MIN_NO_SPEECH_PROB
+        ),
     }
     for name, value in expected.items():
         assert contract_value(name) == value
-        assert f"$script:{name}" in launcher
+        if not name.startswith("LiveSttContextualArtifact"):
+            assert f"$script:{name}" in launcher
 
     assert "STT_SILENCE_RMS=0.0005" in env_example
     assert "STT_MIN_SPEECH_RMS=0.0005" in env_example

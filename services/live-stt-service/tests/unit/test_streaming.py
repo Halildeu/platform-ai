@@ -31,7 +31,10 @@ from app.api.stream import (
 from app.core import config as config_module
 from app.core.config import Settings
 from app.services import streaming_models as streaming_models_module
-from app.services.hallucination import is_hallucination
+from app.services.hallucination import (
+    is_contextual_silence_hallucination,
+    is_hallucination,
+)
 from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import (
     DirectWhisperService,
@@ -185,6 +188,72 @@ def test_hallucination_filter_passes_real_speech() -> None:
         )
         is False
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "audio_rms", "no_speech_prob", "expected"),
+    [
+        ("İzlediğiniz için teşekkür ederim.", 0.0114, 0.65, True),
+        (
+            "İzlediğiniz için teşekkür ederim. İzlediğiniz için teşekkür ederim.",
+            0.0114,
+            0.65,
+            True,
+        ),
+        ("İzlediğiniz için teşekkür ederim.", 0.1063, 0.65, False),
+        ("İzlediğiniz için teşekkür ederim.", 0.0114, 0.59, False),
+        ("İstediğiniz için teşekkür ederim.", 0.0114, 0.65, False),
+    ],
+)
+def test_contextual_silence_filter_requires_all_three_signals(
+    text: str,
+    audio_rms: float,
+    no_speech_prob: float,
+    expected: bool,
+) -> None:
+    assert (
+        is_contextual_silence_hallucination(
+            text,
+            audio_rms=audio_rms,
+            no_speech_prob=no_speech_prob,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("audio_rms", "expected"),
+    [
+        (0.0114, ""),
+        (0.1063, "İzlediğiniz için teşekkür ederim."),
+    ],
+)
+def test_streaming_contextual_filter_uses_input_rms(
+    audio_rms: float,
+    expected: str,
+) -> None:
+    service = DirectWhisperService(
+        model_name="test-model",
+        device="cpu",
+        compute_type="int8",
+        language="tr",
+        beam_size=1,
+    )
+
+    class FakeModel:
+        def transcribe(self, _audio: object, **_kwargs: object) -> tuple[list[object], object]:
+            return [
+                SimpleNamespace(
+                    text="İzlediğiniz için teşekkür ederim.",
+                    no_speech_prob=0.65,
+                    avg_logprob=-0.2,
+                )
+            ], object()
+
+    service._model = FakeModel()
+    audio = np.full(1600, audio_rms, dtype=np.float32)
+
+    assert service.transcribe_array(audio, vad=True) == expected
 
 
 def test_commit_text_falls_back_to_clean_draft_when_final_is_repeated_loop() -> None:

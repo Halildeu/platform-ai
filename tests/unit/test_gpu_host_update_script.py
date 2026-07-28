@@ -539,6 +539,16 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("$readiness.speech_gate.forced_commit_sec", script)
         self.assertIn("$readiness.speech_gate.silence_commit_sec", script)
         self.assertIn("$readiness.speech_gate.tail_overlap_sec", script)
+        self.assertIn("$readiness.speech_gate.contextual_artifact.enabled", script)
+        self.assertIn("$readiness.speech_gate.contextual_artifact.max_rms", script)
+        self.assertIn(
+            "$readiness.speech_gate.contextual_artifact.min_no_speech_prob",
+            script,
+        )
+        self.assertIn(
+            "$readiness.speech_gate.contextual_artifact.requires_text_match",
+            script,
+        )
         self.assertIn("$readiness.speech_gate.vad.live_enabled", script)
         self.assertIn("$readiness.speech_gate.vad.final_enabled", script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)

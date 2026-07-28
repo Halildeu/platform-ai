@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import re
 
+CONTEXTUAL_ARTIFACT_MAX_RMS = 0.02
+CONTEXTUAL_ARTIFACT_MIN_NO_SPEECH_PROB = 0.6
+
 _HALLUCINATION_PATTERNS = [
     re.compile(r".*videoyu be[gğ]enmeyi.*unutmay[iı]n.*", re.IGNORECASE),
     re.compile(r".*bir sonraki videoda g[oö]r[uü][sş][uü]r[uü]z.*", re.IGNORECASE),
@@ -72,10 +75,41 @@ _SOFT_SUFFIXES = (
     "düm",
 )
 _TRAILING_VOWELS = tuple("aeıioöuü")
+_CONTEXTUAL_SILENCE_ARTIFACT = ("izlediğiniz", "için", "teşekkür", "ederim")
 
 
 def _normalized_words(text: str) -> list[str]:
-    return [word.casefold() for word in _WORD_RE.findall(text or "")]
+    return [word.casefold().replace("i\u0307", "i") for word in _WORD_RE.findall(text or "")]
+
+
+def _is_repeated_word_sequence(words: list[str], sequence: tuple[str, ...]) -> bool:
+    if not words or len(words) % len(sequence) != 0:
+        return False
+    return words == list(sequence) * (len(words) // len(sequence))
+
+
+def is_contextual_silence_hallucination(
+    text: str,
+    *,
+    audio_rms: float | None,
+    no_speech_prob: float | None,
+) -> bool:
+    """Suppress a known pause artefact only when all contextual signals agree.
+
+    The phrase remains valid meeting speech by itself. It is rejected only when
+    the decoder emits that exact phrase (including repeated copies) over a
+    low-energy input while also assigning a high probability to no speech.
+    """
+    if audio_rms is None or no_speech_prob is None:
+        return False
+    if not (0.0 <= audio_rms <= CONTEXTUAL_ARTIFACT_MAX_RMS):
+        return False
+    if not (CONTEXTUAL_ARTIFACT_MIN_NO_SPEECH_PROB <= no_speech_prob <= 1.0):
+        return False
+    return _is_repeated_word_sequence(
+        _normalized_words(text),
+        _CONTEXTUAL_SILENCE_ARTIFACT,
+    )
 
 
 def _word_family(word: str) -> str:
