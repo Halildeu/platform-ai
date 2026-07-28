@@ -1423,6 +1423,12 @@ function Invoke-GpuHostRevisionAcceptance {
           [decimal]$script:LiveSttTailOverlapSec -and
         [decimal]$readiness.speech_gate.min_infer_sec -eq
           [decimal]$script:LiveSttMinInferSec -and
+        $readiness.speech_gate.contextual_artifact.enabled -eq $true -and
+        [decimal]$readiness.speech_gate.contextual_artifact.max_rms -eq
+          [decimal]$script:LiveSttContextualArtifactMaxRms -and
+        [decimal]$readiness.speech_gate.contextual_artifact.min_no_speech_prob -eq
+          [decimal]$script:LiveSttContextualArtifactMinNoSpeechProb -and
+        $readiness.speech_gate.contextual_artifact.requires_text_match -eq $true -and
         $readiness.speech_gate.vad.live_enabled -eq $true -and
         $readiness.speech_gate.vad.final_enabled -eq $true -and
         [decimal]$readiness.speech_gate.vad.threshold -eq

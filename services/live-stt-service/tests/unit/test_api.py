@@ -50,6 +50,12 @@ def test_ready_fails_closed_when_preload_is_disabled(client) -> None:  # type: i
             "silence_commit_sec": 0.7,
             "tail_overlap_sec": 0.25,
             "min_infer_sec": 0.35,
+            "contextual_artifact": {
+                "enabled": True,
+                "max_rms": 0.02,
+                "min_no_speech_prob": 0.6,
+                "requires_text_match": True,
+            },
             "vad": {
                 "live_enabled": False,
                 "final_enabled": False,
@@ -78,6 +84,7 @@ def test_ready_exposes_only_public_speech_gate_policy(client) -> None:  # type: 
         "silence_commit_sec",
         "tail_overlap_sec",
         "min_infer_sec",
+        "contextual_artifact",
         "vad",
     }
     serialized = str(gate).lower()

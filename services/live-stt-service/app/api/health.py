@@ -8,6 +8,10 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.core.config import Settings, get_settings
 from app.models.schemas import HealthResponse
+from app.services.hallucination import (
+    CONTEXTUAL_ARTIFACT_MAX_RMS,
+    CONTEXTUAL_ARTIFACT_MIN_NO_SPEECH_PROB,
+)
 from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import streaming_services_healthy
 from app.services.transcribe import get_service
@@ -95,6 +99,12 @@ async def ready(
                 "silence_commit_sec": settings.silence_commit_sec,
                 "tail_overlap_sec": settings.tail_overlap_sec,
                 "min_infer_sec": settings.min_infer_sec,
+                "contextual_artifact": {
+                    "enabled": True,
+                    "max_rms": CONTEXTUAL_ARTIFACT_MAX_RMS,
+                    "min_no_speech_prob": CONTEXTUAL_ARTIFACT_MIN_NO_SPEECH_PROB,
+                    "requires_text_match": True,
+                },
                 "vad": {
                     "live_enabled": settings.stream_live_vad_filter,
                     "final_enabled": settings.stream_final_vad_filter,

@@ -47,6 +47,8 @@ $script:LiveSttForcedCommitSec = "5.0"
 $script:LiveSttSilenceCommitSec = "0.7"
 $script:LiveSttTailOverlapSec = "0.25"
 $script:LiveSttMinInferSec = "0.35"
+$script:LiveSttContextualArtifactMaxRms = "0.02"
+$script:LiveSttContextualArtifactMinNoSpeechProb = "0.6"
 
 $script:LiveSttPreloadRetryWorstCaseSec = $script:LiveSttPreloadRetryBaseSec * (
     [Math]::Pow(2, $script:LiveSttPreloadMaxAttempts - 1) - 1

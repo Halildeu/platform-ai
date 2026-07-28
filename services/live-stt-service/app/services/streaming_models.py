@@ -27,7 +27,10 @@ from typing import Any, cast
 import numpy as np
 
 from app.core.config import Settings
-from app.services.hallucination import is_hallucination
+from app.services.hallucination import (
+    is_contextual_silence_hallucination,
+    is_hallucination,
+)
 from app.services.worker import WorkerCrashedError, WorkerTimeoutError
 
 logger = logging.getLogger(__name__)
@@ -249,13 +252,23 @@ def _finite_float(value: object) -> float | None:
 
 
 def _usable_stream_segment(
-    segment: object, no_speech_threshold: float, log_prob_threshold: float
+    segment: object,
+    no_speech_threshold: float,
+    log_prob_threshold: float,
+    *,
+    audio_rms: float | None = None,
 ) -> bool:
     text = str(getattr(segment, "text", "")).strip()
     if is_hallucination(text):
         return False
 
     no_speech_prob = _finite_float(getattr(segment, "no_speech_prob", None))
+    if is_contextual_silence_hallucination(
+        text,
+        audio_rms=audio_rms,
+        no_speech_prob=no_speech_prob,
+    ):
+        return False
     if no_speech_prob is not None and no_speech_prob > no_speech_threshold:
         return False
 
@@ -362,6 +375,14 @@ class DirectWhisperService:
         """
         self.ensure_model()
         assert self._model is not None
+        measured_audio_rms = (
+            float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
+            if audio.size
+            else 0.0
+        )
+        audio_rms: float | None = (
+            measured_audio_rms if math.isfinite(measured_audio_rms) else None
+        )
         with self._lock:
             segments, _info = self._model.transcribe(  # type: ignore[attr-defined]
                 audio,
@@ -378,7 +399,10 @@ class DirectWhisperService:
                 str(segment.text).strip()
                 for segment in segments
                 if _usable_stream_segment(
-                    segment, self.no_speech_threshold, self.log_prob_threshold
+                    segment,
+                    self.no_speech_threshold,
+                    self.log_prob_threshold,
+                    audio_rms=audio_rms,
                 )
             ).strip()
 

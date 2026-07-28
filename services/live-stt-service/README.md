@@ -113,7 +113,9 @@ Provisioner bu baseline'ı ProgramData'ya kopyalamaz. Yalnız operatörün açı
 verdiği iki değer, non-executable ve ACL-korumalı ProgramData config üzerinden
 `0.0001..0.05` aralığında canonical noktalı decimal olarak override edilebilir.
 Profil kimliği, iki VAD rolü, VAD parametreleri ve inference/window cadence host
-override'ına açık değildir. `/ready.speech_gate` etkin profile, RMS kaynağına
+override'ına açık değildir. Bilinen pause artefaktı yalnız ifade eşleşmesi,
+giriş RMS'i `<=0.02` ve `no_speech_prob >=0.6` birlikte sağlandığında
+bastırılır; ifade tek başına filtrelenmez. `/ready.speech_gate` etkin profile, RMS kaynağına
 (`source-baseline` veya `host-override`), RMS çiftine, cadence'e ve VAD
 parametrelerine transcript/audio/secret taşımadan görünürlük sağlar; `update.ps1`
 bu yüzeyi exact runtime kabulünde fail-closed doğrular.
