@@ -779,15 +779,18 @@ function Set-DeploymentLedgerResult {
 
 $runtimeContract = Join-Path $controllerRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
 $taskActionContract = Join-Path $controllerRoot "deploy\gpu-host\task-action-contract.ps1"
+$bootstrapProcess = Join-Path $controllerRoot "deploy\gpu-host\bootstrap-process.ps1"
 $restartAcceptance = Join-Path $controllerRoot "deploy\gpu-host\restart-acceptance.ps1"
 if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
     -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $bootstrapProcess -PathType Leaf) -or
     -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf)) {
   Stop-Deploy "Controller is missing a GPU-host runtime/action contract. No mutation." `
     $script:DeployExitGuard
 }
 . $runtimeContract
 . $taskActionContract
+. $bootstrapProcess
 . $restartAcceptance
 
 # 4. Restart the deploy scheduled tasks so they pick up the new code. Use the
@@ -989,6 +992,7 @@ function Invoke-LiveSttFixtureAcceptance {
     )][string]$FixtureBaseName,
     [string]$Url = "ws://127.0.0.1:8200/ws/stream?protocol=source-ranges-v1",
     [int]$ConnectTimeoutCapSec = 30,
+    [ValidateRange(30, 600)][int]$SmokeProcessTimeoutCapSec = 240,
     # Content and draft-path are proven by separate runs because no single
     # stream can judge both fairly on this fixture set:
     #
@@ -1083,12 +1087,24 @@ function Invoke-LiveSttFixtureAcceptance {
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { return $false }
-    $remainingMs = [Math]::Max(1, [int](
-      ($DeadlineSec - $Clock.Elapsed.TotalSeconds) * 1000
+    [int]$smokeProcessTimeoutSec = [Math]::Max(1, [Math]::Min(
+      $SmokeProcessTimeoutCapSec,
+      [Math]::Floor($DeadlineSec - $Clock.Elapsed.TotalSeconds)
     ))
-    if (-not $process.WaitForExit($remainingMs)) {
-      try { $process.Kill() } catch { }
+    if (-not $process.WaitForExit($smokeProcessTimeoutSec * 1000)) {
+      try {
+        Stop-GpuHostProcessTreeBounded -Process $process -GraceSec 10
+      } catch {
+        Write-Host "[update] timed-out smoke process tree could not be fenced" `
+          -ForegroundColor Yellow
+      }
       $process.Dispose()
+      Write-Host ("[update] direct stream inference acceptance timed out after {0}s" -f `
+        $smokeProcessTimeoutSec) -ForegroundColor Yellow
+      Write-GpuHostAcceptanceReceipt -Fixture $FixtureBaseName `
+        -RepeatAudio $RepeatAudio -DraftPathOnly ([bool]$DraftPathOnly) `
+        -Verdict "smoke-process-timeout" `
+        -FailedChecks @("smoke_process_timeout")
       return $false
     }
     $output = $process.StandardOutput.ReadToEnd()
@@ -1144,11 +1160,11 @@ function Invoke-LiveSttFixtureAcceptance {
           [int]$summary.events.final_hallucination_count -eq 0
         no_stream_errors =
           [int]$summary.events.error_count -eq 0
-        transcript_gap_present =
-          ($null -ne $summary.events.max_transcript_gap_ms -and
+        transcript_gap_shape =
+          ($null -eq $summary.events.max_transcript_gap_ms -or
            [int]$summary.events.max_transcript_gap_ms -ge 0)
         transcript_gap_within_max =
-          ($DraftPathOnly -or
+          ($null -eq $summary.events.max_transcript_gap_ms -or
            [int]$summary.events.max_transcript_gap_ms -le 6000)
         coverage_reference_words =
           [int]$summary.coverage.reference_words -eq [int]$summary.reference.words

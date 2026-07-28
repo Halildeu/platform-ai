@@ -476,6 +476,21 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         )
         self.assertIn('Reason "readiness-failed"', script)
         self.assertIn("live_stream_smoke.py", script)
+        self.assertIn("bootstrap-process.ps1", script)
+        self.assertIn(
+            "[ValidateRange(30, 600)][int]$SmokeProcessTimeoutCapSec = 240",
+            script,
+        )
+        self.assertIn(
+            "$process.WaitForExit($smokeProcessTimeoutSec * 1000)",
+            script,
+        )
+        self.assertIn(
+            "Stop-GpuHostProcessTreeBounded -Process $process -GraceSec 10",
+            script,
+        )
+        self.assertIn('"smoke-process-timeout"', script)
+        self.assertNotIn("$process.WaitForExit($remainingMs)", script)
         self.assertIn('"--reference-text", $referenceText', script)
         self.assertIn('"sample-tr-cv17-001"', script)
         self.assertIn('"sample-tr-cv17-002"', script)
@@ -508,6 +523,10 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             "$summary.quality_gate.max_word_error_rate -eq $gateMaxWordErrorRate", script
         )
         self.assertIn("$DraftPathOnly -or", script)
+        self.assertIn(
+            "$null -eq $summary.events.max_transcript_gap_ms -or",
+            script,
+        )
         self.assertIn("[int]$summary.events.max_transcript_gap_ms -le 6000", script)
         self.assertIn("$summary.reference.text_sha256_12", script)
         self.assertIn("@($summary.quality_gate.failures).Count -eq 0", script)
@@ -590,6 +609,8 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Acceptance receipt readback failed.", writer)
         # Persisting evidence is never itself a deploy gate.
         self.assertIn("acceptance receipt could not be written", writer)
+        self.assertNotIn("return $receiptPath", writer)
+        self.assertIn("an emitted path plus $false", writer)
         # Bounded history: three runs per deploy on a host nobody prunes.
         self.assertIn("$existing.Count -gt 60", writer)
 

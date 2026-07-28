@@ -83,7 +83,10 @@ function Write-GpuHostAcceptanceReceipt {
         Remove-Item -LiteralPath $stale.FullName -Force -ErrorAction SilentlyContinue
       }
     }
-    return $receiptPath
+    # Do not emit the path to the success pipeline. Callers use this writer
+    # inside boolean acceptance expressions; an emitted path plus $false would
+    # become a truthy object array and bypass a rejected smoke gate.
+    return
   } catch {
     Write-Host ("[update] acceptance receipt could not be written: {0}" -f `
       $_.Exception.GetType().Name) -ForegroundColor Yellow

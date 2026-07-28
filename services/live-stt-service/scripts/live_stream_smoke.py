@@ -36,6 +36,7 @@ DEFAULT_FRAME_MS = 200
 DEFAULT_TAIL_SILENCE_SEC = 1.2
 DEFAULT_TIMEOUT_SEC = 90.0
 DEFAULT_FINAL_WAIT_SEC = 90.0
+MAX_CLOSE_TIMEOUT_SEC = 5.0
 DEFAULT_MIN_FINAL_WORD_COVERAGE = 0.8
 DEFAULT_MIN_REFERENCE_TOKEN_COVERAGE = 0.8
 DEFAULT_MAX_WORD_ERROR_RATE = 0.25
@@ -132,9 +133,7 @@ def validate_transcript_event(
 ) -> None:
     event_type = event.get("type")
     if event_type == "partial":
-        partial_text = (
-            f"{event.get('confirmed', '')} {event.get('tentative', '')}".strip()
-        )
+        partial_text = f"{event.get('confirmed', '')} {event.get('tentative', '')}".strip()
         valid = (
             set(event) == PARTIAL_EVENT_KEYS
             and _is_non_negative_int(event.get("seq"))
@@ -528,7 +527,12 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     last_final_source_end: int | None = None
     eof_sent = asyncio.Event()
 
-    async with websockets.connect(args.url, open_timeout=args.timeout_sec) as websocket:
+    close_timeout_sec = max(0.1, min(MAX_CLOSE_TIMEOUT_SEC, args.timeout_sec))
+    async with websockets.connect(
+        args.url,
+        open_timeout=args.timeout_sec,
+        close_timeout=close_timeout_sec,
+    ) as websocket:
         while ready_at is None:
             event = json.loads(await asyncio.wait_for(websocket.recv(), args.timeout_sec))
             event_type = event.get("type")
@@ -608,22 +612,45 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     frame_samples = int(frame.shape[0])
                     samples_sent += frame_samples
                     try:
-                        await websocket.send(frame.astype(np.float32).tobytes())
+                        await asyncio.wait_for(
+                            websocket.send(frame.astype(np.float32).tobytes()),
+                            timeout=args.timeout_sec,
+                        )
                     except Exception:
                         samples_sent -= frame_samples
                         raise
                     await asyncio.sleep(args.frame_ms / 1000)
 
                 try:
-                    await websocket.send(json.dumps({"type": "eof"}, separators=(",", ":")))
                     eof_sent.set()
+                    try:
+                        await asyncio.wait_for(
+                            websocket.send(
+                                json.dumps({"type": "eof"}, separators=(",", ":"))
+                            ),
+                            timeout=args.timeout_sec,
+                        )
+                    except Exception:
+                        eof_sent.clear()
+                        raise
                     await asyncio.wait_for(receiver_task, timeout=args.final_wait_sec)
                 except TimeoutError:
                     errors.append("terminal_drain_timeout")
             finally:
                 if not receiver_task.done():
                     receiver_task.cancel()
-                await asyncio.gather(receiver_task, return_exceptions=True)
+                done, pending = await asyncio.wait(
+                    {receiver_task},
+                    timeout=close_timeout_sec,
+                )
+                if pending:
+                    transport = getattr(websocket, "transport", None)
+                    if transport is not None:
+                        transport.abort()
+                    raise SmokeError("stream receiver cancellation timed out")
+                for task in done:
+                    if not task.cancelled():
+                        task.exception()
 
     return build_summary(
         url=args.url,

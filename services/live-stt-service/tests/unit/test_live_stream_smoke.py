@@ -99,6 +99,7 @@ def test_partial_contract_rejects_empty_or_junk_content(
 
 def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
     smoke = _load_smoke_module()
+    connect_kwargs: dict[str, float] = {}
     events = [
         {"type": "loading", "stage": "live_model"},
         {"type": "loading", "stage": "final_model"},
@@ -164,7 +165,11 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-    monkeypatch.setattr(smoke.websockets, "connect", lambda *_args, **_kwargs: FakeConnection())
+    def fake_connect(*_args: object, **kwargs: float) -> FakeConnection:
+        connect_kwargs.update(kwargs)
+        return FakeConnection()
+
+    monkeypatch.setattr(smoke.websockets, "connect", fake_connect)
     monkeypatch.setattr(
         smoke,
         "audio_frames",
@@ -191,6 +196,65 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
     assert isinstance(websocket.sent[0], bytes)
     assert websocket.sent[1] == '{"type":"eof"}'
     assert summary["fixture"]["streamed_samples"] == 16_000
+    assert connect_kwargs["open_timeout"] == args.timeout_sec
+    assert connect_kwargs["close_timeout"] == smoke.MAX_CLOSE_TIMEOUT_SEC
+
+
+def test_run_smoke_bounds_a_stalled_frame_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smoke = _load_smoke_module()
+    events = [
+        {
+            "type": "ready",
+            "sample_rate": 16_000,
+            "live_model": "fixture-live",
+            "final_model": "fixture-final",
+            "partial_mode": "stable-v1",
+            "protocol": "source-ranges-v1",
+            "capabilities": ["eof", "source-ranges-v1"],
+            "supports_eof": True,
+            "terminal_timeout_ms": 60_000,
+        }
+    ]
+
+    class FakeWebsocket:
+        async def recv(self) -> str:
+            return json.dumps(events.pop(0))
+
+        async def send(self, _payload: bytes | str) -> None:
+            await asyncio.Event().wait()
+
+    class FakeConnection:
+        async def __aenter__(self) -> FakeWebsocket:
+            return FakeWebsocket()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(smoke.websockets, "connect", lambda *_args, **_kwargs: FakeConnection())
+    monkeypatch.setattr(
+        smoke,
+        "audio_frames",
+        lambda audio, **_kwargs: [np.asarray(audio[:1], dtype=np.float32)],
+    )
+    args = smoke.parse_args(
+        [
+            "--wav",
+            str(FIXTURE),
+            "--tail-silence-sec",
+            "0",
+            "--frame-ms",
+            "1",
+            "--timeout-sec",
+            "0.05",
+        ]
+    )
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        asyncio.run(smoke.run_smoke(args))
+    assert time.monotonic() - started < 1.0
 
 
 def test_transcript_contract_rejects_final_without_source_range() -> None:
