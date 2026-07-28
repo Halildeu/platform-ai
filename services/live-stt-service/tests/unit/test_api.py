@@ -38,6 +38,10 @@ def test_ready_fails_closed_when_preload_is_disabled(client) -> None:  # type: i
             "live": {"device": "cuda", "compute_type": "int8"},
             "final": {"device": "cuda", "compute_type": "float16"},
         },
+        "decoder": {
+            "live_beam_size": 1,
+            "final_beam_size": 1,
+        },
         "speech_gate": {
             "profile": "development-unpinned",
             "rms_source": "source-baseline",

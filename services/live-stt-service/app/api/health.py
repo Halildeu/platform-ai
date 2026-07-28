@@ -87,6 +87,10 @@ async def ready(
                     "compute_type": settings.final_compute_type,
                 },
             },
+            "decoder": {
+                "live_beam_size": settings.live_beam_size,
+                "final_beam_size": settings.final_beam_size,
+            },
             "speech_gate": {
                 "profile": settings.speech_gate_profile,
                 "rms_source": settings.speech_gate_rms_source,
