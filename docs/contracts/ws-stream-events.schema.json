@@ -36,11 +36,12 @@
           "type": "array",
           "prefixItems": [
             { "const": "eof" },
-            { "const": "source-ranges-v1" }
+            { "const": "source-ranges-v1" },
+            { "const": "context-v1" }
           ],
           "items": false,
           "minItems": 2,
-          "maxItems": 2
+          "maxItems": 3
         },
         "supports_eof": { "const": true },
         "terminal_timeout_ms": {

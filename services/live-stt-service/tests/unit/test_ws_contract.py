@@ -95,7 +95,7 @@ def test_handshake_events_match_contract(monkeypatch: pytest.MonkeyPatch) -> Non
     assert second["stage"] == "final_model"
     assert ready["partial_mode"] == "stable-v1"
     assert ready["protocol"] == "source-ranges-v1"
-    assert ready["capabilities"] == ["eof", "source-ranges-v1"]
+    assert ready["capabilities"] == ["eof", "source-ranges-v1", "context-v1"]
     assert ready["supports_eof"] is True
     assert ready["terminal_timeout_ms"] == 46_000
 
@@ -142,6 +142,37 @@ def test_eof_without_audio_emits_ack_then_drained(monkeypatch: pytest.MonkeyPatc
     assert_valid(eof_ack)
     assert_valid(drained)
     assert [eof_ack["type"], drained["type"]] == ["eof_ack", "drained"]
+
+
+def test_context_control_before_audio_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_fast_stream_timing(monkeypatch)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_text('{"type":"context","terms":["Çağrı Öztürk","Proje-24"]}')
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        drained = ws.receive_json()
+
+    assert [eof_ack["type"], drained["type"]] == ["eof_ack", "drained"]
+
+
+def test_second_context_control_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_fast_stream_timing(monkeypatch)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_text('{"type":"context","terms":["Proje-24"]}')
+        ws.send_text('{"type":"context","terms":["İkinci"]}')
+        error = ws.receive_json()
+        assert_valid(error)
+        assert error == {"type": "error", "msg": "invalid_client_control"}
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
 
 
 def test_eof_does_not_wait_for_stalled_draft_inference(
@@ -652,10 +683,13 @@ def _fixture_audio(name: str) -> np.ndarray[tuple[int, ...], np.dtype[np.float32
             assert fixture.getnchannels() == 1
             assert fixture.getsampwidth() == 2
             source_rate = fixture.getframerate()
-            audio = np.frombuffer(
-                fixture.readframes(fixture.getnframes()),
-                dtype="<i2",
-            ).astype(np.float32) / 32768.0
+            audio = (
+                np.frombuffer(
+                    fixture.readframes(fixture.getnframes()),
+                    dtype="<i2",
+                ).astype(np.float32)
+                / 32768.0
+            )
         assert source_rate == 48_000
         audio = audio[::3]
         start = int(float(spec["start_sec"]) * 16_000)

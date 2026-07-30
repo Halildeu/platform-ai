@@ -123,12 +123,19 @@ Bu profil bir runtime kabul iddiası değildir: pause, normal ses ve quiet/whisp
 sentetik fixture matrisi aynı pinned commit/model üzerinde GPU gate'ini geçmeden
 promotion kanıtı sayılmaz.
 
-`ready` ayrıca `capabilities=["eof"]` ve `supports_eof=true` ilan eder. İstemci
-ses göndermeyi bitirdiğinde yalnızca `{"type":"eof"}` metin kontrolünü bir kez
-gönderir. Sunucu önce `eof_ack`, buffer'da kalan konuşma varsa son `final`
-event(ler)ini ve bütün final gönderimleri bittikten sonra `drained` üretir.
-Bilinmeyen metin, ikinci EOF ve EOF sonrası ses paketi bağlantıyı fail-closed
-sonlandırır; disconnect veya terminal final-model hatası `drained` üretemez.
+`ready` ayrıca `capabilities=["eof","source-ranges-v1","context-v1"]` ve
+`supports_eof=true` ilan eder. `context-v1` kullanan istemci, ilk ses frame'inden
+önce en fazla bir kez `{"type":"context","terms":["..."]}` kontrolü gönderebilir.
+Terimler oturum kapsamlıdır; Unicode normalize edilir, deduplicate edilir ve
+adet/tek-terim/toplam karakter sınırlarından geçirilir. Değerler URL, env, log
+veya global model state'ine yazılmaz. Bilinmeyen kontrol, ikinci context, ses
+başladıktan sonra context, ikinci EOF ve EOF sonrası ses paketi bağlantıyı
+fail-closed sonlandırır.
+
+İstemci ses göndermeyi bitirdiğinde yalnızca `{"type":"eof"}` metin kontrolünü
+bir kez gönderir. Sunucu önce `eof_ack`, buffer'da kalan konuşma varsa son
+`final` event(ler)ini ve bütün final gönderimleri bittikten sonra `drained`
+üretir. Disconnect veya terminal final-model hatası `drained` üretemez.
 
 Transcript-free canlı stream smoke:
 

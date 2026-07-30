@@ -19,6 +19,7 @@ import pytest
 from app.api import stream as stream_api
 from app.api.stream import (
     _append_recent_final_text,
+    _decode_client_control,
     _drop_leading_tail_overlap,
     _merge_final_transcript,
     _merge_rolling_partial,
@@ -61,6 +62,24 @@ def test_hallucination_filter_blocks_known_artifacts() -> None:
     assert is_hallucination("Altyazı M.K.") is True
     assert is_hallucination("Videoyu beğenmeyi unutmayın arkadaşlar") is True
     assert is_hallucination("Neroba") is True
+
+
+def test_context_control_is_bounded_and_normalized() -> None:
+    control_type, hotwords = _decode_client_control(
+        '{"type":"context","terms":["  Çağrı Öztürk ","Proje-24"]}'
+    )
+
+    assert control_type == "context"
+    assert hotwords == "Çağrı Öztürk, Proje-24"
+
+
+def test_direct_stream_passes_context_to_faster_whisper() -> None:
+    service = DirectWhisperService("tiny", "cpu", "int8", "tr", 1)
+
+    service.transcribe_array(np.ones(160, dtype=np.float32), False, "Çağrı Öztürk")
+
+    assert service._model is not None
+    assert service._model.__class__.last_kwargs["hotwords"] == "Çağrı Öztürk"
 
 
 def test_preload_failure_rejects_websocket_without_lazy_model_load(
@@ -889,9 +908,7 @@ def test_transcribe_failure_invalidates_generation_until_explicit_recovery(
     service._process = FakeProcess()
     service._task_queue = queue.Queue(maxsize=1)
     service._result_queue = queue.Queue(maxsize=1)
-    service._result_queue.put(
-        {"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"}
-    )
+    service._result_queue.put({"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"})
     service._model_loaded = True
     service._restart_blocked = False
     service._generation = 11
@@ -966,11 +983,14 @@ def test_transcribe_failure_invalidates_generation_until_explicit_recovery(
         assert recovered_generation != 11
         assert service.model_loaded is True
         assert streaming_services_healthy() is True
-        assert service.transcribe_loaded_array(
-            np.ones(1600, dtype=np.float32),
-            vad=False,
-            expected_generation=recovered_generation,
-        ) == "recovered"
+        assert (
+            service.transcribe_loaded_array(
+                np.ones(1600, dtype=np.float32),
+                vad=False,
+                expected_generation=recovered_generation,
+            )
+            == "recovered"
+        )
         assert operations == ["load", "transcribe"]
     finally:
         streaming_models_module._supervised_live_services.clear()
@@ -1010,9 +1030,7 @@ def test_loaded_transcribe_failure_invalidates_generation_without_stream_retry(
     service._process = FakeProcess()
     service._task_queue = queue.Queue(maxsize=1)
     service._result_queue = queue.Queue(maxsize=1)
-    service._result_queue.put(
-        {"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"}
-    )
+    service._result_queue.put({"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"})
     service._model_loaded = True
     service._restart_blocked = False
     service._generation = 7
@@ -1145,9 +1163,7 @@ def test_streaming_model_pin_rejects_linked_root(tmp_path) -> None:
         pytest.skip("symlink creation is unavailable")
 
     with pytest.raises(ValueError, match="link or reparse point"):
-        streaming_models_module._resolve_stream_model_source(
-            "floating-name", str(linked_root), ""
-        )
+        streaming_models_module._resolve_stream_model_source("floating-name", str(linked_root), "")
 
 
 def test_streaming_model_pin_recognizes_windows_reparse_attribute() -> None:

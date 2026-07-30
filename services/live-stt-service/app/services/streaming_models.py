@@ -51,9 +51,7 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 def _is_link_or_reparse(file_stat: os.stat_result) -> bool:
     """Detect Unix links and Windows reparse points without following them."""
     attributes = int(getattr(file_stat, "st_file_attributes", 0))
-    return stat.S_ISLNK(file_stat.st_mode) or bool(
-        attributes & _FILE_ATTRIBUTE_REPARSE_POINT
-    )
+    return stat.S_ISLNK(file_stat.st_mode) or bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _stable_stat_identity(file_stat: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -239,9 +237,7 @@ def _resolve_stream_model_source(
     """Resolve and verify the exact streaming model bytes before GPU allocation."""
     if model_path is None:
         return model_name
-    return str(
-        _verify_stream_model_directory(model_path, model_sha256, model_tree_sha256)
-    )
+    return str(_verify_stream_model_directory(model_path, model_sha256, model_tree_sha256))
 
 
 def _finite_float(value: object) -> float | None:
@@ -363,7 +359,10 @@ class DirectWhisperService:
         return self._model is not None
 
     def transcribe_array(
-        self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
+        self,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+        hotwords: str | None = None,
     ) -> str:
         """Transcribe a float32 PCM buffer; returns joined text.
 
@@ -376,13 +375,9 @@ class DirectWhisperService:
         self.ensure_model()
         assert self._model is not None
         measured_audio_rms = (
-            float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
-            if audio.size
-            else 0.0
+            float(np.sqrt(np.mean(np.square(audio, dtype=np.float64)))) if audio.size else 0.0
         )
-        audio_rms: float | None = (
-            measured_audio_rms if math.isfinite(measured_audio_rms) else None
-        )
+        audio_rms: float | None = measured_audio_rms if math.isfinite(measured_audio_rms) else None
         with self._lock:
             segments, _info = self._model.transcribe(  # type: ignore[attr-defined]
                 audio,
@@ -394,6 +389,7 @@ class DirectWhisperService:
                 no_speech_threshold=self.no_speech_threshold,
                 log_prob_threshold=self.log_prob_threshold,
                 compression_ratio_threshold=self.compression_ratio_threshold,
+                hotwords=hotwords,
             )
             return " ".join(
                 str(segment.text).strip()
@@ -438,7 +434,13 @@ def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_q
                 if not isinstance(raw, bytes):
                     raise ValueError("streaming audio payload is invalid")
                 audio = np.frombuffer(raw, dtype="<f4").copy()
-                text = service.transcribe_array(audio, bool(task.get("vad", False)))
+                raw_hotwords = task.get("hotwords")
+                hotwords = raw_hotwords if isinstance(raw_hotwords, str) else None
+                text = service.transcribe_array(
+                    audio,
+                    bool(task.get("vad", False)),
+                    hotwords,
+                )
             result_queue.put({"job_id": job_id, "ok": True, "text": text})
         except BaseException as exc:  # noqa: BLE001 - inference reports class only
             response: dict[str, object] = {
@@ -477,9 +479,7 @@ class _SupervisedWhisperService:
                 settings.final_model_sha256 if is_final else settings.live_model_sha256
             ),
             "model_tree_sha256": (
-                settings.final_model_tree_sha256
-                if is_final
-                else settings.live_model_tree_sha256
+                settings.final_model_tree_sha256 if is_final else settings.live_model_tree_sha256
             ),
             "device": settings.final_device if is_final else settings.live_device,
             "compute_type": (
@@ -594,6 +594,7 @@ class _SupervisedWhisperService:
         deadline: float,
         audio: bytes | None = None,
         vad: bool = False,
+        hotwords: str | None = None,
         restart_on_failure: bool = True,
         required_generation: int | None = None,
         require_loaded: bool = False,
@@ -635,6 +636,7 @@ class _SupervisedWhisperService:
                     "job_id": job_id,
                     "audio": audio,
                     "vad": vad,
+                    "hotwords": hotwords,
                 },
                 timeout=remaining,
             )
@@ -756,7 +758,10 @@ class _SupervisedWhisperService:
             self._call_lock.release()
 
     def transcribe_array(
-        self, audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]], vad: bool
+        self,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+        hotwords: str | None = None,
     ) -> str:
         contiguous = np.ascontiguousarray(audio, dtype=np.float32)
         queue_deadline = time.monotonic() + self._load_timeout_sec + self._timeout_sec
@@ -771,6 +776,7 @@ class _SupervisedWhisperService:
                 deadline=time.monotonic() + self._timeout_sec,
                 audio=contiguous.astype("<f4", copy=False).tobytes(),
                 vad=vad,
+                hotwords=hotwords,
                 required_generation=ready_generation,
                 require_loaded=True,
             )
@@ -782,6 +788,7 @@ class _SupervisedWhisperService:
         audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
         vad: bool,
         expected_generation: int,
+        hotwords: str | None = None,
     ) -> str:
         """Decode only with the worker generation proven ready for this stream.
 
@@ -798,6 +805,7 @@ class _SupervisedWhisperService:
                 deadline=deadline,
                 audio=contiguous.astype("<f4", copy=False).tobytes(),
                 vad=vad,
+                hotwords=hotwords,
                 restart_on_failure=False,
                 required_generation=expected_generation,
                 require_loaded=True,
