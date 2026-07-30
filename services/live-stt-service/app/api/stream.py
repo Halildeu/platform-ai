@@ -38,6 +38,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
+from app.services.contextual_bias import ContextualBiasError, normalize_context_terms
 from app.services.hallucination import is_hallucination
 from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import (
@@ -63,6 +64,7 @@ SHORT_FINAL_PRESERVE_MAX_RATIO = 0.65
 SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO = 0.45
 EOF_CONTROL = {"type": "eof"}
 STREAM_PROTOCOL = "source-ranges-v1"
+CONTEXT_CAPABILITY = "context-v1"
 
 # Draft-pass circuit breaker (#279).
 #
@@ -553,13 +555,25 @@ class StreamProtocolError(ValueError):
     """Client violated the bounded live-stream control protocol."""
 
 
-def _decode_terminal_control(value: str) -> None:
+def _decode_client_control(value: str) -> tuple[str, str | None]:
     try:
         payload = json.loads(value)
     except (json.JSONDecodeError, TypeError) as exc:
         raise StreamProtocolError("invalid_client_control") from exc
-    if payload != EOF_CONTROL:
+    if payload == EOF_CONTROL:
+        return "eof", None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"type", "terms"}
+        or payload.get("type") != "context"
+        or not isinstance(payload.get("terms"), list)
+    ):
         raise StreamProtocolError("invalid_client_control")
+    try:
+        context = normalize_context_terms(payload["terms"])
+    except ContextualBiasError as exc:
+        raise StreamProtocolError("invalid_client_control") from exc
+    return "context", context.hotwords
 
 
 def _transcribe_with_stream_generation(
@@ -567,12 +581,17 @@ def _transcribe_with_stream_generation(
     audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
     vad: bool,
     expected_generation: int | None,
+    hotwords: str | None = None,
 ) -> str:
     """Decode without allowing a supervised worker reload inside a live stream."""
     if isinstance(service, SupervisedLiveWhisperService | SupervisedFinalWhisperService):
         if expected_generation is None:
             raise WorkerCrashedError("streaming worker readiness is unavailable")
+        if hotwords is not None:
+            return service.transcribe_loaded_array(audio, vad, expected_generation, hotwords)
         return service.transcribe_loaded_array(audio, vad, expected_generation)
+    if hotwords is not None:
+        return service.transcribe_array(audio, vad, hotwords)
     return service.transcribe_array(audio, vad)
 
 
@@ -591,8 +610,7 @@ async def stream_endpoint(
     if settings.stream_preload_models:
         preload_state = getattr(websocket.app.state, "streaming_preload", None)
         preload_ready = (
-            isinstance(preload_state, StreamingPreloadState)
-            and preload_state.snapshot().ready
+            isinstance(preload_state, StreamingPreloadState) and preload_state.snapshot().ready
         )
         if not preload_ready:
             await websocket.send_json({"type": "error", "msg": "service_not_ready"})
@@ -650,7 +668,7 @@ async def stream_endpoint(
             "final_model": settings.final_model_name,
             "partial_mode": "stable-v1",
             "protocol": STREAM_PROTOCOL,
-            "capabilities": ["eof", STREAM_PROTOCOL],
+            "capabilities": ["eof", STREAM_PROTOCOL, CONTEXT_CAPABILITY],
             "supports_eof": True,
             # EOF cancels (without awaiting) an in-flight draft/final coroutine.
             # The terminal decode uses only the model proven ready above and its
@@ -680,6 +698,8 @@ async def stream_endpoint(
     last_final_text = ""
     recent_final_text = ""
     total_samples_received = 0
+    context_received = False
+    context_hotwords: str | None = None
     buffer_start_sample = 0
     finalized_through_sample = 0
     buffer_lock = asyncio.Lock()
@@ -883,6 +903,7 @@ async def stream_endpoint(
                 audio,
                 settings.stream_final_vad_filter,
                 final_worker_generation,
+                context_hotwords,
             )
             text = (
                 await final_call
@@ -1002,6 +1023,7 @@ async def stream_endpoint(
                 live_audio,
                 settings.stream_live_vad_filter,
                 live_worker_generation,
+                context_hotwords,
             )
             draft = (
                 await draft_call
@@ -1285,7 +1307,13 @@ async def stream_endpoint(
 
             text = message.get("text")
             if text is not None:
-                _decode_terminal_control(text)
+                control_type, control_hotwords = _decode_client_control(text)
+                if control_type == "context":
+                    if context_received or total_samples_received > 0:
+                        raise StreamProtocolError("invalid_client_control")
+                    context_received = True
+                    context_hotwords = control_hotwords
+                    continue
                 terminal_deadline = asyncio.get_running_loop().time() + terminal_timeout_sec
                 await run_terminal_protocol()
                 return
