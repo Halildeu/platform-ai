@@ -535,7 +535,17 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn(
             "$summary.quality_gate.max_word_error_rate -eq $gateMaxWordErrorRate", script
         )
-        self.assertIn("$DraftPathOnly -or", script)
+        # The repeated/tiled run proves only that the draft path emits. Its
+        # smoke command disables the wall-clock transcript-gap gate, so the
+        # updater read-back must preserve that mode boundary. Single-pass
+        # content runs still enforce 6000 ms.
+        self.assertIn(
+            "transcript_gap_within_max =\n"
+            "          ($DraftPathOnly -or\n"
+            "           $null -eq $summary.events.max_transcript_gap_ms -or\n"
+            "           [int]$summary.events.max_transcript_gap_ms -le 6000)",
+            script,
+        )
         self.assertIn(
             "$null -eq $summary.events.max_transcript_gap_ms -or",
             script,

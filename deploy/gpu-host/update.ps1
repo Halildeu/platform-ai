@@ -1170,7 +1170,8 @@ function Invoke-LiveSttFixtureAcceptance {
           ($null -eq $summary.events.max_transcript_gap_ms -or
            [int]$summary.events.max_transcript_gap_ms -ge 0)
         transcript_gap_within_max =
-          ($null -eq $summary.events.max_transcript_gap_ms -or
+          ($DraftPathOnly -or
+           $null -eq $summary.events.max_transcript_gap_ms -or
            [int]$summary.events.max_transcript_gap_ms -le 6000)
         coverage_reference_words =
           [int]$summary.coverage.reference_words -eq [int]$summary.reference.words
