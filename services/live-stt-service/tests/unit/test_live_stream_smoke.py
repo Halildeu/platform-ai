@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import gc
 import importlib.util
@@ -18,6 +19,7 @@ from websockets.frames import Close
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = ROOT / "scripts" / "live_stream_smoke.py"
+STREAM_API_PATH = ROOT / "app" / "api" / "stream.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "sample-tr-cv17-001.wav"
 
 
@@ -39,6 +41,24 @@ def test_default_url_negotiates_source_range_protocol() -> None:
     assert args.final_wait_sec == 90.0
 
 
+def test_ready_capabilities_match_server_contract() -> None:
+    smoke = _load_smoke_module()
+    assignments = {
+        node.targets[0].id: ast.literal_eval(node.value)
+        for node in ast.parse(STREAM_API_PATH.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in {"STREAM_PROTOCOL", "CONTEXT_CAPABILITY"}
+    }
+
+    assert [
+        "eof",
+        assignments["STREAM_PROTOCOL"],
+        assignments["CONTEXT_CAPABILITY"],
+    ] == smoke.READY_CAPABILITIES
+
+
 def test_ready_contract_requires_exact_protocol_and_terminal_budget() -> None:
     smoke = _load_smoke_module()
     ready = {
@@ -48,7 +68,7 @@ def test_ready_contract_requires_exact_protocol_and_terminal_budget() -> None:
         "final_model": "fixture-final",
         "partial_mode": "stable-v1",
         "protocol": "source-ranges-v1",
-        "capabilities": ["eof", "source-ranges-v1"],
+        "capabilities": ["eof", "source-ranges-v1", "context-v1"],
         "supports_eof": True,
         "terminal_timeout_ms": 60_000,
     }
@@ -110,7 +130,7 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
             "final_model": "fixture-final",
             "partial_mode": "stable-v1",
             "protocol": "source-ranges-v1",
-            "capabilities": ["eof", "source-ranges-v1"],
+            "capabilities": ["eof", "source-ranges-v1", "context-v1"],
             "supports_eof": True,
             "terminal_timeout_ms": 60_000,
         },
@@ -212,7 +232,7 @@ def test_run_smoke_bounds_a_stalled_frame_send(
             "final_model": "fixture-final",
             "partial_mode": "stable-v1",
             "protocol": "source-ranges-v1",
-            "capabilities": ["eof", "source-ranges-v1"],
+            "capabilities": ["eof", "source-ranges-v1", "context-v1"],
             "supports_eof": True,
             "terminal_timeout_ms": 60_000,
         }
@@ -345,7 +365,7 @@ def test_run_smoke_rejects_terminal_ack_before_local_eof(
             "final_model": "fixture-final",
             "partial_mode": "stable-v1",
             "protocol": "source-ranges-v1",
-            "capabilities": ["eof", "source-ranges-v1"],
+            "capabilities": ["eof", "source-ranges-v1", "context-v1"],
             "supports_eof": True,
             "terminal_timeout_ms": 60_000,
         },
@@ -440,7 +460,7 @@ def test_run_smoke_rejects_invalid_post_ack_sequence(
             "final_model": "fixture-final",
             "partial_mode": "stable-v1",
             "protocol": "source-ranges-v1",
-            "capabilities": ["eof", "source-ranges-v1"],
+            "capabilities": ["eof", "source-ranges-v1", "context-v1"],
             "supports_eof": True,
             "terminal_timeout_ms": 60_000,
         },
@@ -658,7 +678,7 @@ def test_main_retrieves_concurrent_receiver_failure_without_stderr_leak(
             "final_model": "fixture-final",
             "partial_mode": "stable-v1",
             "protocol": "source-ranges-v1",
-            "capabilities": ["eof", "source-ranges-v1"],
+            "capabilities": ["eof", "source-ranges-v1", "context-v1"],
             "supports_eof": True,
             "terminal_timeout_ms": 60_000,
         },
