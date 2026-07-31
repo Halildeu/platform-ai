@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
 import time
 import wave
@@ -1110,6 +1111,152 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
     )
     assert second_final["source_start_sample"] < first_final["source_end_sample"]
     assert second_final["source_end_sample"] > first_final["source_end_sample"]
+
+
+def test_eof_never_silently_trims_uncommitted_audio_to_final_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final window is decode context, not permission to discard source audio."""
+
+    settings = Settings(
+        live_infer_interval_ms=5_000,
+        live_window_sec=1.0,
+        final_window_sec=1.0,
+        forced_commit_sec=60.0,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.01,
+        silence_rms=0.001,
+        min_speech_rms=0.001,
+        min_infer_sec=0.01,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
+
+    final_sample_counts: list[int] = []
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        del vad
+        if _is_final_service(self):
+            final_sample_counts.append(int(audio.size))
+            return "Kesintisiz konuşma korunuyor."
+        return ""
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    frame_count = 20
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        for _ in range(frame_count):
+            ws.send_bytes(_speech_frame())
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        final = ws.receive_json()
+        drained = ws.receive_json()
+
+    assert eof_ack == {"type": "eof_ack"}
+    assert_valid(final)
+    assert final["type"] == "final"
+    assert drained == {"type": "drained"}
+    expected_samples = frame_count * 1024
+    assert final_sample_counts == [expected_samples]
+    assert final["source_start_sample"] == 0
+    assert final["source_end_sample"] == expected_samples
+
+
+def test_slow_live_draft_never_blocks_forced_final_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final scheduling must not wait for the lower-priority live decoder."""
+
+    settings = Settings(
+        live_infer_interval_ms=1,
+        live_window_sec=1.0,
+        final_window_sec=6.0,
+        forced_commit_sec=0.1,
+        silence_commit_sec=5.0,
+        tail_overlap_sec=0.01,
+        silence_rms=0.001,
+        min_speech_rms=0.001,
+        min_infer_sec=0.01,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
+
+    draft_started = threading.Event()
+    release_draft = threading.Event()
+    final_started = threading.Event()
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        vad: bool,
+    ) -> str:
+        del audio, vad
+        if _is_final_service(self):
+            final_started.set()
+            return "Final taslaktan bağımsız."
+        draft_started.set()
+        release_draft.wait(timeout=1.0)
+        return "Yavaş canlı taslak"
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    final_started_before_draft_release = False
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes(_speech_frame())
+        assert draft_started.wait(timeout=1.0)
+        for _ in range(3):
+            ws.send_bytes(_speech_frame())
+        final_started_before_draft_release = final_started.wait(timeout=0.35)
+        release_draft.set()
+        final = ws.receive_json()
+
+    assert final_started_before_draft_release is True
+    assert_valid(final)
+    assert final["type"] == "final"
+    assert final["text"] == "Final taslaktan bağımsız."
+
+
+def test_uncommitted_audio_overflow_fails_closed_instead_of_trimming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        forced_commit_sec=0.1,
+        stream_final_timeout_sec=1.0,
+        stream_transport_timeout_sec=0.05,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
+
+    max_samples = math.ceil(
+        (
+            settings.forced_commit_sec
+            + settings.stream_final_timeout_sec
+            + settings.stream_transport_timeout_sec
+        )
+        * 16_000
+    )
+    oversized_frame = np.ones(max_samples + 1, dtype=np.float32).tobytes()
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+        ws.send_bytes(oversized_frame)
+        error = ws.receive_json()
+        while error["type"] == "partial":
+            error = ws.receive_json()
+
+    assert_valid(error)
+    assert error == {"type": "error", "msg": "audio_backpressure"}
 
 
 def test_stream_appends_growing_no_overlap_live_windows(
