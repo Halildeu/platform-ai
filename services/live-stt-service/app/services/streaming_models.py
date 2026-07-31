@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
 
 from app.core.config import Settings
 from app.services.hallucination import (
@@ -272,6 +273,27 @@ def _usable_stream_segment(
     return avg_logprob is None or avg_logprob >= log_prob_threshold
 
 
+def _prepare_vad_audio(
+    audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+    vad_parameters: dict[str, float | int],
+) -> np.ndarray[tuple[int, ...], np.dtype[np.float32]] | None:
+    """Apply pinned Silero VAD once and reject an empty speech window pre-decode.
+
+    faster-whisper 1.0.3 continues feature extraction and decoding after its
+    internal VAD removes every sample. That empty decode can emit a plausible
+    sentence with a low ``no_speech_prob``, bypassing the contextual fallback
+    filter. Returning ``None`` here makes the no-speech decision authoritative
+    before Whisper runs; non-empty speech is passed to Whisper without a second
+    VAD pass.
+    """
+    options = VadOptions(**vad_parameters)
+    speech_chunks = get_speech_timestamps(audio, options)
+    if not speech_chunks:
+        return None
+    filtered = collect_chunks(audio, speech_chunks)
+    return np.asarray(filtered, dtype=np.float32)
+
+
 class DirectWhisperService:
     """Lazy-loaded, lock-guarded faster-whisper wrapper for streaming."""
 
@@ -379,12 +401,18 @@ class DirectWhisperService:
         )
         audio_rms: float | None = measured_audio_rms if math.isfinite(measured_audio_rms) else None
         with self._lock:
+            decode_audio = audio
+            if vad:
+                filtered_audio = _prepare_vad_audio(audio, self.vad_parameters)
+                if filtered_audio is None:
+                    return ""
+                decode_audio = filtered_audio
             segments, _info = self._model.transcribe(  # type: ignore[attr-defined]
-                audio,
+                decode_audio,
                 language=self.language,
                 beam_size=self.beam_size,
-                vad_filter=vad,
-                vad_parameters=self.vad_parameters if vad else None,
+                vad_filter=False,
+                vad_parameters=None,
                 condition_on_previous_text=self.condition_on_previous_text,
                 no_speech_threshold=self.no_speech_threshold,
                 log_prob_threshold=self.log_prob_threshold,

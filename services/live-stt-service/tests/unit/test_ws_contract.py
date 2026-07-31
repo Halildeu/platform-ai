@@ -707,7 +707,30 @@ def _audio_frames(audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]]) -> I
 
 
 class _SileroBackedDecoderStub:
-    """Run the real pinned VAD and stub only the expensive Whisper decode."""
+    """Stub only the expensive Whisper decode after the service's real VAD."""
+
+    def __init__(self, role: str, calls: list[dict[str, object]]) -> None:
+        self.role = role
+        self.calls = calls
+
+    def transcribe(
+        self,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        **kwargs: object,
+    ) -> tuple[list[object], object]:
+        assert kwargs["vad_filter"] is False
+        assert kwargs["vad_parameters"] is None
+        self.calls.append(
+            {
+                "role": self.role,
+                "decoder_samples": audio.size,
+            }
+        )
+        return [SimpleNamespace(text="Sessiz masaustu konusmasi")], object()
+
+
+class _EmptyVadHallucinationDecoderStub:
+    """Reproduce faster-whisper 1.0.3 decoding after VAD removes all audio."""
 
     def __init__(self, role: str, calls: list[dict[str, object]]) -> None:
         self.role = role
@@ -727,14 +750,18 @@ class _SileroBackedDecoderStub:
         self.calls.append(
             {
                 "role": self.role,
-                "parameters": raw_parameters,
-                "input_samples": audio.size,
                 "decoder_samples": decoder_audio.size,
             }
         )
         if decoder_audio.size == 0:
-            return [], object()
-        return [SimpleNamespace(text="Sessiz masaustu konusmasi")], object()
+            return [
+                SimpleNamespace(
+                    text="İzlediğiniz için teşekkür ederim.",
+                    no_speech_prob=0.2,
+                    avg_logprob=-0.2,
+                )
+            ], object()
+        return [SimpleNamespace(text="Beklenmeyen konuşma")], object()
 
 
 def _install_silero_decoder_stub(
@@ -743,6 +770,16 @@ def _install_silero_decoder_stub(
 ) -> None:
     def install(self: streaming_models.DirectWhisperService) -> None:
         self._model = _SileroBackedDecoderStub(self.role, calls)
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", install)
+
+
+def _install_empty_vad_hallucination_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[dict[str, object]],
+) -> None:
+    def install(self: streaming_models.DirectWhisperService) -> None:
+        self._model = _EmptyVadHallucinationDecoderStub(self.role, calls)
 
     monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", install)
 
@@ -869,7 +906,7 @@ def test_stream_default_gate_accepts_quiet_desktop_microphone(
 def test_stream_production_gate_suppresses_above_floor_pause_noise_with_vad(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Real pinned Silero rejects above-floor non-speech in both WS roles."""
+    """No-speech VAD windows must never reach the Whisper decoder."""
     settings = Settings(
         live_infer_interval_ms=1,
         live_window_sec=2.0,
@@ -883,7 +920,7 @@ def test_stream_production_gate_suppresses_above_floor_pause_noise_with_vad(
     )
     app.dependency_overrides[get_settings] = lambda: settings
     decode_calls: list[dict[str, object]] = []
-    _install_silero_decoder_stub(monkeypatch, decode_calls)
+    _install_empty_vad_hallucination_stub(monkeypatch, decode_calls)
 
     with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
         for _ in range(3):
@@ -903,13 +940,13 @@ def test_stream_production_gate_suppresses_above_floor_pause_noise_with_vad(
         "min_silence_duration_ms": 300,
         "speech_pad_ms": 100,
     }
-    assert {call["role"] for call in decode_calls} == {"live", "final"}
-    assert all(call["parameters"] == expected_vad for call in decode_calls)
-    assert all(
-        isinstance(call["input_samples"], int) and call["input_samples"] > 0
-        for call in decode_calls
-    )
-    assert all(call["decoder_samples"] == 0 for call in decode_calls)
+    assert expected_vad == {
+        "threshold": settings.stream_vad_threshold,
+        "min_speech_duration_ms": settings.stream_vad_min_speech_duration_ms,
+        "min_silence_duration_ms": settings.stream_vad_min_silence_duration_ms,
+        "speech_pad_ms": settings.stream_vad_speech_pad_ms,
+    }
+    assert decode_calls == []
 
 
 def test_stream_production_gate_keeps_quiet_speech_with_pinned_final_vad(

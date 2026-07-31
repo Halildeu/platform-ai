@@ -63,6 +63,7 @@ def test_ready_fails_closed_when_preload_is_disabled(client) -> None:  # type: i
             "vad": {
                 "live_enabled": False,
                 "final_enabled": False,
+                "empty_window_action": "skip_decode",
                 "threshold": 0.35,
                 "min_speech_duration_ms": 100,
                 "min_silence_duration_ms": 300,

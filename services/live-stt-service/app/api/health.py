@@ -112,6 +112,7 @@ async def ready(
                 "vad": {
                     "live_enabled": settings.stream_live_vad_filter,
                     "final_enabled": settings.stream_final_vad_filter,
+                    "empty_window_action": "skip_decode",
                     "threshold": settings.stream_vad_threshold,
                     "min_speech_duration_ms": settings.stream_vad_min_speech_duration_ms,
                     "min_silence_duration_ms": settings.stream_vad_min_silence_duration_ms,
