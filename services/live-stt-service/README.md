@@ -93,6 +93,12 @@ Varsayılan canlı UX ayarları:
 | `STT_TAIL_OVERLAP_SEC` | `0.25` | Forced commit sınırında kelime kaybını azaltan kısa ses kuyruğu |
 | `STT_SILENCE_RMS` / `STT_MIN_SPEECH_RMS` | `0.0005` / `0.0005` | Sessizlik/konuşma hysteresis bandı; WebAudio mikrofon RMS seviyesiyle uyumlu |
 
+VAD açıkken pinned Silero tek kez ve Whisper decode öncesinde çalışır. Silero
+hiç konuşma parçası bulamazsa pencere modele gönderilmez; `/ready` bu davranışı
+`speech_gate.vad.empty_window_action=skip_decode` olarak yayımlar. Konuşma
+bulunan pencereler filtrelenmiş sesle dekode edilir; böylece sessiz pencere
+hallüsinasyonu engellenirken düşük seviyeli gerçek konuşma korunur.
+
 Partial event'ler aynı `seq` ile gelir; client aynı transcript satırını
 günceller. Ardışık rolling pencerelerde yerel uzlaşma gören kelimeler
 `confirmed`, hâlâ düzeltilebilir kuyruk `tentative` alanında taşınır. Consumer

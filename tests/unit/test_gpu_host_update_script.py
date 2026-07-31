@@ -593,6 +593,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         )
         self.assertIn("$readiness.speech_gate.vad.live_enabled", script)
         self.assertIn("$readiness.speech_gate.vad.final_enabled", script)
+        self.assertIn('$readiness.speech_gate.vad.empty_window_action -eq "skip_decode"', script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
 
     def test_acceptance_evidence_outlives_the_console_that_produced_it(

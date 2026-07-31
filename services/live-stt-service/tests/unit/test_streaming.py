@@ -272,7 +272,7 @@ def test_streaming_contextual_filter_uses_input_rms(
     service._model = FakeModel()
     audio = np.full(1600, audio_rms, dtype=np.float32)
 
-    assert service.transcribe_array(audio, vad=True) == expected
+    assert service.transcribe_array(audio, vad=False) == expected
 
 
 def test_commit_text_falls_back_to_clean_draft_when_final_is_repeated_loop() -> None:
@@ -1419,7 +1419,9 @@ def test_stream_decode_fails_when_pinned_generation_is_missing() -> None:
         )
 
 
-def test_direct_stream_service_passes_role_specific_beam_size() -> None:
+def test_direct_stream_service_passes_role_specific_beam_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = DirectWhisperService(
         model_name="test-model",
         device="cpu",
@@ -1443,6 +1445,16 @@ def test_direct_stream_service_passes_role_specific_beam_size() -> None:
 
     fake_model = FakeModel()
     service._model = fake_model
+    observed_vad_parameters: list[dict[str, float | int]] = []
+
+    def pass_vad_audio(
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        parameters: dict[str, float | int],
+    ) -> np.ndarray[tuple[int, ...], np.dtype[np.float32]]:
+        observed_vad_parameters.append(parameters)
+        return audio
+
+    monkeypatch.setattr(streaming_models_module, "_prepare_vad_audio", pass_vad_audio)
 
     result = service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
 
@@ -1451,17 +1463,28 @@ def test_direct_stream_service_passes_role_specific_beam_size() -> None:
     assert fake_model.kwargs["beam_size"] == 5
     assert fake_model.kwargs["language"] == "tr"
     assert fake_model.kwargs["condition_on_previous_text"] is False
-    assert fake_model.kwargs["vad_filter"] is True
-    assert fake_model.kwargs["vad_parameters"] == {
-        "threshold": 0.35,
-        "min_speech_duration_ms": 100,
-        "min_silence_duration_ms": 300,
-        "speech_pad_ms": 100,
-    }
+    assert observed_vad_parameters == [
+        {
+            "threshold": 0.35,
+            "min_speech_duration_ms": 100,
+            "min_silence_duration_ms": 300,
+            "speech_pad_ms": 100,
+        }
+    ]
+    assert fake_model.kwargs["vad_filter"] is False
+    assert fake_model.kwargs["vad_parameters"] is None
 
     service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=False)
     assert fake_model.kwargs["vad_filter"] is False
     assert fake_model.kwargs["vad_parameters"] is None
+    assert observed_vad_parameters == [
+        {
+            "threshold": 0.35,
+            "min_speech_duration_ms": 100,
+            "min_silence_duration_ms": 300,
+            "speech_pad_ms": 100,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1525,7 +1548,7 @@ def test_direct_stream_service_filters_low_confidence_silence_decode() -> None:
     service._model = FakeModel()
 
     assert (
-        service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
+        service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=False)
         == "Toplantıya devam edelim."
     )
 
@@ -1569,7 +1592,7 @@ def test_transcribe_array_passes_configured_decode_thresholds_to_model() -> None
     fake_model = FakeModel()
     service._model = fake_model
 
-    service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
+    service.transcribe_array(np.zeros(1600, dtype=np.float32), vad=False)
 
     assert fake_model.kwargs is not None
     assert fake_model.kwargs["no_speech_threshold"] == 0.5
@@ -1601,8 +1624,8 @@ def test_raising_no_speech_threshold_keeps_segment_default_would_drop() -> None:
         svc._model = FakeModel()
         return svc
 
-    dropped = _service(0.75).transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
-    kept = _service(0.9).transcribe_array(np.zeros(1600, dtype=np.float32), vad=True)
+    dropped = _service(0.75).transcribe_array(np.zeros(1600, dtype=np.float32), vad=False)
+    kept = _service(0.9).transcribe_array(np.zeros(1600, dtype=np.float32), vad=False)
     assert dropped == ""
     assert kept == "Devam edelim."
 

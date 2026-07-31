@@ -1454,6 +1454,7 @@ function Invoke-GpuHostRevisionAcceptance {
         $readiness.speech_gate.contextual_artifact.requires_text_match -eq $true -and
         $readiness.speech_gate.vad.live_enabled -eq $true -and
         $readiness.speech_gate.vad.final_enabled -eq $true -and
+        $readiness.speech_gate.vad.empty_window_action -eq "skip_decode" -and
         [decimal]$readiness.speech_gate.vad.threshold -eq
           [decimal]$script:LiveSttStreamVadThreshold -and
         [int]$readiness.speech_gate.vad.min_speech_duration_ms -eq
