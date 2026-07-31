@@ -1063,6 +1063,8 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
     monkeypatch.setattr(streaming_models.DirectWhisperService, "ensure_model", lambda self: None)
 
     final_sample_counts: list[int] = []
+    first_final_started = threading.Event()
+    release_first_final = threading.Event()
 
     def fake_transcribe(
         self: streaming_models.DirectWhisperService,
@@ -1072,7 +1074,8 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
         if _is_final_service(self):
             final_sample_counts.append(int(audio.size))
             if len(final_sample_counts) == 1:
-                time.sleep(0.12)
+                first_final_started.set()
+                release_first_final.wait(timeout=1.0)
             return f"Final {len(final_sample_counts)}."
         return ""
 
@@ -1082,23 +1085,23 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
         for _ in range(3):
             assert_valid(ws.receive_json())
 
-        for _ in range(20):
+        for _ in range(2):
             ws.send_bytes(_speech_frame())
-        time.sleep(0.12)
-        ws.send_bytes(_speech_frame())
-
+        assert first_final_started.wait(timeout=1.0)
         for _ in range(8):
             ws.send_bytes(_speech_frame())
-            time.sleep(0.005)
-
+        release_first_final.set()
         first_final = ws.receive_json()
-        ws.send_bytes(_speech_frame())
-        time.sleep(0.12)
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
         second_final = ws.receive_json()
+        drained = ws.receive_json()
 
     for event in (first_final, second_final):
         assert_valid(event)
         assert event["type"] == "final"
+    assert eof_ack == {"type": "eof_ack"}
+    assert drained == {"type": "drained"}
     assert len(final_sample_counts) >= 2
     assert final_sample_counts[1] >= 8 * 1024
     assert (
@@ -1111,6 +1114,7 @@ def test_stream_preserves_audio_received_while_slow_final_clips_buffer(
     )
     assert second_final["source_start_sample"] < first_final["source_end_sample"]
     assert second_final["source_end_sample"] > first_final["source_end_sample"]
+    assert second_final["source_end_sample"] == 10 * 1024
 
 
 def test_eof_never_silently_trims_uncommitted_audio_to_final_window(
