@@ -39,7 +39,10 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
 from app.services.contextual_bias import ContextualBiasError, normalize_context_terms
-from app.services.hallucination import is_hallucination
+from app.services.hallucination import (
+    is_hallucination,
+    strip_terminal_contextual_artifact,
+)
 from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import (
     DirectWhisperService,
@@ -377,8 +380,8 @@ def _append_recent_final_text(previous_text: str, emitted_text: str) -> str:
 
 def _select_partial_text(draft: str, sent_draft: str) -> str | None:
     """Keep live drafts word-progressive so the UI does not erase spoken words."""
-    candidate = (draft or "").strip()
-    previous = (sent_draft or "").strip()
+    candidate = strip_terminal_contextual_artifact(draft)
+    previous = strip_terminal_contextual_artifact(sent_draft)
 
     if not candidate or candidate == previous:
         return None
@@ -515,7 +518,7 @@ def _select_partial_parts(
     confirmed: str,
     tentative: str,
 ) -> tuple[str, str] | None:
-    candidate = (draft or "").strip()
+    candidate = strip_terminal_contextual_artifact(draft)
     if not candidate or is_hallucination(candidate):
         return None
 
@@ -532,8 +535,8 @@ def _select_partial_parts(
 
 def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
     """Choose a KVKK-safe final payload without letting hallucinations poison state."""
-    candidate = (final_text or "").strip()
-    fallback = (fallback_draft or "").strip()
+    candidate = strip_terminal_contextual_artifact(final_text)
+    fallback = strip_terminal_contextual_artifact(fallback_draft)
     fallback_ok = bool(fallback and not is_hallucination(fallback))
     short_final_artifact = bool(
         candidate and is_hallucination(candidate) and _word_count(candidate) <= 1
@@ -708,6 +711,17 @@ async def stream_endpoint(
     transport_disabled = asyncio.Event()
     inference_phase = "idle"
     terminal_deadline: float | None = None
+    # Preserve every source sample until it is committed. This is a memory
+    # safety bound, not a rolling decode window: exceeding it fails closed
+    # instead of silently deleting uncommitted meeting audio.
+    max_uncommitted_samples = math.ceil(
+        (
+            settings.forced_commit_sec
+            + settings.stream_final_timeout_sec
+            + settings.stream_transport_timeout_sec
+        )
+        * SAMPLE_RATE
+    )
 
     def consume_task_result(task: asyncio.Task[object]) -> None:
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -806,10 +820,8 @@ async def stream_endpoint(
                 confirmed_draft = ""
                 tentative_draft = ""
 
-                # The receive loop may trim the rolling buffer while the final
-                # model is still decoding. Use absolute sample coordinates so
-                # audio received during that slow final pass is not mistaken for
-                # already-committed audio and dropped.
+                # Use absolute sample coordinates so audio received during a
+                # slow final pass is not mistaken for already-committed audio.
                 appended_start = max(0, commit_end_sample - buffer_start_sample)
                 appended = (
                     buffer[appended_start:].copy()
@@ -829,9 +841,6 @@ async def stream_endpoint(
                     if tail.size or appended.size
                     else np.zeros(0, dtype=np.float32)
                 )
-                max_samples = int(settings.final_window_sec * SAMPLE_RATE)
-                if buffer.shape[0] > max_samples:
-                    buffer = buffer[-max_samples:]
 
                 now = time.time()
                 buffer_start_t = now - (buffer.size / SAMPLE_RATE) if buffer.size else None
@@ -1104,13 +1113,38 @@ async def stream_endpoint(
             text_len=len(draft),
         )
 
+    draft_task: asyncio.Task[None] | None = None
+
+    async def finish_draft_task(*, cancel: bool) -> None:
+        """Reap or cancel the lower-priority draft before a durable commit."""
+        nonlocal draft_task, inference_phase
+
+        task = draft_task
+        draft_task = None
+        if task is None:
+            return
+        if cancel and not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            if not cancel:
+                raise
+        finally:
+            if inference_phase == "draft":
+                inference_phase = "idle"
+
     async def inference_loop() -> None:
-        nonlocal inference_phase, last_live_infer_t
+        nonlocal draft_task, inference_phase, last_live_infer_t
 
         while not stop_inference.is_set():
             await asyncio.sleep(0.05)
             if stop_inference.is_set():
                 break
+
+            if draft_task is not None and draft_task.done():
+                await finish_draft_task(cancel=False)
+
             now = time.time()
             commit_reason: str | None = None
 
@@ -1134,6 +1168,10 @@ async def stream_endpoint(
                     last_live_infer_t = now
 
             if commit_reason is not None:
+                # Draft text is advisory. A slow live decode must never delay a
+                # durable commit or let the receive buffer outgrow its source
+                # timeline, so cancel its await before using the final worker.
+                await finish_draft_task(cancel=True)
                 inference_phase = "commit"
                 try:
                     await commit_current(commit_reason)
@@ -1142,13 +1180,10 @@ async def stream_endpoint(
                 last_live_infer_t = time.time()
                 continue
 
-            if should_infer:
+            if should_infer and draft_task is None:
                 inference_phase = "draft"
-                try:
-                    await infer_live_partial()
-                finally:
-                    inference_phase = "idle"
-                last_live_infer_t = time.time()
+                draft_task = asyncio.create_task(infer_live_partial())
+                last_live_infer_t = now
 
     inference_task = asyncio.create_task(inference_loop())
     terminal_task: asyncio.Task[None] | None = None
@@ -1174,6 +1209,7 @@ async def stream_endpoint(
 
     async def stop_background_inference() -> None:
         stop_inference.set()
+        await finish_draft_task(cancel=True)
         if inference_task.done():
             await inference_task
             return
@@ -1339,10 +1375,8 @@ async def stream_endpoint(
                     buffer_start_t = now
 
                 buffer = np.concatenate([buffer, samples])
-                max_samples = int(settings.final_window_sec * SAMPLE_RATE)
-                if buffer.shape[0] > max_samples:
-                    buffer = buffer[-max_samples:]
-                    buffer_start_t = now - (buffer.size / SAMPLE_RATE)
+                if buffer.shape[0] > max_uncommitted_samples:
+                    raise StreamProtocolError("audio_backpressure")
                 buffer_start_sample = max(0, total_samples_received - buffer.shape[0])
 
                 buffer_age = now - buffer_start_t
@@ -1386,4 +1420,5 @@ async def stream_endpoint(
         stop_inference.set()
         transport_disabled.set()
         cancel_without_join(terminal_task)
+        cancel_without_join(draft_task)
         cancel_without_join(inference_task)

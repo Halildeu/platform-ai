@@ -76,6 +76,10 @@ _SOFT_SUFFIXES = (
 )
 _TRAILING_VOWELS = tuple("aeıioöuü")
 _CONTEXTUAL_SILENCE_ARTIFACT = ("izlediğiniz", "için", "teşekkür", "ederim")
+_TERMINAL_CONTEXTUAL_ARTIFACT_RE = re.compile(
+    r"(?:\s*izlediğiniz\s+için\s+teşekkür\s+ederim[.!?…]*)+\s*$",
+    re.IGNORECASE,
+)
 
 
 def _normalized_words(text: str) -> list[str]:
@@ -110,6 +114,18 @@ def is_contextual_silence_hallucination(
         _normalized_words(text),
         _CONTEXTUAL_SILENCE_ARTIFACT,
     )
+
+
+def strip_terminal_contextual_artifact(text: str) -> str:
+    """Remove the observed decoder artefact only as a terminal suffix.
+
+    Attended TEST evidence showed the phrase both as a standalone weak-noise
+    decode and appended to otherwise valid speech. Contextual VAD probabilities
+    cannot reliably distinguish those outputs. The product therefore suppresses
+    this exact phrase at the terminal boundary while preserving broader
+    ``teşekkür ederim`` speech and non-terminal uses of the phrase.
+    """
+    return _TERMINAL_CONTEXTUAL_ARTIFACT_RE.sub("", (text or "").strip()).rstrip()
 
 
 def _word_family(word: str) -> str:

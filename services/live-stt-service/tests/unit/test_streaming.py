@@ -35,6 +35,7 @@ from app.services import streaming_models as streaming_models_module
 from app.services.hallucination import (
     is_contextual_silence_hallucination,
     is_hallucination,
+    strip_terminal_contextual_artifact,
 )
 from app.services.model_preload import StreamingPreloadState
 from app.services.streaming_models import (
@@ -206,6 +207,43 @@ def test_hallucination_filter_passes_real_speech() -> None:
             "Çok değişik şeyler yapabiliyor musun sen de?"
         )
         is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("İzlediğiniz için teşekkür ederim.", ""),
+        (
+            "Bütçe onaylandı. İzlediğiniz için teşekkür ederim.",
+            "Bütçe onaylandı.",
+        ),
+        (
+            "İzlediğiniz için teşekkür ederim. İzlediğiniz için teşekkür ederim.",
+            "",
+        ),
+        (
+            "İzlediğiniz için teşekkür ederim demek istemiyorum.",
+            "İzlediğiniz için teşekkür ederim demek istemiyorum.",
+        ),
+        ("Sessiz konuşma kaybolmamalı.", "Sessiz konuşma kaybolmamalı."),
+    ],
+)
+def test_terminal_contextual_artifact_is_removed_without_broad_phrase_filtering(
+    text: str,
+    expected: str,
+) -> None:
+    assert strip_terminal_contextual_artifact(text) == expected
+
+
+def test_stream_selection_never_publishes_terminal_contextual_artifact() -> None:
+    assert _select_partial_text("İzlediğiniz için teşekkür ederim.", "") is None
+    assert (
+        _select_commit_text(
+            "Bütçe onaylandı. İzlediğiniz için teşekkür ederim.",
+            "",
+        )
+        == "Bütçe onaylandı."
     )
 
 
