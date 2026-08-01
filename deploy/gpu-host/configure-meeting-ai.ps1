@@ -330,7 +330,7 @@ function New-TranscriptReadyActivation {
         (Get-Item -LiteralPath $trustRootSource -Force).Length -gt 1048576) {
         throw "Transcript-ready permit trust-root source is missing or too large."
     }
-    if ($ExpectedTrustRootSha256 -notmatch '^[0-9a-f]{64}$') {
+    if ($ExpectedTrustRootSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw "Transcript-ready expected trust-root fingerprint is invalid."
     }
     $trustRootSha256 = Get-MeetingAiFileSha256 `
