@@ -748,7 +748,6 @@ async def stream_endpoint(
     recent_final_text = ""
     total_samples_received = 0
     context_received = False
-    context_hotwords: str | None = None
     buffer_start_sample = 0
     finalized_through_sample = 0
     buffer_lock = asyncio.Lock()
@@ -1096,7 +1095,10 @@ async def stream_endpoint(
                 live_audio,
                 settings.stream_live_vad_filter,
                 live_worker_generation,
-                context_hotwords,
+                # Meeting metadata is accepted for protocol compatibility, but
+                # faster-whisper hotwords can stall and recycle the live worker.
+                # Keep both draft and authoritative decode content-independent.
+                None,
             )
             draft = (
                 await draft_call
@@ -1407,12 +1409,11 @@ async def stream_endpoint(
 
             text = message.get("text")
             if text is not None:
-                control_type, control_hotwords = _decode_client_control(text)
+                control_type, _control_hotwords = _decode_client_control(text)
                 if control_type == "context":
                     if context_received or total_samples_received > 0:
                         raise StreamProtocolError("invalid_client_control")
                     context_received = True
-                    context_hotwords = control_hotwords
                     continue
                 terminal_deadline = asyncio.get_running_loop().time() + terminal_timeout_sec
                 await run_terminal_protocol()
