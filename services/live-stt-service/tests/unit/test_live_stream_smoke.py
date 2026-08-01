@@ -39,6 +39,7 @@ def test_default_url_negotiates_source_range_protocol() -> None:
 
     assert args.url.endswith("/ws/stream?protocol=source-ranges-v1")
     assert args.final_wait_sec == 90.0
+    assert args.context_term == []
 
 
 def test_ready_capabilities_match_server_contract() -> None:
@@ -95,9 +96,7 @@ def test_ready_contract_requires_exact_protocol_and_terminal_budget() -> None:
         ("Altyazı", "M.K."),
     ],
 )
-def test_partial_contract_rejects_empty_or_junk_content(
-    confirmed: str, tentative: str
-) -> None:
+def test_partial_contract_rejects_empty_or_junk_content(confirmed: str, tentative: str) -> None:
     smoke = _load_smoke_module()
     event = {
         "type": "partial",
@@ -201,6 +200,10 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
         [
             "--wav",
             str(FIXTURE),
+            "--context-term",
+            "Çağrı Öztürk",
+            "--context-term",
+            "Proje-24",
             "--tail-silence-sec",
             "0",
             "--final-wait-sec",
@@ -212,9 +215,20 @@ def test_run_smoke_validates_real_fake_websocket_handshake(monkeypatch: pytest.M
 
     assert summary["ok"] is True
     assert summary["events"]["terminal_sequence"] == ["eof_ack", "drained"]
-    assert len(websocket.sent) == 2
-    assert isinstance(websocket.sent[0], bytes)
-    assert websocket.sent[1] == '{"type":"eof"}'
+    assert len(websocket.sent) == 3
+    assert json.loads(str(websocket.sent[0])) == {
+        "type": "context",
+        "terms": ["Çağrı Öztürk", "Proje-24"],
+    }
+    assert isinstance(websocket.sent[1], bytes)
+    assert websocket.sent[2] == '{"type":"eof"}'
+    assert summary["context"] == {
+        "enabled": True,
+        "term_count": 2,
+        "terms_logged": False,
+    }
+    assert "Çağrı" not in json.dumps(summary, ensure_ascii=False)
+    assert "Proje-24" not in json.dumps(summary, ensure_ascii=False)
     assert summary["fixture"]["streamed_samples"] == 16_000
     assert connect_kwargs["open_timeout"] == args.timeout_sec
     assert connect_kwargs["close_timeout"] == smoke.MAX_CLOSE_TIMEOUT_SEC
