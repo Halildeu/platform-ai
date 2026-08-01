@@ -962,7 +962,10 @@ async def stream_endpoint(
                 audio,
                 settings.stream_final_vad_filter,
                 final_worker_generation,
-                context_hotwords,
+                # Context is a low-confidence UI hint for timely live names.
+                # Keep the authoritative final pass unbiased so an unrelated
+                # meeting title cannot become durable transcript text.
+                None,
             )
             text = (
                 await final_call

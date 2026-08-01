@@ -160,6 +160,50 @@ def test_context_control_before_audio_is_accepted(monkeypatch: pytest.MonkeyPatc
     assert [eof_ack["type"], drained["type"]] == ["eof_ack", "drained"]
 
 
+def test_context_biases_live_draft_but_not_authoritative_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fast_stream_timing(monkeypatch)
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        _audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+        hotwords: str | None = None,
+    ) -> str:
+        calls.append((self.role, hotwords))
+        return "Baglamdan bagimsiz kalici metin."
+
+    monkeypatch.setattr(
+        streaming_models.DirectWhisperService,
+        "transcribe_array",
+        fake_transcribe,
+    )
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_text('{"type":"context","terms":["Cagri Ozturk"]}')
+        ws.send_bytes(_speech_frame())
+        partial = ws.receive_json()
+        ws.send_text('{"type":"eof"}')
+        eof_ack = receive_terminal_ack(ws)
+        final = ws.receive_json()
+        drained = ws.receive_json()
+
+    assert partial["type"] == "partial"
+    assert [eof_ack["type"], final["type"], drained["type"]] == [
+        "eof_ack",
+        "final",
+        "drained",
+    ]
+    assert any(role == "live" and hotwords == "Cagri Ozturk" for role, hotwords in calls)
+    assert any(role == "final" and hotwords is None for role, hotwords in calls)
+    assert all(hotwords is None for role, hotwords in calls if role == "final")
+
+
 def test_second_context_control_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_fast_stream_timing(monkeypatch)
 
