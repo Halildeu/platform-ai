@@ -160,7 +160,7 @@ def test_context_control_before_audio_is_accepted(monkeypatch: pytest.MonkeyPatc
     assert [eof_ack["type"], drained["type"]] == ["eof_ack", "drained"]
 
 
-def test_context_biases_live_draft_but_not_authoritative_final(
+def test_context_metadata_never_biases_whisper_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_fast_stream_timing(monkeypatch)
@@ -199,9 +199,9 @@ def test_context_biases_live_draft_but_not_authoritative_final(
         "final",
         "drained",
     ]
-    assert any(role == "live" and hotwords == "Cagri Ozturk" for role, hotwords in calls)
+    assert any(role == "live" for role, _hotwords in calls)
     assert any(role == "final" and hotwords is None for role, hotwords in calls)
-    assert all(hotwords is None for role, hotwords in calls if role == "final")
+    assert all(hotwords is None for _role, hotwords in calls)
 
 
 def test_second_context_control_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
