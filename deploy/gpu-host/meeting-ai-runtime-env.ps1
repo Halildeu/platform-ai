@@ -370,7 +370,7 @@ function Read-MeetingAiConfigFile {
         }
         $name = $line.Substring(0, $separator).Trim()
         $value = $line.Substring($separator + 1).Trim()
-        if ($name -notmatch '^[A-Z][A-Z0-9_]*$') {
+        if ($name -cnotmatch '^[A-Z][A-Z0-9_]*$') {
             throw "Runtime config line $lineNumber has an invalid key name."
         }
         if (-not $schema.ContainsKey($name)) {
@@ -578,17 +578,17 @@ function Assert-MeetingAiConfigValues {
         "transcript:analysis-job-capability:issue") {
         throw "MAI_TRANSCRIPT_SERVICE_CAPABILITY_SCOPE has an unexpected permission."
     }
-    if ($Values["MAI_READY_EXPECTED_GITOPS_COMMIT"] -notmatch '^[0-9a-f]{40}$') {
+    if ($Values["MAI_READY_EXPECTED_GITOPS_COMMIT"] -cnotmatch '^[0-9a-f]{40}$') {
         throw "MAI_READY_EXPECTED_GITOPS_COMMIT must be a lowercase full Git SHA."
     }
-    if ($Values["MAI_READY_EXPECTED_POLICY_SHA256"] -notmatch '^[0-9a-f]{64}$') {
+    if ($Values["MAI_READY_EXPECTED_POLICY_SHA256"] -cnotmatch '^[0-9a-f]{64}$') {
         throw "MAI_READY_EXPECTED_POLICY_SHA256 must be a lowercase SHA-256 digest."
     }
-    if ($Values["MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"] -notmatch
+    if ($Values["MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST"] -cnotmatch
         '^sha256:[0-9a-f]{64}$') {
         throw "MAI_READY_EXPECTED_PRODUCER_IMAGE_DIGEST must be an immutable image digest."
     }
-    if ($Values["MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256"] -notmatch
+    if ($Values["MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256"] -cnotmatch
         '^[0-9a-f]{64}$') {
         throw "MAI_READY_EXPECTED_PERMIT_TRUST_ROOT_SHA256 must be a lowercase SHA-256 digest."
     }
@@ -820,7 +820,7 @@ function Assert-TranscriptReadyPermitFile {
         -Path $TrustRootPath -Purpose "Transcript-ready permit trust root"
     Assert-MeetingAiAcl -Path $permitFull
     Assert-MeetingAiAcl -Path $trustRootFull
-    if ($ExpectedTrustRootSha256 -notmatch '^[0-9a-f]{64}$') {
+    if ($ExpectedTrustRootSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw "Transcript-ready expected trust-root fingerprint is invalid."
     }
     $repoFull = Resolve-FixedLocalPath -Path $RepoRoot -Purpose "Platform-ai repository"
@@ -872,7 +872,7 @@ function Assert-TranscriptReadyPermitFile {
         throw "Platform-ai repository identity could not be read."
     }
     $repoCommit = "$($headResult.Output[0])".Trim().ToLowerInvariant()
-    if ($repoCommit -notmatch '^[0-9a-f]{40}$') {
+    if ($repoCommit -cnotmatch '^[0-9a-f]{40}$') {
         throw "Platform-ai repository identity could not be read."
     }
     $dirtyResult = Invoke-MeetingAiGitCapture -GitArgs @(

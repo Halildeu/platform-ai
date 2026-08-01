@@ -1093,6 +1093,36 @@ try {
     Set-Acl -LiteralPath $unknown -AclObject (New-MeetingAiAcl)
     Assert-ThrowsLike { Read-MeetingAiConfigFile -Path $unknown } "unknown key"
 
+    $previousCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+    $previousUiCulture = [Threading.Thread]::CurrentThread.CurrentUICulture
+    try {
+        $turkishCulture = [Globalization.CultureInfo]::GetCultureInfo("tr-TR")
+        [Threading.Thread]::CurrentThread.CurrentCulture = $turkishCulture
+        [Threading.Thread]::CurrentThread.CurrentUICulture = $turkishCulture
+        $turkishValues = Read-MeetingAiConfigFile -Path $configPath
+        Assert-True ($turkishValues.ContainsKey("MAI_INGESTION_ENABLED")) `
+            "ASCII runtime keys must remain valid under the Turkish culture."
+
+        $invalidTurkish = Join-Path $runtimeRoot "invalid-turkish-key.env"
+        $dottedUpperI = [char]0x0130
+        $invalidTurkishText = $configText.Replace(
+            "MAI_INGESTION_ENABLED",
+            ("MA{0}_INGESTION_ENABLED" -f $dottedUpperI)
+        )
+        [IO.File]::WriteAllText(
+            $invalidTurkish,
+            $invalidTurkishText,
+            (New-Object Text.UTF8Encoding($false))
+        )
+        Set-Acl -LiteralPath $invalidTurkish -AclObject (New-MeetingAiAcl)
+        Assert-ThrowsLike {
+            Read-MeetingAiConfigFile -Path $invalidTurkish
+        } "invalid key name"
+    } finally {
+        [Threading.Thread]::CurrentThread.CurrentCulture = $previousCulture
+        [Threading.Thread]::CurrentThread.CurrentUICulture = $previousUiCulture
+    }
+
     Write-Host "meeting-ai Windows runtime contract: PASS"
 } finally {
     Clear-MeetingAiManagedProcessEnvironment
