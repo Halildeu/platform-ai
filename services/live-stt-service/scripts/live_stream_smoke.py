@@ -388,6 +388,7 @@ def build_summary(
     min_reference_token_coverage: float = DEFAULT_MIN_REFERENCE_TOKEN_COVERAGE,
     max_word_error_rate: float = DEFAULT_MAX_WORD_ERROR_RATE,
     repeat_audio: int = 1,
+    context_term_count: int = 0,
 ) -> dict[str, Any]:
     final_events = [event for event in transcript_events if event["type"] == "final"]
     partial_events = [event for event in transcript_events if event["type"] == "partial"]
@@ -454,6 +455,11 @@ def build_summary(
             "streamed_duration_ms": int(effective_streamed_samples / TARGET_SAMPLE_RATE * 1000),
         },
         "reference": reference,
+        "context": {
+            "enabled": context_term_count > 0,
+            "term_count": context_term_count,
+            "terms_logged": False,
+        },
         "latency": {
             "ready_ms": ready_at_ms,
             "first_partial_ms": first_partial_at_ms,
@@ -549,6 +555,17 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                 break
 
         if ready_at is not None:
+            if args.context_term:
+                await asyncio.wait_for(
+                    websocket.send(
+                        json.dumps(
+                            {"type": "context", "terms": args.context_term},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    ),
+                    timeout=args.timeout_sec,
+                )
 
             async def receiver() -> None:
                 nonlocal last_final_seq, last_final_source_end
@@ -625,9 +642,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     eof_sent.set()
                     try:
                         await asyncio.wait_for(
-                            websocket.send(
-                                json.dumps({"type": "eof"}, separators=(",", ":"))
-                            ),
+                            websocket.send(json.dumps({"type": "eof"}, separators=(",", ":"))),
                             timeout=args.timeout_sec,
                         )
                     except Exception:
@@ -674,6 +689,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         final_transcript_text=" ".join(final_transcript_parts),
         min_reference_token_coverage=args.min_reference_token_coverage,
         max_word_error_rate=args.max_word_error_rate,
+        context_term_count=len(args.context_term),
     )
 
 
@@ -706,6 +722,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--reference-text",
         default=None,
         help="Optional reference TXT; defaults to sibling .txt when present. Text is hashed only.",
+    )
+    parser.add_argument(
+        "--context-term",
+        action="append",
+        default=[],
+        help=(
+            "Optional context-v1 term sent before audio. Repeat for multiple terms. "
+            "The summary records only whether context was enabled and the term count."
+        ),
     )
     parser.add_argument(
         "--min-final-word-coverage",
