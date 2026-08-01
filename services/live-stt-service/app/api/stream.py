@@ -37,6 +37,13 @@ import numpy as np
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from starlette.concurrency import run_in_threadpool
 
+from app.api.metrics import (
+    stt_stream_final_decision_total,
+    stt_stream_source_progress_samples,
+    stt_stream_source_progress_total,
+    stt_stream_tail_overlap_total,
+    stt_stream_worker_generation_check_total,
+)
 from app.core.config import Settings, get_settings
 from app.services.contextual_bias import ContextualBiasError, normalize_context_terms
 from app.services.hallucination import (
@@ -64,7 +71,6 @@ ROLLING_CONTINUATION_MIN_PREVIOUS_WORDS = 4
 ROLLING_CONTINUATION_MIN_NEXT_WORDS = 1
 SHORT_FINAL_PRESERVE_MIN_PREVIOUS_WORDS = 5
 SHORT_FINAL_PRESERVE_MAX_RATIO = 0.65
-SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO = 0.45
 EOF_CONTROL = {"type": "eof"}
 STREAM_PROTOCOL = "source-ranges-v1"
 CONTEXT_CAPABILITY = "context-v1"
@@ -301,14 +307,19 @@ def _merge_rolling_partial(previous_text: str, next_text: str) -> str:
 
 def _merge_final_transcript(previous_text: str, final_text: str) -> str:
     """Apply final revisions without dropping already displayed rolling context."""
+    return _merge_final_transcript_decision(previous_text, final_text)[0]
+
+
+def _merge_final_transcript_decision(previous_text: str, final_text: str) -> tuple[str, str]:
+    """Return merged text and a bounded, transcript-free decision label."""
     previous = (previous_text or "").strip()
     final = (final_text or "").strip()
     if not previous or not final:
-        return final or previous
+        return (final or previous), "final_only" if final else "draft_only"
     if previous == final or _has_same_prefix(previous, final):
-        return final
+        return final, "final_extends_draft"
     if _has_same_prefix(final, previous):
-        return previous
+        return previous, "draft_extends_final"
 
     previous_raw_words = previous.split()
     final_raw_words = final.split()
@@ -317,19 +328,25 @@ def _merge_final_transcript(previous_text: str, final_text: str) -> str:
 
     contained_at = _contiguous_index(previous_words, final_words)
     if contained_at >= 0:
-        return " ".join(
-            [
-                *previous_raw_words[:contained_at],
-                *final_raw_words,
-                *previous_raw_words[contained_at + len(final_raw_words) :],
-            ]
+        return (
+            " ".join(
+                [
+                    *previous_raw_words[:contained_at],
+                    *final_raw_words,
+                    *previous_raw_words[contained_at + len(final_raw_words) :],
+                ]
+            ),
+            "final_revises_draft_span",
         )
     if _contiguous_index(final_words, previous_words) >= 0:
-        return final
+        return final, "final_contains_draft"
 
     overlap = _suffix_prefix_speech_overlap(previous_words, final_words)
     if overlap >= 2:
-        return " ".join([*previous_raw_words, *final_raw_words[overlap:]])
+        return (
+            " ".join([*previous_raw_words, *final_raw_words[overlap:]]),
+            "final_appends_after_overlap",
+        )
 
     shared_family_ratio = _shared_token_ratio(
         _overlap_families(previous_words),
@@ -339,37 +356,45 @@ def _merge_final_transcript(previous_text: str, final_text: str) -> str:
         len(previous_words) >= SHORT_FINAL_PRESERVE_MIN_PREVIOUS_WORDS
         and len(final_words) < len(previous_words)
         and len(final_words) / len(previous_words) <= SHORT_FINAL_PRESERVE_MAX_RATIO
-        and shared_family_ratio <= SHORT_FINAL_PRESERVE_MAX_SHARED_RATIO
+        and shared_family_ratio == 0.0
     )
     if final_looks_like_short_alternative:
-        return previous
+        return previous, "draft_preserves_unrelated_short_final"
 
-    if len(final_words) <= len(previous_words) + 1 and len(final_words) <= 3:
-        return previous
-
-    return final
+    return final, "authoritative_final"
 
 
 def _drop_leading_tail_overlap(
     previous_text: str, next_text: str, *, allow_single_word: bool = False
 ) -> str:
     """Remove cross-segment tail carry-over from the next final payload."""
+    return _drop_leading_tail_overlap_decision(
+        previous_text,
+        next_text,
+        allow_single_word=allow_single_word,
+    )[0]
+
+
+def _drop_leading_tail_overlap_decision(
+    previous_text: str, next_text: str, *, allow_single_word: bool = False
+) -> tuple[str, str]:
+    """Return tail-cleaned text and a bounded, transcript-free decision label."""
     previous = (previous_text or "").strip()
     next_candidate = (next_text or "").strip()
     if not previous or not next_candidate:
-        return next_candidate
+        return next_candidate, "not_applicable"
 
     next_raw_words = next_candidate.split()
     previous_words = _normalized_words(previous)
     next_words = _normalized_words(next_candidate)
     overlap = _suffix_prefix_speech_overlap(previous_words, next_words)
     if overlap <= 0:
-        return next_candidate
+        return next_candidate, "no_overlap"
     if overlap == 1 and len(previous_words) > 1 and not allow_single_word:
-        return next_candidate
+        return next_candidate, "single_word_retained"
     if overlap >= len(next_raw_words):
-        return next_candidate
-    return " ".join(next_raw_words[overlap:]).strip()
+        return next_candidate, "tail_only_retained"
+    return " ".join(next_raw_words[overlap:]).strip(), "overlap_removed"
 
 
 def _append_recent_final_text(previous_text: str, emitted_text: str) -> str:
@@ -535,6 +560,14 @@ def _select_partial_parts(
 
 def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
     """Choose a KVKK-safe final payload without letting hallucinations poison state."""
+    return _select_commit_text_decision(final_text, fallback_draft)[0]
+
+
+def _select_commit_text_decision(
+    final_text: str,
+    fallback_draft: str,
+) -> tuple[str | None, str]:
+    """Return the commit payload and a bounded, transcript-free selection label."""
     candidate = strip_terminal_contextual_artifact(final_text)
     fallback = strip_terminal_contextual_artifact(fallback_draft)
     fallback_ok = bool(fallback and not is_hallucination(fallback))
@@ -543,15 +576,18 @@ def _select_commit_text(final_text: str, fallback_draft: str) -> str | None:
     )
 
     if candidate and not is_hallucination(candidate):
-        merged = _merge_final_transcript(fallback, candidate) if fallback_ok else candidate
+        if fallback_ok:
+            merged, merge_decision = _merge_final_transcript_decision(fallback, candidate)
+        else:
+            merged, merge_decision = candidate, "final_only"
         if merged and not is_hallucination(merged):
-            return merged
-        return candidate
+            return merged, merge_decision
+        return candidate, "authoritative_final_after_merge_filter"
 
     if fallback_ok and (short_final_artifact or _word_count(fallback) >= MIN_FALLBACK_DRAFT_WORDS):
-        return fallback
+        return fallback, "fallback_draft"
 
-    return None
+    return None, "filtered"
 
 
 class StreamProtocolError(ValueError):
@@ -588,11 +624,21 @@ def _transcribe_with_stream_generation(
 ) -> str:
     """Decode without allowing a supervised worker reload inside a live stream."""
     if isinstance(service, SupervisedLiveWhisperService | SupervisedFinalWhisperService):
+        role = "live" if isinstance(service, SupervisedLiveWhisperService) else "final"
         if expected_generation is None:
+            stt_stream_worker_generation_check_total.labels(role=role, result="missing").inc()
             raise WorkerCrashedError("streaming worker readiness is unavailable")
-        if hotwords is not None:
-            return service.transcribe_loaded_array(audio, vad, expected_generation, hotwords)
-        return service.transcribe_loaded_array(audio, vad, expected_generation)
+        try:
+            if hotwords is not None:
+                result = service.transcribe_loaded_array(audio, vad, expected_generation, hotwords)
+            else:
+                result = service.transcribe_loaded_array(audio, vad, expected_generation)
+        except WorkerCrashedError:
+            stt_stream_worker_generation_check_total.labels(role=role, result="changed").inc()
+            raise
+        stt_stream_worker_generation_check_total.labels(role=role, result="matched").inc()
+        return result
+    stt_stream_worker_generation_check_total.labels(role="inline", result="not_applicable").inc()
     if hotwords is not None:
         return service.transcribe_array(audio, vad, hotwords)
     return service.transcribe_array(audio, vad)
@@ -872,6 +918,8 @@ async def stream_endpoint(
         # another timer tick must not turn that already-finalized tail into a
         # second durable transcript window when no new source audio arrived.
         if source_end_sample <= finalized_through_sample:
+            stt_stream_source_progress_samples.labels(reason=reason).observe(0)
+            stt_stream_source_progress_total.labels(reason=reason, outcome="no_progress").inc()
             await send_debug(
                 "final_skip_without_source_progress",
                 source_end_sample=source_end_sample,
@@ -885,6 +933,7 @@ async def stream_endpoint(
 
         buffer_sec = round(audio.size / SAMPLE_RATE, 2)
         if audio.size < min_infer_samples:
+            stt_stream_source_progress_total.labels(reason=reason, outcome="short_buffer").inc()
             await send_debug("final_skip_short_buffer", buffer_sec=buffer_sec)
             await advance_segment(
                 retain_tail=False,
@@ -895,6 +944,7 @@ async def stream_endpoint(
 
         rms = _audio_rms(audio)
         if rms < settings.min_speech_rms:
+            stt_stream_source_progress_total.labels(reason=reason, outcome="low_rms").inc()
             await send_debug("final_skip_low_rms", rms=round(rms, 5), buffer_sec=buffer_sec)
             await advance_segment(
                 retain_tail=False,
@@ -928,9 +978,11 @@ async def stream_endpoint(
             text = last_draft
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        selected_text = _select_commit_text(text, last_draft)
+        selected_text, final_decision = _select_commit_text_decision(text, last_draft)
+        stt_stream_final_decision_total.labels(decision=final_decision).inc()
 
         if selected_text is None:
+            stt_stream_source_progress_total.labels(reason=reason, outcome="filtered").inc()
             await send_debug("final_filtered", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
             await advance_segment(
                 retain_tail=False,
@@ -943,12 +995,14 @@ async def stream_endpoint(
             await send_debug("final_fallback_draft", elapsed_ms=elapsed_ms, buffer_sec=buffer_sec)
 
         text = selected_text
-        text = _drop_leading_tail_overlap(
+        text, tail_decision = _drop_leading_tail_overlap_decision(
             recent_final_text or last_final_text,
             text,
             allow_single_word=True,
         )
+        stt_stream_tail_overlap_total.labels(decision=tail_decision).inc()
         if not text:
+            stt_stream_source_progress_total.labels(reason=reason, outcome="tail_only").inc()
             await send_debug("final_dropped_tail_only", seq=active_seq, elapsed_ms=elapsed_ms)
             await advance_segment(
                 retain_tail=False,
@@ -956,6 +1010,13 @@ async def stream_endpoint(
                 committed_audio=audio,
             )
             return None
+
+        new_source_samples = max(
+            0,
+            source_end_sample - max(source_start_sample, finalized_through_sample),
+        )
+        stt_stream_source_progress_samples.labels(reason=reason).observe(new_source_samples)
+        stt_stream_source_progress_total.labels(reason=reason, outcome="advanced").inc()
 
         final_payload: dict[str, object] = {
             "type": "final",

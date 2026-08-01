@@ -21,9 +21,12 @@ from app.api.stream import (
     _append_recent_final_text,
     _decode_client_control,
     _drop_leading_tail_overlap,
+    _drop_leading_tail_overlap_decision,
     _merge_final_transcript,
+    _merge_final_transcript_decision,
     _merge_rolling_partial,
     _select_commit_text,
+    _select_commit_text_decision,
     _select_partial_parts,
     _select_partial_text,
     _stabilize_rolling_partial,
@@ -509,6 +512,33 @@ def test_commit_text_still_allows_short_final_with_shared_context() -> None:
     assert _select_commit_text(final, draft) == final
 
 
+def test_commit_text_never_drops_three_word_final_with_any_shared_context() -> None:
+    draft = "Bugünkü bütçe raporunu cuma günü teslim edelim"
+    final = "Raporu yarın gönderelim"
+
+    assert _merge_final_transcript(draft, final) == final
+    assert _merge_final_transcript_decision(draft, final) == (
+        final,
+        "authoritative_final",
+    )
+    assert _select_commit_text_decision(final, draft) == (
+        final,
+        "authoritative_final",
+    )
+
+
+def test_commit_decisions_are_bounded_and_transcript_free() -> None:
+    draft = "Konuşulanların çok büyük kısmı yazılmıyor ara kelimeler düşüyor"
+    final = "Görüşmek üzere canı çıkmak için"
+
+    selected, decision = _select_commit_text_decision(final, draft)
+
+    assert selected == draft
+    assert decision == "draft_preserves_unrelated_short_final"
+    assert draft not in decision
+    assert final not in decision
+
+
 def test_drop_leading_tail_overlap_removes_cross_segment_repeated_word() -> None:
     assert _drop_leading_tail_overlap("Merhaba.", "Merhaba burada hava çok") == "burada hava çok"
     assert (
@@ -535,6 +565,17 @@ def test_drop_leading_tail_overlap_can_remove_single_word_carry_over() -> None:
         == "enteresan seyler yapabiliyor musun?"
     )
     assert _drop_leading_tail_overlap(previous, "Merhaba", allow_single_word=True) == "Merhaba"
+
+
+def test_tail_overlap_decision_is_bounded_and_transcript_free() -> None:
+    selected, decision = _drop_leading_tail_overlap_decision(
+        "Bugün canlı transkript gecikmesini test ediyoruz.",
+        "test ediyoruz ve doğruluk daha iyi görünüyor.",
+    )
+
+    assert selected == "ve doğruluk daha iyi görünüyor."
+    assert decision == "overlap_removed"
+    assert selected not in decision
 
 
 def test_drop_leading_tail_overlap_handles_turkish_inflected_carry_over() -> None:

@@ -138,6 +138,12 @@ veya global model state'ine yazılmaz. Bilinmeyen kontrol, ikinci context, ses
 başladıktan sonra context, ikinci EOF ve EOF sonrası ses paketi bağlantıyı
 fail-closed sonlandırır.
 
+`/metrics`, transcript veya hotword içeriği taşımadan final/draft seçim dalını,
+tail-overlap kararını, yeni source-range örnek sayısını ve worker-generation
+kontrol sonucunu sabit-kardinaliteli sayaçlarla yayınlar. Böylece kelime kaybı
+decoder, merge, source-progress ve worker-reload katmanlarına ayrıştırılabilir;
+meeting title, transcript, ses veya generation kimliği label'a yazılmaz.
+
 İstemci ses göndermeyi bitirdiğinde yalnızca `{"type":"eof"}` metin kontrolünü
 bir kez gönderir. Sunucu önce `eof_ack`, buffer'da kalan konuşma varsa son
 `final` event(ler)ini ve bütün final gönderimleri bittikten sonra `drained`

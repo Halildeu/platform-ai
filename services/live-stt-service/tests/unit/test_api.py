@@ -437,6 +437,10 @@ def test_metrics_endpoint_exposes_stt_metrics(client) -> None:  # type: ignore[n
     assert "stt_transcribe_total" in body
     assert "stt_transcribe_duration_seconds" in body
     assert "stt_audio_bytes_total" in body
+    assert "stt_stream_final_decision_total" in body
+    assert "stt_stream_tail_overlap_total" in body
+    assert "stt_stream_source_progress_samples" in body
+    assert "stt_stream_worker_generation_check_total" in body
     # No raw PII in metric labels
     assert "session_id" not in body.lower() or "session_id=" not in body
 
