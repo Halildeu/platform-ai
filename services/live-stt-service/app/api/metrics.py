@@ -120,6 +120,37 @@ stt_pii_redaction_total = Counter(
     ["pattern_class"],
 )
 
+stt_stream_final_decision_total = Counter(
+    "stt_stream_final_decision_total",
+    "Transcript-free final/draft selection decisions",
+    ["decision"],
+)
+
+stt_stream_tail_overlap_total = Counter(
+    "stt_stream_tail_overlap_total",
+    "Transcript-free cross-segment tail overlap decisions",
+    ["decision"],
+)
+
+stt_stream_source_progress_samples = Histogram(
+    "stt_stream_source_progress_samples",
+    "New source samples covered by each finalization attempt",
+    ["reason"],
+    buckets=(0, 800, 1600, 4000, 8000, 16000, 32000, 80000, 160000),
+)
+
+stt_stream_source_progress_total = Counter(
+    "stt_stream_source_progress_total",
+    "Finalization attempts grouped by source-range progress outcome",
+    ["reason", "outcome"],
+)
+
+stt_stream_worker_generation_check_total = Counter(
+    "stt_stream_worker_generation_check_total",
+    "Streaming worker generation checks without generation identifiers",
+    ["role", "result"],
+)
+
 # --- KVKK audit ---
 
 kvkk_audit_event_total = Counter(
