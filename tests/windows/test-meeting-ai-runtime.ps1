@@ -596,6 +596,10 @@ Clear-MeetingAiManagedProcessEnvironment
     $installedPermitTrustRoot = `
         $postReplaceValues["MAI_READY_PERMIT_TRUST_ROOT_PATH"]
     $installedReceipt = $postReplaceValues["MAI_READY_ACTIVATION_RECEIPT_PATH"]
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
+        "Post-replace failure must leave the committed active config importable."
+    Assert-True ($env:MAI_READY_PRE_ENABLE_PERMIT_PATH -eq $installedPermit) `
+        "Negative permit checks must target the active config reference."
 
     $configHashBeforeRedisFailure = (Get-FileHash -Algorithm SHA256 $configPath).Hash
     $tlsPublicFilesBeforeRedisFailure = @(Get-ChildItem -LiteralPath `
