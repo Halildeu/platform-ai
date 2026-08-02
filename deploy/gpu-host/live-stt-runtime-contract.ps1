@@ -23,11 +23,17 @@ $script:LiveSttPreloadRetryBaseSec = 1
 $script:LiveSttPreloadRoleCount = 2
 $script:LiveSttSmokeWorstCaseSec = 150
 $script:LiveSttTaskTransitionReserveSec = 60
-$script:MeetingAiReadinessDeadlineSec = 30
+# 30s was measured too tight on the combined restart path (2026-08-02, Denetim
+# host): the acceptance restarts live-stt seconds before polling meeting-ai
+# /ready, so the FastAPI cold start races Whisper preload for GPU/disk and the
+# forward AND rollback acceptances both failed meeting-ai-readiness while a solo
+# meeting-ai restart answered /ready in ~15s. 120s absorbs that contention and
+# still fits under the 1800s ceiling (guard below).
+$script:MeetingAiReadinessDeadlineSec = 120
 # Derived ceiling, not a free parameter: it must stay above
 # LiveSttAcceptanceWorstCaseSec, which the guard at the bottom of this file
 # enforces. With a 360s model-load budget the worst case is
-#   2 roles * ((2 attempts * (360 + 2*2)) + 1 retry backoff) + 150 + 60 + 30 = 1698.
+#   2 roles * ((2 attempts * (360 + 2*2)) + 1 retry backoff) + 150 + 60 + 120 = 1788.
 $script:LiveSttReadinessDeadlineSec = 1800
 
 # Production speech-gate profile. RMS stays deliberately low so quiet speech
