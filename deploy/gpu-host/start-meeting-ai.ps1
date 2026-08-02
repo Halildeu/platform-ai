@@ -30,6 +30,7 @@ if ([string]::IsNullOrWhiteSpace($RuntimeConfigPath)) {
 }
 try {
     try {
+        Remove-MeetingAiStaleRuntimeTlsKeys
         $runtimeConfigLoaded = Import-MeetingAiRuntimeEnvironment `
             -Path $RuntimeConfigPath -Optional
     } catch {

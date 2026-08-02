@@ -778,10 +778,13 @@ function Set-DeploymentLedgerResult {
 }
 
 $runtimeContract = Join-Path $controllerRoot "deploy\gpu-host\live-stt-runtime-contract.ps1"
+$meetingAiRuntimeContract = Join-Path $controllerRoot `
+  "deploy\gpu-host\meeting-ai-runtime-env.ps1"
 $taskActionContract = Join-Path $controllerRoot "deploy\gpu-host\task-action-contract.ps1"
 $bootstrapProcess = Join-Path $controllerRoot "deploy\gpu-host\bootstrap-process.ps1"
 $restartAcceptance = Join-Path $controllerRoot "deploy\gpu-host\restart-acceptance.ps1"
 if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $meetingAiRuntimeContract -PathType Leaf) -or
     -not (Test-Path -LiteralPath $taskActionContract -PathType Leaf) -or
     -not (Test-Path -LiteralPath $bootstrapProcess -PathType Leaf) -or
     -not (Test-Path -LiteralPath $restartAcceptance -PathType Leaf)) {
@@ -789,6 +792,7 @@ if (-not (Test-Path -LiteralPath $runtimeContract -PathType Leaf) -or
     $script:DeployExitGuard
 }
 . $runtimeContract
+. $meetingAiRuntimeContract
 . $taskActionContract
 . $bootstrapProcess
 . $restartAcceptance
@@ -1311,6 +1315,9 @@ function Invoke-GpuHostRevisionAcceptance {
   $liveSttPythonExe = ""
   $liveSttRuntimeOwner = 0
   $liveSttTaskInstance = $null
+  $meetingAiPythonExe = ""
+  $meetingAiRuntimeOwner = 0
+  $meetingAiTaskInstance = $null
   $acceptanceClock = [Diagnostics.Stopwatch]::StartNew()
   foreach ($task in @("platform-ai-live-stt", "platform-ai-meeting-ai")) {
     if ((Invoke-SchtasksTask -Action "/Query" -TaskName $task) -ne 0) {
@@ -1362,6 +1369,14 @@ function Invoke-GpuHostRevisionAcceptance {
       return New-GpuHostAcceptanceResult -Succeeded $false `
         -Reason "restart-failed-stale-listener"
     }
+    if ($task -eq "platform-ai-meeting-ai") {
+      $legacyMeetingAiKeyPath = Join-Path $env:ProgramData `
+        "Acik\platform-ai\runtime\meeting-service-client.key"
+      if (Test-Path -LiteralPath $legacyMeetingAiKeyPath -PathType Leaf) {
+        Remove-Item -LiteralPath $legacyMeetingAiKeyPath -Force
+      }
+      Remove-MeetingAiStaleRuntimeTlsKeys
+    }
     if ((Invoke-SchtasksTask -Action "/Run" -TaskName $task) -ne 0) {
       return New-GpuHostAcceptanceResult -Succeeded $false `
         -Reason "restart-failed-task-run"
@@ -1398,9 +1413,49 @@ function Invoke-GpuHostRevisionAcceptance {
       $liveSttPythonExe = $taskPythonExe
       $liveSttRuntimeOwner = $newOwner
       $liveSttTaskInstance = $newTaskInstance
+    } elseif ($task -eq "platform-ai-meeting-ai") {
+      $meetingAiPythonExe = $taskPythonExe
+      $meetingAiRuntimeOwner = $newOwner
+      $meetingAiTaskInstance = $newTaskInstance
     }
     Write-Host "[update] restarted $task with a new task instance and listener" `
       -ForegroundColor Green
+  }
+
+  $meetingAiReady = $false
+  $meetingAiClock = [Diagnostics.Stopwatch]::StartNew()
+  Write-Host "[update] waiting for meeting-ai dependency readiness..." `
+    -ForegroundColor Cyan
+  while (-not $meetingAiReady -and
+      $meetingAiClock.Elapsed.TotalSeconds -lt $script:MeetingAiReadinessDeadlineSec) {
+    $remaining = $script:MeetingAiReadinessDeadlineSec - `
+      $meetingAiClock.Elapsed.TotalSeconds
+    $requestTimeout = [Math]::Max(1, [Math]::Min(5, [Math]::Ceiling($remaining)))
+    try {
+      $readiness = Invoke-RestMethod "http://127.0.0.1:8300/ready" `
+        -TimeoutSec $requestTimeout -ErrorAction Stop
+      if (Test-MeetingAiDependencyReadiness -Readiness $readiness) {
+        $meetingAiReady = $true
+        break
+      }
+    } catch { }
+    Start-Sleep -Milliseconds 1000
+  }
+  if (-not $meetingAiReady) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "meeting-ai-readiness-failed"
+  }
+  $meetingTaskPids = @([int]$meetingAiTaskInstance.EnginePid)
+  if (-not (Test-GpuHostTaskInstanceStable -TaskName "platform-ai-meeting-ai" `
+        -ExpectedInstanceGuid ([string]$meetingAiTaskInstance.InstanceGuid) `
+        -ExpectedEnginePid ([int]$meetingAiTaskInstance.EnginePid) `
+        -Clock $meetingAiClock -DeadlineSec $script:MeetingAiReadinessDeadlineSec) -or
+      -not (Test-GpuHostListenerStable -Port 8300 `
+        -ExpectedOwnerId $meetingAiRuntimeOwner -ExpectedPythonExe $meetingAiPythonExe `
+        -ExpectedTaskPids $meetingTaskPids -Clock $meetingAiClock `
+        -DeadlineSec $script:MeetingAiReadinessDeadlineSec)) {
+    return New-GpuHostAcceptanceResult -Succeeded $false `
+      -Reason "meeting-ai-readiness-identity-changed"
   }
 
   $streamReady = ($AcceptanceProfile -eq "legacy-512e9cc")

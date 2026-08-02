@@ -80,6 +80,44 @@ function Test-GpuHostDeadlineOpen {
     return $Clock.Elapsed.TotalSeconds -lt $DeadlineSec
 }
 
+function Test-MeetingAiDependencyReadiness {
+    param([AllowNull()]$Readiness)
+
+    if ($null -eq $Readiness) { return $false }
+    $topLevel = @($Readiness.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($topLevel -notcontains "analysis_delivery" -or
+        $topLevel -notcontains "ready_consumer" -or
+        $null -eq $Readiness.analysis_delivery -or
+        $null -eq $Readiness.ready_consumer) {
+        return $false
+    }
+    $deliveryFields = @(
+        $Readiness.analysis_delivery.PSObject.Properties | ForEach-Object { $_.Name }
+    )
+    if ($deliveryFields -notcontains "ready" -or
+        $Readiness.analysis_delivery.ready -ne $true) {
+        return $false
+    }
+    $consumerFields = @(
+        $Readiness.ready_consumer.PSObject.Properties | ForEach-Object { $_.Name }
+    )
+    if ($consumerFields -notcontains "enabled" -or
+        $consumerFields -notcontains "ready" -or
+        $Readiness.ready_consumer.ready -ne $true) {
+        return $false
+    }
+    if ($Readiness.ready_consumer.enabled -eq $false) { return $true }
+    if ($Readiness.ready_consumer.enabled -ne $true) { return $false }
+    foreach ($required in @("worker_running", "redis_group_ready", "error_code")) {
+        if ($consumerFields -notcontains $required) { return $false }
+    }
+    return (
+        $Readiness.ready_consumer.worker_running -eq $true -and
+        $Readiness.ready_consumer.redis_group_ready -eq $true -and
+        $null -eq $Readiness.ready_consumer.error_code
+    )
+}
+
 function Wait-GpuHostPortReleased {
     param(
         [Parameter(Mandatory = $true)][int]$Port,

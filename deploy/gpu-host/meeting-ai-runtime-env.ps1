@@ -31,6 +31,10 @@ $script:MeetingAiAdministratorsSid = "S-1-5-32-544"
 $script:MeetingAiDpapiEntropy = [Text.Encoding]::UTF8.GetBytes(
     "platform-ai/meeting-ai/runtime-secret/v1"
 )
+if ($null -eq (Get-Variable -Name MeetingAiOwnedRuntimeTlsKeyPath `
+        -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:MeetingAiOwnedRuntimeTlsKeyPath = ""
+}
 
 function Get-MeetingAiConfigSchema {
     return @{
@@ -720,8 +724,7 @@ function Import-MeetingAiRuntimeEnvironment {
                 -ProtectedBase64 $values["MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"] `
                 -KeyName "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_DPAPI"
             try {
-                $runtimeKeyPath = Join-Path (Get-MeetingAiRuntimeRoot) `
-                    "runtime\meeting-service-client.key"
+                $runtimeKeyPath = New-MeetingAiRuntimeTlsKeyPath
                 Write-MeetingAiSecretFileAtomic -Path $runtimeKeyPath -Content $clientKey
                 [Environment]::SetEnvironmentVariable(
                     "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH",
@@ -1076,19 +1079,81 @@ function Assert-TranscriptReadyPreEnablePermit {
 }
 
 function Get-MeetingAiRuntimeTlsKeyPath {
-    return Join-Path (Get-MeetingAiRuntimeRoot) "runtime\meeting-service-client.key"
+    return $script:MeetingAiOwnedRuntimeTlsKeyPath
+}
+
+function New-MeetingAiRuntimeTlsKeyPath {
+    if (-not [string]::IsNullOrWhiteSpace($script:MeetingAiOwnedRuntimeTlsKeyPath)) {
+        throw "The current process already owns a runtime TLS key path."
+    }
+    $runtimeTlsRoot = Join-Path (Get-MeetingAiRuntimeRoot) "runtime\tls"
+    [void](Initialize-MeetingAiDirectory -Path $runtimeTlsRoot)
+    $processStartFileTime = [long](
+        (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().ToFileTimeUtc()
+    )
+    $name = "meeting-service-client.{0}.{1}.{2}.key" -f `
+        $PID, $processStartFileTime, ([Guid]::NewGuid().ToString("N"))
+    $script:MeetingAiOwnedRuntimeTlsKeyPath = Join-Path $runtimeTlsRoot $name
+    return $script:MeetingAiOwnedRuntimeTlsKeyPath
+}
+
+function Remove-MeetingAiStaleRuntimeTlsKeys {
+    $runtimeTlsRoot = Join-Path (Get-MeetingAiRuntimeRoot) "runtime\tls"
+    if (-not (Test-Path -LiteralPath $runtimeTlsRoot -PathType Container)) {
+        return
+    }
+    foreach ($candidate in @(Get-ChildItem -LiteralPath $runtimeTlsRoot `
+            -Filter "meeting-service-client.*.key" -File)) {
+        $match = [Text.RegularExpressions.Regex]::Match(
+            $candidate.Name,
+            '^meeting-service-client\.(?<pid>[0-9]+)\.(?<started>[0-9]+)\.[0-9a-f]{32}\.key$',
+            [Text.RegularExpressions.RegexOptions]::CultureInvariant
+        )
+        if (-not $match.Success) { continue }
+        $ownerPid = 0
+        if (-not [int]::TryParse($match.Groups["pid"].Value, [ref]$ownerPid) -or
+            $ownerPid -le 0) {
+            continue
+        }
+        $expectedStartFileTime = [long]0
+        if (-not [long]::TryParse(
+                $match.Groups["started"].Value,
+                [ref]$expectedStartFileTime
+            ) -or $expectedStartFileTime -le 0) {
+            continue
+        }
+        $owner = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+        if ($null -eq $owner) {
+            Remove-Item -LiteralPath $candidate.FullName -Force
+            continue
+        }
+        try {
+            $actualStartFileTime = [long]$owner.StartTime.ToUniversalTime().ToFileTimeUtc()
+        } catch {
+            # Access uncertainty must not delete material owned by a live process.
+            continue
+        }
+        if ($actualStartFileTime -ne $expectedStartFileTime) {
+            Remove-Item -LiteralPath $candidate.FullName -Force
+        }
+    }
 }
 
 function Clear-MeetingAiRuntimeTlsKey {
-    $runtimeKeyPath = Get-MeetingAiRuntimeTlsKeyPath
-    if (Test-Path -LiteralPath $runtimeKeyPath -PathType Leaf) {
-        Remove-Item -LiteralPath $runtimeKeyPath -Force
+    $runtimeKeyPath = $script:MeetingAiOwnedRuntimeTlsKeyPath
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($runtimeKeyPath) -and
+            (Test-Path -LiteralPath $runtimeKeyPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $runtimeKeyPath -Force
+        }
+    } finally {
+        $script:MeetingAiOwnedRuntimeTlsKeyPath = ""
+        [Environment]::SetEnvironmentVariable(
+            "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH",
+            $null,
+            "Process"
+        )
     }
-    [Environment]::SetEnvironmentVariable(
-        "MAI_MEETING_SERVICE_TLS_CLIENT_KEY_PATH",
-        $null,
-        "Process"
-    )
 }
 
 function Write-MeetingAiSecretBytesAtomic {
@@ -1198,6 +1263,10 @@ function Write-MeetingAiConfigAtomic {
 
         if (Test-Path -LiteralPath $full) {
             [IO.File]::Replace($temp, $full, $backup, $true)
+            if ($env:CI -eq "true" -and
+                $env:PLATFORM_AI_TEST_INJECT_MEETING_AI_POST_REPLACE_FAILURE -eq "1") {
+                throw "TEST_INJECTED_MEETING_AI_POST_REPLACE_FAILURE"
+            }
             Set-Acl -LiteralPath $backup -AclObject (New-MeetingAiAcl)
             Assert-MeetingAiAcl -Path $backup
         } else {
