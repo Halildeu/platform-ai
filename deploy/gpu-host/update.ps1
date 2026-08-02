@@ -1430,7 +1430,14 @@ function Invoke-GpuHostRevisionAcceptance {
       $meetingAiClock.Elapsed.TotalSeconds -lt $script:MeetingAiReadinessDeadlineSec) {
     $remaining = $script:MeetingAiReadinessDeadlineSec - `
       $meetingAiClock.Elapsed.TotalSeconds
-    $requestTimeout = [Math]::Max(1, [Math]::Min(5, [Math]::Ceiling($remaining)))
+    # Per-request budget must exceed the service's measured worst-case /ready
+    # latency: the handler runs two synchronous Ollama probes (3s timeout
+    # each) on the event loop, so one response can legitimately take ~7-10s
+    # under GPU/disk contention. A 5s cap made every poll time out client-side
+    # while uvicorn kept logging 200s (Denetim host, 2026-08-02/03 acceptance
+    # rejections). The overall MeetingAiReadinessDeadlineSec still bounds the
+    # wait; this only sizes each attempt.
+    $requestTimeout = [Math]::Max(1, [Math]::Min(30, [Math]::Ceiling($remaining)))
     try {
       $readiness = Invoke-RestMethod "http://127.0.0.1:8300/ready" `
         -TimeoutSec $requestTimeout -ErrorAction Stop
