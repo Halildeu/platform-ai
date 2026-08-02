@@ -202,7 +202,7 @@ function Assert-MeetingAiReadyRedisEndpoint {
 import os
 import redis
 
-url = os.environ.pop("MAI_READY_REDIS_PREFLIGHT_URL")
+url = os.environ.pop('MAI_READY_REDIS_PREFLIGHT_URL')
 client = redis.Redis.from_url(
     url,
     socket_connect_timeout=5,
@@ -211,7 +211,7 @@ client = redis.Redis.from_url(
 )
 try:
     if client.ping() is not True:
-        raise RuntimeError("redis ping did not return PONG")
+        raise RuntimeError('redis ping did not return PONG')
 finally:
     client.close()
 '@
