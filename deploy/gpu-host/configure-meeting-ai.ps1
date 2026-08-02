@@ -74,6 +74,8 @@ $lockTaken = $false
 $stagedPermitPath = ""
 $stagedPermitTrustRootPath = ""
 $stagedActivationReceiptPath = ""
+$stagedTlsPublicPaths = @()
+$tlsPublicArtifactsCommitted = $false
 $previousPermitPath = ""
 $previousActivationReceiptPath = ""
 $activationCommitted = $false
@@ -174,6 +176,60 @@ function Protect-SuppliedSecureValue {
     } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         $plain = $null
+    }
+}
+
+function Assert-MeetingAiReadyRedisEndpoint {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProtectedRedisUrl,
+        [Parameter(Mandatory = $true)][string]$PythonExe
+    )
+
+    $plainRedisUrl = Unprotect-MeetingAiSecret `
+        -ProtectedBase64 $ProtectedRedisUrl `
+        -KeyName "MAI_READY_REDIS_URL_DPAPI"
+    $previousRedisUrl = [Environment]::GetEnvironmentVariable(
+        "MAI_READY_REDIS_PREFLIGHT_URL",
+        "Process"
+    )
+    try {
+        [Environment]::SetEnvironmentVariable(
+            "MAI_READY_REDIS_PREFLIGHT_URL",
+            $plainRedisUrl,
+            "Process"
+        )
+        $probe = @'
+import os
+import redis
+
+url = os.environ.pop("MAI_READY_REDIS_PREFLIGHT_URL")
+client = redis.Redis.from_url(
+    url,
+    socket_connect_timeout=5,
+    socket_timeout=5,
+    health_check_interval=0,
+)
+try:
+    if client.ping() is not True:
+        raise RuntimeError("redis ping did not return PONG")
+finally:
+    client.close()
+'@
+        try {
+            & $PythonExe -c $probe 1>$null 2>$null
+        } catch {
+            throw "Ready Redis endpoint preflight failed."
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Ready Redis endpoint preflight failed."
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable(
+            "MAI_READY_REDIS_PREFLIGHT_URL",
+            $previousRedisUrl,
+            "Process"
+        )
+        $plainRedisUrl = $null
     }
 }
 
@@ -507,6 +563,9 @@ try {
                 [string]::IsNullOrWhiteSpace($ReadyPermitTrustRootSourcePath)) {
                 throw "Restoring an enabled ready-consumer backup requires a fresh signed permit and trust root."
             }
+            Assert-MeetingAiReadyRedisEndpoint `
+                -ProtectedRedisUrl $backupValues["MAI_READY_REDIS_URL_DPAPI"] `
+                -PythonExe $PythonExe
             $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
             $startupScript = Join-Path $scriptDir "start-meeting-ai.ps1"
             $activation = New-TranscriptReadyActivation `
@@ -599,6 +658,7 @@ try {
             -DestinationPath (Join-Path $tlsRoot `
                 ("meeting-service-ca-{0}.pem" -f $tlsMaterialVersion)) `
             -ExpectedMarker "-----BEGIN CERTIFICATE-----"
+        $stagedTlsPublicPaths += $installedCaPath
     } elseif ($null -ne $existing -and
         $existing.ContainsKey("MAI_MEETING_SERVICE_TLS_CA_PATH")) {
         $installedCaPath = $existing["MAI_MEETING_SERVICE_TLS_CA_PATH"]
@@ -611,6 +671,7 @@ try {
                 -DestinationPath (Join-Path $tlsRoot `
                     ("meeting-service-client-{0}.pem" -f $tlsMaterialVersion)) `
                 -ExpectedMarker "-----BEGIN CERTIFICATE-----"
+            $stagedTlsPublicPaths += $installedCertPath
         } elseif ($null -ne $existing -and
             $existing.ContainsKey("MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH")) {
             $installedCertPath = $existing["MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH"]
@@ -760,6 +821,9 @@ try {
             [string]::IsNullOrWhiteSpace($ReadyPermitTrustRootSourcePath)) {
             throw "Every enabled ready-consumer config write requires a fresh signed permit and trust root."
         }
+        Assert-MeetingAiReadyRedisEndpoint `
+            -ProtectedRedisUrl $readyRedisBlob `
+            -PythonExe $PythonExe
         if ($null -ne $existing -and
             $existing.ContainsKey("MAI_READY_PRE_ENABLE_PERMIT_PATH")) {
             $previousPermitPath = Assert-MeetingAiRuntimePath `
@@ -933,6 +997,7 @@ try {
         throw "TEST_INJECTED_MEETING_AI_CONFIG_WRITE_FAILURE"
     }
     Write-MeetingAiConfigAtomic -Path $ConfigPath -Content $content
+    $tlsPublicArtifactsCommitted = $true
     if ($effectiveReadyEnabled -eq "true") {
         $activationCommitted = $true
         if (-not [string]::IsNullOrWhiteSpace($previousPermitPath) -and
@@ -958,14 +1023,68 @@ try {
     Write-Host "active encryption key id: $activeKeyId"
     Write-Host "Restart task with schtasks.exe /End and /Run for platform-ai-meeting-ai."
 } finally {
+    $activeConfigValues = $null
+    $activeConfigReadUncertain = $false
+    if ((-not $activationCommitted -or -not $tlsPublicArtifactsCommitted) -and
+        (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+        try {
+            $activeConfigValues = Read-MeetingAiConfigFile -Path $ConfigPath
+            Assert-MeetingAiConfigValues -Values $activeConfigValues
+        } catch {
+            $activeConfigReadUncertain = $true
+        }
+    }
     if (-not $activationCommitted) {
-        foreach ($artifact in @(
-                $stagedPermitPath,
-                $stagedActivationReceiptPath
+        foreach ($staged in @(
+                [pscustomobject]@{
+                    Path = $stagedPermitPath
+                    ConfigKey = "MAI_READY_PRE_ENABLE_PERMIT_PATH"
+                },
+                [pscustomobject]@{
+                    Path = $stagedActivationReceiptPath
+                    ConfigKey = "MAI_READY_ACTIVATION_RECEIPT_PATH"
+                }
             )) {
+            $artifact = [string]$staged.Path
+            $configKey = [string]$staged.ConfigKey
+            $referencedByActiveConfig = $activeConfigReadUncertain -or (
+                $null -ne $activeConfigValues -and
+                $activeConfigValues.ContainsKey($configKey) -and
+                $activeConfigValues[$configKey].Equals(
+                    $artifact,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            )
             if (-not [string]::IsNullOrWhiteSpace($artifact) -and
+                -not $referencedByActiveConfig -and
                 $artifact -ne $previousPermitPath -and
                 $artifact -ne $previousActivationReceiptPath -and
+                (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+                Remove-Item -LiteralPath $artifact -Force
+            }
+        }
+    }
+    if (-not $tlsPublicArtifactsCommitted) {
+        foreach ($artifact in $stagedTlsPublicPaths) {
+            $referencedByActiveConfig = $activeConfigReadUncertain
+            if (-not $referencedByActiveConfig -and
+                $null -ne $activeConfigValues) {
+                foreach ($configKey in @(
+                        "MAI_MEETING_SERVICE_TLS_CA_PATH",
+                        "MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH"
+                    )) {
+                    if ($activeConfigValues.ContainsKey($configKey) -and
+                        $activeConfigValues[$configKey].Equals(
+                            $artifact,
+                            [StringComparison]::OrdinalIgnoreCase
+                        )) {
+                        $referencedByActiveConfig = $true
+                        break
+                    }
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($artifact) -and
+                -not $referencedByActiveConfig -and
                 (Test-Path -LiteralPath $artifact -PathType Leaf)) {
                 Remove-Item -LiteralPath $artifact -Force
             }

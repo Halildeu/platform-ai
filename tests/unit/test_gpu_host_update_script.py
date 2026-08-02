@@ -739,6 +739,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         roles = value("LiveSttPreloadRoleCount")
         smoke = value("LiveSttSmokeWorstCaseSec")
         reserve = value("LiveSttTaskTransitionReserveSec")
+        meeting_ai_readiness = value("MeetingAiReadinessDeadlineSec")
         deadline = value("LiveSttReadinessDeadlineSec")
 
         self.assertGreaterEqual(
@@ -753,7 +754,9 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         preload_worst_case = roles * (
             attempts * (load_timeout + 2 * kill_grace) + retry_worst_case
         )
-        acceptance_worst_case = preload_worst_case + smoke + reserve
+        acceptance_worst_case = (
+            preload_worst_case + smoke + reserve + meeting_ai_readiness
+        )
         self.assertLessEqual(
             acceptance_worst_case,
             deadline,
@@ -804,11 +807,22 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("Invoke-GpuHostRevisionAcceptance", script)
         self.assertIn('Reason "restart-failed-task-repo-root"', script)
         self.assertIn("$taskContract.RepoRoot", script)
+        self.assertIn('"Acik\\platform-ai\\runtime\\meeting-service-client.key"', script)
+        self.assertIn("Remove-MeetingAiStaleRuntimeTlsKeys", script)
+        self.assertIn("MeetingAiReadinessDeadlineSec", script)
+        self.assertIn('Invoke-RestMethod "http://127.0.0.1:8300/ready"', script)
+        self.assertIn('Reason "meeting-ai-readiness-failed"', script)
+        self.assertIn('Reason "meeting-ai-readiness-identity-changed"', script)
+        self.assertIn("Test-MeetingAiDependencyReadiness", script)
 
     def test_meeting_ai_launcher_uses_non_executable_dpapi_config(self) -> None:
         script = self._read_script("start-meeting-ai.ps1")
 
         self.assertIn("Import-MeetingAiRuntimeEnvironment", script)
+        self.assertLess(
+            script.index("Remove-MeetingAiStaleRuntimeTlsKeys"),
+            script.index("Import-MeetingAiRuntimeEnvironment"),
+        )
         self.assertIn("meeting-ai.env", script)
         self.assertIn('MAI_INGESTION_ENABLED = "false"', script)
         self.assertIn('MAI_READY_CONSUMER_ENABLED = "false"', script)
@@ -846,6 +860,16 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn("MoveFileEx", script)
         self.assertIn("replaceExistingAndWriteThrough", script)
         self.assertIn("Clear-MeetingAiRuntimeTlsKey", script)
+        self.assertIn("MeetingAiOwnedRuntimeTlsKeyPath", script)
+        self.assertIn("Remove-MeetingAiStaleRuntimeTlsKeys", script)
+        self.assertIn('"meeting-service-client.*.key"', script)
+        self.assertIn("[int]::TryParse", script)
+        self.assertIn("Get-Process -Id $ownerPid", script)
+        self.assertIn('"runtime\\tls"', script)
+        self.assertIn("processStartFileTime", script)
+        self.assertIn("actualStartFileTime", script)
+        self.assertIn('$PID, $processStartFileTime, ([Guid]::NewGuid().ToString("N"))', script)
+        self.assertNotIn('"runtime\\meeting-service-client.key"', script)
         self.assertIn("MAI_READY_REDIS_URL_DPAPI", script)
         self.assertIn("MAI_TRANSCRIPT_SERVICE_CLIENT_SECRET_DPAPI", script)
         self.assertIn("Assert-TranscriptReadyPreEnablePermit", script)
@@ -879,6 +903,13 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn('ValidateSet("", "server", "mutual")', script)
         self.assertIn("Protect-MeetingAiSecret -PlainText $plainClientKey", script)
         self.assertIn("Protect-SuppliedSecureValue", script)
+        self.assertIn("Assert-MeetingAiReadyRedisEndpoint", script)
+        self.assertIn("MAI_READY_REDIS_PREFLIGHT_URL", script)
+        self.assertIn("client.ping()", script)
+        self.assertIn("Ready Redis endpoint preflight failed", script)
+        self.assertGreaterEqual(script.count("Assert-MeetingAiReadyRedisEndpoint"), 3)
+        self.assertIn("stagedTlsPublicPaths", script)
+        self.assertIn("tlsPublicArtifactsCommitted", script)
         self.assertIn("ReadyPermitSourcePath", script)
         self.assertIn(
             "requires a fresh signed permit and trust root",

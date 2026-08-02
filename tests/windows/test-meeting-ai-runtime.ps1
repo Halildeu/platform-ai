@@ -34,6 +34,8 @@ $permitFixtureScript = Join-Path $PSScriptRoot `
     "create-transcript-ready-permit-fixture.py"
 $pythonExe = (Get-Command python -CommandType Application -ErrorAction Stop | `
     Select-Object -First 1).Source
+$fakeRedisScript = Join-Path $PSScriptRoot "fake-redis-server.py"
+$fakeRedisProcess = $null
 $expectedPermitTrustRootSha256 = ""
 $expectedGitopsCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 $expectedPolicySha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -134,6 +136,30 @@ function Write-FreshPermit {
 }
 
 try {
+    $fakeRedisProcess = Start-Process -FilePath $pythonExe `
+        -ArgumentList @(
+            $fakeRedisScript,
+            "--port", "6379",
+            "--username", "ci-user",
+            "--password", "ci-password"
+        ) `
+        -WindowStyle Hidden -PassThru
+    $fakeRedisReady = $false
+    foreach ($attempt in 1..50) {
+        if ($fakeRedisProcess.HasExited) { break }
+        $client = New-Object Net.Sockets.TcpClient
+        try {
+            $client.Connect("127.0.0.1", 6379)
+            $fakeRedisReady = $true
+            break
+        } catch {
+            Start-Sleep -Milliseconds 100
+        } finally {
+            $client.Dispose()
+        }
+    }
+    Assert-True $fakeRedisReady "Ephemeral Redis protocol fixture did not start."
+
     if (Test-Path -LiteralPath $runtimeRoot) {
         Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
     }
@@ -357,6 +383,99 @@ try {
 
     Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
         "Mutual TLS runtime config import must be idempotent before launcher startup."
+    $parentRuntimeKeyPath = Get-MeetingAiRuntimeTlsKeyPath
+    $childRuntimeKeyRecord = Join-Path $env:RUNNER_TEMP "meeting-ai-child-key-path.txt"
+    $childRuntimeScript = Join-Path $env:RUNNER_TEMP "meeting-ai-child-import.ps1"
+    $childScriptContent = @"
+`$ErrorActionPreference = "Stop"
+. "$runtimeScript"
+[void](Import-MeetingAiRuntimeEnvironment -Path "$configPath")
+[IO.File]::WriteAllText("$childRuntimeKeyRecord", (Get-MeetingAiRuntimeTlsKeyPath))
+Clear-MeetingAiManagedProcessEnvironment
+"@
+    [IO.File]::WriteAllText(
+        $childRuntimeScript,
+        $childScriptContent,
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $childProcess = Start-Process -FilePath (Join-Path $PSHOME "powershell.exe") `
+        -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $childRuntimeScript
+        ) -Wait -PassThru
+    Assert-True ($childProcess.ExitCode -eq 0) `
+        "Independent runtime import process failed."
+    $childRuntimeKeyPath = [IO.File]::ReadAllText($childRuntimeKeyRecord)
+    Assert-True ($childRuntimeKeyPath -ne $parentRuntimeKeyPath) `
+        "Independent runtime processes must own distinct TLS key paths."
+    Assert-True (Test-Path -LiteralPath $parentRuntimeKeyPath -PathType Leaf) `
+        "Child cleanup must not remove the parent process TLS key."
+    Assert-True (-not (Test-Path -LiteralPath $childRuntimeKeyPath)) `
+        "Child cleanup must remove its own TLS key."
+    Remove-Item -LiteralPath $childRuntimeScript, $childRuntimeKeyRecord -Force
+
+    $forcedChildKeyRecord = Join-Path $env:RUNNER_TEMP `
+        "meeting-ai-forced-child-key-path.txt"
+    $forcedChildScript = Join-Path $env:RUNNER_TEMP `
+        "meeting-ai-forced-child-import.ps1"
+    $forcedChildContent = @"
+`$ErrorActionPreference = "Stop"
+. "$runtimeScript"
+[void](Import-MeetingAiRuntimeEnvironment -Path "$configPath")
+[IO.File]::WriteAllText("$forcedChildKeyRecord", (Get-MeetingAiRuntimeTlsKeyPath))
+Start-Sleep -Seconds 60
+Clear-MeetingAiManagedProcessEnvironment
+"@
+    [IO.File]::WriteAllText(
+        $forcedChildScript,
+        $forcedChildContent,
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $forcedChild = Start-Process -FilePath (Join-Path $PSHOME "powershell.exe") `
+        -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $forcedChildScript
+        ) -PassThru
+    foreach ($attempt in 1..50) {
+        if ($forcedChild.HasExited -or
+            (Test-Path -LiteralPath $forcedChildKeyRecord -PathType Leaf)) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-True (Test-Path -LiteralPath $forcedChildKeyRecord -PathType Leaf) `
+        "Forced child did not materialize its process-owned TLS key."
+    $forcedChildKeyPath = [IO.File]::ReadAllText($forcedChildKeyRecord)
+    Stop-Process -Id $forcedChild.Id -Force
+    $forcedChild.WaitForExit()
+    Assert-True (Test-Path -LiteralPath $forcedChildKeyPath -PathType Leaf) `
+        "Forced termination must exercise the stale-key path."
+    Remove-MeetingAiStaleRuntimeTlsKeys
+    Assert-True (-not (Test-Path -LiteralPath $forcedChildKeyPath)) `
+        "Launcher startup sweep must remove a dead process TLS key."
+    Remove-Item -LiteralPath $forcedChildScript, $forcedChildKeyRecord -Force
+
+    $runtimeTlsRoot = Join-Path $runtimeRoot "runtime\tls"
+    $currentProcessStartFileTime = [long](
+        (Get-Process -Id $PID).StartTime.ToUniversalTime().ToFileTimeUtc()
+    )
+    $liveOwnerCandidate = Join-Path $runtimeTlsRoot `
+        ("meeting-service-client.{0}.{1}.{2}.key" -f `
+            $PID, $currentProcessStartFileTime, (("a" * 32) -join ""))
+    $reusedPidCandidate = Join-Path $runtimeTlsRoot `
+        ("meeting-service-client.{0}.{1}.{2}.key" -f `
+            $PID, ($currentProcessStartFileTime + 1), (("c" * 32) -join ""))
+    $oversizedPidCandidate = Join-Path $runtimeTlsRoot `
+        ("meeting-service-client.{0}.{1}.{2}.key" -f `
+            (("9" * 32) -join ""), $currentProcessStartFileTime, `
+            (("b" * 32) -join ""))
+    Write-MeetingAiSecretFileAtomic -Path $liveOwnerCandidate -Content "test-live-owner"
+    Write-MeetingAiSecretFileAtomic -Path $reusedPidCandidate -Content "test-reused-pid"
+    Write-MeetingAiSecretFileAtomic -Path $oversizedPidCandidate -Content "test-invalid-pid"
+    Remove-MeetingAiStaleRuntimeTlsKeys
+    Assert-True (Test-Path -LiteralPath $liveOwnerCandidate -PathType Leaf) `
+        "Stale-key sweep must preserve a living process owner."
+    Assert-True (-not (Test-Path -LiteralPath $reusedPidCandidate)) `
+        "Stale-key sweep must reject a reused PID with a different start time."
+    Assert-True (Test-Path -LiteralPath $oversizedPidCandidate -PathType Leaf) `
+        "Stale-key sweep must ignore a non-Int32 PID without throwing."
+    Remove-Item -LiteralPath $liveOwnerCandidate, $oversizedPidCandidate -Force
 
     $repoCommit = (& git -C $repoRoot rev-parse HEAD).Trim().ToLowerInvariant()
     Assert-True ($LASTEXITCODE -eq 0) "Test repository commit could not be read."
@@ -437,6 +556,87 @@ try {
         -StartupScriptPath $startScript `
         -PythonExe $pythonExe `
         -AppEnv "test"
+
+    Write-FreshPermit -Path $permitSource
+    $env:PLATFORM_AI_TEST_INJECT_MEETING_AI_POST_REPLACE_FAILURE = "1"
+    try {
+        Assert-ThrowsLike {
+            & $configureScript `
+                -ReadyConsumerEnabled "true" `
+                -RuntimeAppEnv "test" `
+                -ReadyRedisUrl $secureReadyRedisUrl `
+                -TlsMode "mutual" `
+                -TlsCaPath $tlsCaSource `
+                -TlsClientCertPath $tlsCertSource `
+                -TlsClientKeyPath $tlsKeySource `
+                -ReadyPermitSourcePath $permitSource `
+                -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+                -PythonExe $pythonExe `
+                -StorePath $storePath `
+                -ConfigPath $configPath `
+                -Confirm:$false
+        } "TEST_INJECTED_MEETING_AI_POST_REPLACE_FAILURE"
+    } finally {
+        Remove-Item Env:PLATFORM_AI_TEST_INJECT_MEETING_AI_POST_REPLACE_FAILURE `
+            -ErrorAction SilentlyContinue
+    }
+    $postReplaceValues = Read-MeetingAiConfigFile -Path $configPath
+    foreach ($name in @(
+            "MAI_MEETING_SERVICE_TLS_CA_PATH",
+            "MAI_MEETING_SERVICE_TLS_CLIENT_CERT_PATH",
+            "MAI_READY_PRE_ENABLE_PERMIT_PATH",
+            "MAI_READY_ACTIVATION_RECEIPT_PATH"
+        )) {
+        Assert-True (Test-Path -LiteralPath $postReplaceValues[$name] -PathType Leaf) `
+            "Post-replace failure must retain active config artifact $name."
+    }
+    Assert-True (-not (Test-Path -LiteralPath $permitSource)) `
+        "Post-replace failure after config commit must retain the consumed permit state."
+    $installedPermit = $postReplaceValues["MAI_READY_PRE_ENABLE_PERMIT_PATH"]
+    $installedPermitTrustRoot = `
+        $postReplaceValues["MAI_READY_PERMIT_TRUST_ROOT_PATH"]
+    $installedReceipt = $postReplaceValues["MAI_READY_ACTIVATION_RECEIPT_PATH"]
+
+    $configHashBeforeRedisFailure = (Get-FileHash -Algorithm SHA256 $configPath).Hash
+    $tlsPublicFilesBeforeRedisFailure = @(Get-ChildItem -LiteralPath `
+        (Join-Path $runtimeRoot "tls") -File).Count
+    Write-FreshPermit -Path $permitSource
+    $invalidRedisCredential = ConvertTo-SecureString `
+        "redis://ci-user:wrong-password@127.0.0.1:6379/0" -AsPlainText -Force
+    $preflightSentinel = "preserve-parent-environment"
+    $env:MAI_READY_REDIS_PREFLIGHT_URL = $preflightSentinel
+    try {
+        Assert-ThrowsLike {
+            & $configureScript `
+                -ReadyConsumerEnabled "true" `
+                -RuntimeAppEnv "test" `
+                -ReadyRedisUrl $invalidRedisCredential `
+                -TlsMode "mutual" `
+                -TlsCaPath $tlsCaSource `
+                -TlsClientCertPath $tlsCertSource `
+                -TlsClientKeyPath $tlsKeySource `
+                -ReadyPermitSourcePath $permitSource `
+                -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+                -PythonExe $pythonExe `
+                -StorePath $storePath `
+                -ConfigPath $configPath `
+                -Confirm:$false
+        } "Ready Redis endpoint preflight failed"
+    } finally {
+        $invalidRedisCredential.Dispose()
+    }
+    Assert-True ($env:MAI_READY_REDIS_PREFLIGHT_URL -eq $preflightSentinel) `
+        "Redis preflight must restore its caller's process environment."
+    Remove-Item Env:MAI_READY_REDIS_PREFLIGHT_URL
+    Assert-True ((Get-FileHash -Algorithm SHA256 $configPath).Hash -eq `
+        $configHashBeforeRedisFailure) `
+        "Redis auth failure must preserve the active config byte-for-byte."
+    Assert-True (Test-Path -LiteralPath $permitSource -PathType Leaf) `
+        "Redis auth failure must not consume the fresh permit."
+    Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $runtimeRoot "tls") -File).Count -eq
+        $tlsPublicFilesBeforeRedisFailure) `
+        "Redis auth failure must remove newly staged public TLS files."
+    Remove-Item -LiteralPath $permitSource -Force
 
     $trustedPermitContent = [IO.File]::ReadAllText($installedPermit)
     $tamperedEnvelope = $trustedPermitContent | ConvertFrom-Json
@@ -745,6 +945,41 @@ try {
     }
     Assert-True ($oldPermitTrustRoot -eq $installedPermitTrustRoot) `
         "Permit rotation must keep the content-addressed trust root stable."
+
+    $backupPath = "$configPath.bak"
+    $originalBackupBytes = [IO.File]::ReadAllBytes($backupPath)
+    $invalidRestoreValues = Read-MeetingAiConfigFile -Path $backupPath
+    $invalidRestoreValues["MAI_READY_REDIS_URL_DPAPI"] = `
+        Protect-MeetingAiSecret -PlainText `
+            "redis://ci-user:wrong-password@127.0.0.1:6379/0"
+    Write-MeetingAiSecretFileAtomic `
+        -Path $backupPath `
+        -Content (ConvertTo-TestMeetingAiConfigContent -Values $invalidRestoreValues)
+    $configBeforeRestorePreflightFailure = [IO.File]::ReadAllBytes($configPath)
+    Start-Sleep -Milliseconds 20
+    Write-FreshPermit -Path $permitSource
+    try {
+        Assert-ThrowsLike {
+            & $configureScript `
+                -RestoreBackup `
+                -ReadyPermitSourcePath $permitSource `
+                -ReadyPermitTrustRootSourcePath $permitTrustRootSource `
+                -PythonExe $pythonExe `
+                -StorePath $storePath `
+                -ConfigPath $configPath `
+                -Confirm:$false
+        } "Ready Redis endpoint preflight failed"
+        Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq
+            [Convert]::ToBase64String($configBeforeRestorePreflightFailure)) `
+            "Restore Redis preflight failure must preserve the active config."
+        Assert-True (Test-Path -LiteralPath $permitSource -PathType Leaf) `
+            "Restore Redis preflight failure must not consume the fresh permit."
+    } finally {
+        Write-MeetingAiSecretBytesAtomic `
+            -Path $backupPath -Bytes $originalBackupBytes `
+            -Purpose "Runtime config backup"
+        Remove-Item -LiteralPath $permitSource -Force -ErrorAction SilentlyContinue
+    }
 
     Start-Sleep -Milliseconds 20
     Write-FreshPermit -Path $permitSource
@@ -1126,6 +1361,10 @@ try {
     Write-Host "meeting-ai Windows runtime contract: PASS"
 } finally {
     Clear-MeetingAiManagedProcessEnvironment
+    if ($null -ne $fakeRedisProcess -and -not $fakeRedisProcess.HasExited) {
+        Stop-Process -Id $fakeRedisProcess.Id -Force
+        $fakeRedisProcess.WaitForExit()
+    }
     $env:CI = $previousCi
     $secureCredential.Dispose()
     $secureReadyRedisUrl.Dispose()

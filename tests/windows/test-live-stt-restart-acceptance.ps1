@@ -19,6 +19,58 @@ function Assert-Throws {
     Assert-True $threw $Message
 }
 
+function New-TestMeetingAiReadiness {
+    param(
+        [bool]$DeliveryReady = $true,
+        [bool]$ConsumerEnabled = $true,
+        [bool]$ConsumerReady = $true,
+        [bool]$WorkerRunning = $true,
+        [bool]$RedisGroupReady = $true,
+        [AllowNull()][object]$ErrorCode = $null
+    )
+    return [pscustomobject]@{
+        analysis_delivery = [pscustomobject]@{ ready = $DeliveryReady }
+        ready_consumer = [pscustomobject]@{
+            enabled = $ConsumerEnabled
+            ready = $ConsumerReady
+            worker_running = $WorkerRunning
+            redis_group_ready = $RedisGroupReady
+            error_code = $ErrorCode
+        }
+    }
+}
+
+Assert-True (Test-MeetingAiDependencyReadiness `
+    -Readiness (New-TestMeetingAiReadiness)) `
+    "A fully ready enabled meeting-ai dependency must pass."
+Assert-True (Test-MeetingAiDependencyReadiness `
+    -Readiness (New-TestMeetingAiReadiness -ConsumerEnabled $false)) `
+    "An explicitly disabled and ready consumer must pass."
+Assert-True (-not (Test-MeetingAiDependencyReadiness -Readiness $null)) `
+    "A null readiness body must fail closed."
+Assert-True (-not (Test-MeetingAiDependencyReadiness `
+    -Readiness ([pscustomobject]@{}))) `
+    "Missing readiness components must fail closed."
+Assert-True (-not (Test-MeetingAiDependencyReadiness `
+    -Readiness ([pscustomobject]@{
+        analysis_delivery = $null
+        ready_consumer = [pscustomobject]@{ enabled = $false; ready = $true }
+    }))) "A null delivery component must fail closed."
+foreach ($degraded in @(
+        (New-TestMeetingAiReadiness -DeliveryReady $false),
+        (New-TestMeetingAiReadiness -ConsumerReady $false),
+        (New-TestMeetingAiReadiness -WorkerRunning $false),
+        (New-TestMeetingAiReadiness -RedisGroupReady $false),
+        (New-TestMeetingAiReadiness -ErrorCode "redis-unavailable")
+    )) {
+    Assert-True (-not (Test-MeetingAiDependencyReadiness -Readiness $degraded)) `
+        "A degraded enabled meeting-ai dependency must fail closed."
+}
+$missingWorker = New-TestMeetingAiReadiness
+$missingWorker.ready_consumer.PSObject.Properties.Remove("worker_running")
+Assert-True (-not (Test-MeetingAiDependencyReadiness -Readiness $missingWorker)) `
+    "A missing enabled-consumer worker field must fail closed."
+
 $startScriptPath = Join-Path $repoRoot "deploy\gpu-host\start-live-stt.ps1"
 $startScriptSource = [IO.File]::ReadAllText($startScriptPath)
 $runtimeImportMarker = '$null = Import-LiveSttRuntimeEnvironment'

@@ -23,10 +23,11 @@ $script:LiveSttPreloadRetryBaseSec = 1
 $script:LiveSttPreloadRoleCount = 2
 $script:LiveSttSmokeWorstCaseSec = 150
 $script:LiveSttTaskTransitionReserveSec = 60
+$script:MeetingAiReadinessDeadlineSec = 30
 # Derived ceiling, not a free parameter: it must stay above
 # LiveSttAcceptanceWorstCaseSec, which the guard at the bottom of this file
 # enforces. With a 360s model-load budget the worst case is
-#   2 roles * ((2 attempts * (360 + 2*2)) + 1 retry backoff) + 150 + 60 = 1668.
+#   2 roles * ((2 attempts * (360 + 2*2)) + 1 retry backoff) + 150 + 60 + 30 = 1698.
 $script:LiveSttReadinessDeadlineSec = 1800
 
 # Production speech-gate profile. RMS stays deliberately low so quiet speech
@@ -63,7 +64,8 @@ $script:LiveSttPreloadWorstCaseSec = $script:LiveSttPreloadRoleCount * (
 $script:LiveSttAcceptanceWorstCaseSec = (
     $script:LiveSttPreloadWorstCaseSec +
     $script:LiveSttSmokeWorstCaseSec +
-    $script:LiveSttTaskTransitionReserveSec
+    $script:LiveSttTaskTransitionReserveSec +
+    $script:MeetingAiReadinessDeadlineSec
 )
 
 if ($script:LiveSttAcceptanceWorstCaseSec -gt $script:LiveSttReadinessDeadlineSec) {
