@@ -1514,7 +1514,10 @@ function Invoke-GpuHostRevisionAcceptance {
         [decimal]$readiness.speech_gate.contextual_artifact.min_no_speech_prob -eq
           [decimal]$script:LiveSttContextualArtifactMinNoSpeechProb -and
         $readiness.speech_gate.contextual_artifact.requires_text_match -eq $true -and
-        $readiness.speech_gate.vad.live_enabled -eq $true -and
+        # #324 policy: live-lane VAD is OFF so drafts keep flowing; the readiness
+        # contract must assert the SAME value or acceptance hangs to deadline
+        # and rejects the revision (observed 2026-08-04: 30 min wait -> EXIT=3).
+        $readiness.speech_gate.vad.live_enabled -eq $false -and
         $readiness.speech_gate.vad.final_enabled -eq $true -and
         $readiness.speech_gate.vad.empty_window_action -eq "skip_decode" -and
         [decimal]$readiness.speech_gate.vad.threshold -eq
