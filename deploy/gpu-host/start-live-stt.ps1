@@ -113,7 +113,14 @@ $env:STT_SPEECH_GATE_PROFILE = "$script:LiveSttSpeechGateProfile"
 $env:STT_SPEECH_GATE_RMS_SOURCE = "source-baseline"
 $env:STT_SILENCE_RMS = "$script:LiveSttSilenceRms"
 $env:STT_MIN_SPEECH_RMS = "$script:LiveSttMinSpeechRms"
-$env:STT_STREAM_LIVE_VAD_FILTER = "true"
+# Live lane VAD OFF (2026-08-04, gitops#3419 field report): silero VAD on the
+# 2 s live windows starves drafts — the tr-cv17 fixture yielded <3 partials
+# across 2x replays and a real 2.5-minute meeting produced 3 drafts total, so
+# the UI tail goes dead and text lands only on 5 s forced-commit finals.
+# Drafts are ephemeral (always superseded by the VAD-gated finals), so the
+# cost of decoding quiet live windows is bounded while the durable transcript
+# keeps full VAD protection on the final lane.
+$env:STT_STREAM_LIVE_VAD_FILTER = "false"
 $env:STT_STREAM_FINAL_VAD_FILTER = "true"
 $env:STT_STREAM_VAD_THRESHOLD = "$script:LiveSttStreamVadThreshold"
 $env:STT_STREAM_VAD_MIN_SPEECH_DURATION_MS = `
@@ -202,7 +209,8 @@ $env:STT_STREAM_PRELOAD_READINESS_BUDGET_SEC = "$script:LiveSttReadinessDeadline
 # policy. Do not re-assert the RMS pair here: the validated ProgramData override
 # is intentionally allowed to replace only those two source baseline values.
 $env:STT_SPEECH_GATE_PROFILE = "$script:LiveSttSpeechGateProfile"
-$env:STT_STREAM_LIVE_VAD_FILTER = "true"
+# Mirrors the primary block above: live lane VAD off so drafts keep flowing.
+$env:STT_STREAM_LIVE_VAD_FILTER = "false"
 $env:STT_STREAM_FINAL_VAD_FILTER = "true"
 $env:STT_STREAM_VAD_THRESHOLD = "$script:LiveSttStreamVadThreshold"
 $env:STT_STREAM_VAD_MIN_SPEECH_DURATION_MS = `
