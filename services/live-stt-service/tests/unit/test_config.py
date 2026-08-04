@@ -313,8 +313,11 @@ def test_production_runtime_profile_is_fail_closed() -> None:
         cfg.Settings(**base, final_compute_type="int8")
     with pytest.raises(ValueError, match="speech_gate_profile"):
         cfg.Settings(**{**base, "speech_gate_profile": "development-unpinned"})
-    with pytest.raises(ValueError, match="stream_live_vad_filter"):
-        cfg.Settings(**{**base, "stream_live_vad_filter": False})
+    # Draft-lane VAD is now a policy choice: production must ACCEPT
+    # stream_live_vad_filter=False (gitops#3419 draft starvation) while the
+    # final-lane VAD invariant stays fail-closed.
+    accepted = cfg.Settings(**{**base, "stream_live_vad_filter": False})
+    assert accepted.stream_live_vad_filter is False
     with pytest.raises(ValueError, match="stream_final_vad_filter"):
         cfg.Settings(**{**base, "stream_final_vad_filter": False})
     with pytest.raises(ValueError, match="stream_vad_threshold"):
