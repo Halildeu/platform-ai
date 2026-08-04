@@ -268,8 +268,13 @@ class Settings(BaseSettings):
                     raise ValueError(f"{label} must be {expected} in production")
             if self.speech_gate_profile != "silero-balanced-v1":
                 raise ValueError("speech_gate_profile must be silero-balanced-v1 in production")
-            if not self.stream_live_vad_filter:
-                raise ValueError("stream_live_vad_filter must be enabled in production")
+            # Draft-lane VAD is a policy choice, not a production invariant:
+            # drafts are ephemeral and always superseded by the VAD-gated
+            # finals, and with silero on the 2 s live windows the draft lane
+            # starves (gitops#3419 field data: 3 drafts in a 2.5-minute
+            # meeting; tr-cv17 fixture <3 partials over 2x replays). The
+            # durable transcript keeps its guarantee below: final-lane VAD
+            # stays mandatory in production.
             if not self.stream_final_vad_filter:
                 raise ValueError("stream_final_vad_filter must be enabled in production")
             expected_speech_gate = {
