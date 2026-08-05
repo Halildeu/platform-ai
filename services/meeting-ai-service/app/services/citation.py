@@ -367,6 +367,19 @@ def _similarity(claim_tokens: set[str], sent_tokens: set[str]) -> float:
     return covered / len(claim_tokens)
 
 
+def is_groundable_evidence(text: str) -> bool:
+    """Whether a transcript span carries enough content to ground a claim.
+
+    Public because the extractive selector (gitops#3444) must offer the model
+    only sentences that CAN ground: a span below this bar comes back
+    LOW_CONFIDENCE from `ground_claim` even when quoted verbatim ("Tamam.",
+    "Yunanistan için."). Exposing the verifier's own criterion — instead of
+    approximating it with a character count — is what makes selection a
+    structural guarantee rather than a strong tendency.
+    """
+    return len(_tokens(text)) >= _MIN_EVIDENCE_CONTENT_TOKENS
+
+
 def _polarity(text: str) -> int:
     """Signed outcome polarity: +1 (asserts it happened), -1 (asserts it did NOT), 0.
 
@@ -418,12 +431,21 @@ def ground_claim(
     PASSED → grounded; FAILED/LOW_CONFIDENCE → not grounded (not shippable, D8.1).
     """
     ctoks = _tokens(claim)
+    normalized_claim = claim.strip()
     best: Sentence | None = None
     best_sim = 0.0
+    best_is_exact = False
     for s in sentences:
         sim = _similarity(ctoks, _tokens(s.text))
-        if sim > best_sim:
-            best, best_sim = s, sim
+        is_exact = s.text.strip() == normalized_claim
+        # Ties go to the sentence that IS the claim. Real transcripts repeat
+        # near-identical lines ("…yoğun bir 1 gün geçirdik." vs "…yoğun bir gün
+        # geçirdik."); content-token coverage cannot separate them (a bare digit
+        # is not a content token), so first-wins would cite the look-alike and
+        # then fail the number gate against it — rejecting a claim that is
+        # verbatim present. Exact identity is the strongest possible attribution.
+        if sim > best_sim or (sim == best_sim and is_exact and not best_is_exact):
+            best, best_sim, best_is_exact = s, sim, is_exact
 
     if best is None:
         return _ungrounded(claim, best_sim, "no transcript sentence covers the claim")
