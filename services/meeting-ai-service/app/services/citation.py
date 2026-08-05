@@ -39,6 +39,8 @@ import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 
+from app.services import morphology
+
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 _WORD = re.compile(r"\w+", re.UNICODE)
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
@@ -120,8 +122,9 @@ _CITATION_VERIFIER_VERSION = "v4-adr0043-single-source-materiality"
 _DEFAULT_THRESHOLD = 0.65
 _MIN_EVIDENCE_CONTENT_TOKENS = 2
 # Regulated meeting intelligence is precision-first: even a short unsupported
-# clause such as "fabrika açtı" is material. Morphology/paraphrase recall belongs
-# behind a future verifier, not a free unsupported-token allowance.
+# clause such as "fabrika açtı" is material. Morphology recall lives behind the
+# `_token_covered` verifier (gitops#3444 — guarded nominal lemmas, verbs stay
+# exact), NOT behind a free unsupported-token allowance; this stays 0.
 _MAX_UNSUPPORTED_CONTENT_TOKENS = 0
 
 
@@ -278,6 +281,12 @@ def owner_supported_by_source(owner: str | None, source_text: str) -> bool:
     assignee string or all of its content tokens to be present in the SAME source
     sentence that grounded the action. Empty owners are safe because no assignee
     will be shown.
+
+    Deliberately EXACT — the gitops#3444 morphology layer does NOT apply here
+    (nor to due dates): attribution metadata is the "Can"-vs-"canlı" precision
+    case, and a lemma bridge on a person token is exactly the false attribution
+    this guard exists to block. Apostrophe-suffixed names ("Sevil'e") already
+    surface-match because tokenization splits at the apostrophe.
     """
     if owner is None or not owner.strip():
         return True
@@ -315,18 +324,48 @@ def due_date_supported_by_source(due_date: str | None, source_text: str) -> bool
     return due_date_tokens.issubset(_tokens(source_text))
 
 
-def _similarity(claim_tokens: set[str], sent_tokens: set[str]) -> float:
-    """Overlap coefficient: |A∩B| / |A| — how much of the claim is covered.
+def _token_covered(claim_token: str, sent_tokens: set[str]) -> bool:
+    """One claim content token is supported by the sentence's token set.
 
-    Deliberately EXACT-token (no prefix/stem matching): a naive prefix merge can't
-    tell aspect/tense apart ("onaylandı" done vs "onaylanması" pending → both stem
-    "onaylan"), which would FALSE-PASS a pending item as decided. For a regulated
-    product precision > recall — withholding a true-but-morphologically-variant claim
-    is safe; shipping a false one is not. Suffix-aware recall (a proper, tense-
-    preserving Turkish lemmatizer) is the v2 roadmap, not a heuristic."""
+    Exact surface match first (always safe), then the gitops#3444 morphology
+    layer: a guarded NOMINAL lemma match ("bütçenin"↔"bütçe", "raporda"↔
+    "rapor"). Verbs never lemma-match — a token with any verb reading
+    contributes no lemmas — so the original aspect/tense objection ("onaylandı"
+    done vs "onaylanması" pending must not merge) still holds; see
+    `morphology.py` for the full guard set (verb bar, minimum shared-lemma
+    length, suffixing-prefix check with final-consonant softening).
+    """
+    if claim_token in sent_tokens:
+        return True
+    if not morphology.available():
+        return False
+    return any(
+        morphology.tokens_share_nominal_lemma(claim_token, sent_token)
+        for sent_token in sent_tokens
+    )
+
+
+def _uncovered_tokens(claim_tokens: set[str], sent_tokens: set[str]) -> set[str]:
+    """Claim content tokens with no exact OR guarded-lemma support."""
+    return {t for t in claim_tokens if not _token_covered(t, sent_tokens)}
+
+
+def _similarity(claim_tokens: set[str], sent_tokens: set[str]) -> float:
+    """Coverage: |supported| / |claim| — how much of the claim is covered.
+
+    Support = exact surface token, or the guarded nominal-lemma match of
+    `_token_covered` (gitops#3444). Historically this was deliberately
+    EXACT-token only, because a naive prefix merge can't tell aspect/tense
+    apart ("onaylandı" done vs "onaylanması" pending → both stem "onaylan") and
+    would FALSE-PASS a pending item as decided; the docstring called a proper,
+    tense-preserving Turkish lemmatizer "the v2 roadmap, not a heuristic". The
+    morphology layer IS that roadmap item: verbs remain exact-only, so the
+    false-pass stays closed while nominal inflection stops costing recall
+    (measured: 29% of analyses shipped fully-withheld summaries)."""
     if not claim_tokens:
         return 0.0
-    return len(claim_tokens & sent_tokens) / len(claim_tokens)
+    covered = sum(1 for t in claim_tokens if _token_covered(t, sent_tokens))
+    return covered / len(claim_tokens)
 
 
 def _polarity(text: str) -> int:
@@ -410,7 +449,10 @@ def ground_claim(
     if claim_nums and not claim_nums.issubset(_numbers(best.text)):
         return _ungrounded(claim, best_sim, "number/quantity in claim not found in source")
 
-    unsupported_tokens = ctoks - best_tokens
+    # Same support predicate as coverage (gitops#3444): a nominally-inflected
+    # variant of a sentence word is not "unsupported content" — but any token
+    # with a verb reading still needs its exact surface in the source.
+    unsupported_tokens = _uncovered_tokens(ctoks, best_tokens)
     if len(unsupported_tokens) > _MAX_UNSUPPORTED_CONTENT_TOKENS:
         return _ungrounded(
             claim,
