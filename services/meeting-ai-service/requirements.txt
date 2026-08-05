@@ -10,3 +10,6 @@ prometheus-client==0.21.0
 httpx==0.27.2
 cryptography==46.0.7
 redis==5.1.1
+# gitops#3444: Turkish morphology for citation grounding recall (Zemberek port).
+# Word-level _parse only — no NLTK data download; see app/services/morphology.py.
+zeyrek==0.1.3
