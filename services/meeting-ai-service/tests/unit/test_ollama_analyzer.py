@@ -137,10 +137,18 @@ def test_ollama_prompt_requires_extractive_summary_and_independent_actions(
 
     prompt = captured["prompt"]
     assert isinstance(prompt, str)
-    assert '"summary" İÇİN: cümleleri metinden AYNEN kopyala' in prompt
-    assert '"decisions" ve "action_items" BİRBİRİNDEN BAĞIMSIZ' in prompt
-    assert "HER İKİ listeye de ekle" in prompt
-    assert transcript in prompt
+    # gitops#3444: extractive is no longer *requested* in prose (the model
+    # ignored that — measured median coverage 0.33), it is STRUCTURAL: the
+    # prompt offers a numbered menu and asks for numbers, so the answer cannot
+    # contain model-authored prose at all.
+    assert "sadece NUMARA SEÇ" in prompt
+    assert "summary_sentences" in prompt
+    assert "decision_sentences" in prompt
+    assert "action_item_sentences" in prompt
+    # The independent decision/action intent of the original test survives.
+    assert "HER İKİ listeye de yaz" in prompt
+    # The transcript is present as a numbered menu, not as a raw blob.
+    assert f"[1] {transcript}" in prompt
 
 
 def test_overlapping_decision_action_and_summary_survive_grounding(

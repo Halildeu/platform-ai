@@ -29,6 +29,15 @@ from app.services.citation import (
     owner_supported_by_source,
     split_sentences,
 )
+from app.services.extractive import (
+    MAX_DECISION_SENTENCES,
+    MAX_SUMMARY_SENTENCES,
+    looks_like_selection,
+    materialize_action_items,
+    materialize_selection,
+    number_transcript,
+    selectable_sentences,
+)
 from app.services.redact import assert_no_residual_pii, redact_pii
 
 
@@ -216,6 +225,40 @@ Lütfen sadece geçerli JSON döndür, başka bir şey ekleme:
 """
 
 
+_OLLAMA_EXTRACTIVE_PROMPT = """\
+Sen Türkçe toplantı tutanaklarını analiz eden bir asistansın. Aşağıda toplantı \
+metni NUMARALI cümleler hâlinde verildi.
+
+GÖREVİN: cümle YAZMA — sadece NUMARA SEÇ.
+
+KURALLAR:
+- Yalnızca aşağıdaki listede bulunan numaraları kullan. Kendi cümleni yazma, \
+cümleleri birleştirme, yeniden ifade etme.
+- "summary_sentences": toplantıyı en iyi özetleyen en fazla {max_summary} cümlenin \
+numarası.
+- "decision_sentences": karar bildiren cümlelerin numaraları (karar yoksa boş liste).
+- "action_item_sentences": yapılacak iş bildiren her cümle için bir nesne:
+  - "sentence": cümle numarası
+  - "owner": sorumlu kişi/ekip ADI — SADECE o cümlede açıkça geçiyorsa, yoksa null
+  - "due_date": termin ifadesi — SADECE o cümlede açıkça geçiyorsa, yoksa null. \
+Metinde nasıl geçiyorsa öyle yaz ("cuma" ise "cuma"); takvim tarihine çevirme.
+- Bir cümle hem karar hem aksiyon bildiriyorsa numarasını HER İKİ listeye de yaz.
+- Emin olmadığın numarayı hiç yazma. Boş liste geçerli bir cevaptır.
+
+NUMARALI METİN:
+{numbered}
+
+Sadece geçerli JSON döndür, başka bir şey ekleme:
+{{
+  "summary_sentences": [1, 5],
+  "decision_sentences": [5],
+  "action_item_sentences": [
+    {{"sentence": 7, "owner": "birinci ekip", "due_date": "cuma"}}
+  ]
+}}
+"""
+
+
 class OllamaAnalyzer:
     """Local Ollama LLM backend (Option B, #54). Intended on-prem; the on-host
     boundary is enforced by a deploy-time NetworkPolicy, not by this code (ADR-0034)."""
@@ -224,7 +267,24 @@ class OllamaAnalyzer:
         self._settings = settings
 
     def analyze(self, transcript: str) -> AnalysisDraft:
-        prompt = _OLLAMA_PROMPT.format(transcript=transcript)
+        # gitops#3444 — extractive by construction. The model picks sentence
+        # NUMBERS from a menu built with the verifier's own splitter, so a
+        # selected claim IS a transcript sentence (coverage 1.0, fusion
+        # unrepresentable). Numbering and materialization must share
+        # `split_sentences` with `citation.py`; a second splitter would make
+        # index *i* mean different text on the two sides.
+        menu = selectable_sentences(split_sentences(transcript))
+        use_selection = bool(menu)
+        if use_selection:
+            prompt = _OLLAMA_EXTRACTIVE_PROMPT.format(
+                max_summary=MAX_SUMMARY_SENTENCES,
+                numbered=number_transcript(menu),
+            )
+        else:
+            # Nothing selectable (very short or filler-only transcript): the
+            # legacy free-text prompt still produces a best-effort answer that
+            # the verifier gates as before.
+            prompt = _OLLAMA_PROMPT.format(transcript=transcript)
         payload = {
             "model": self._settings.ollama_model,
             "prompt": prompt,
@@ -246,17 +306,38 @@ class OllamaAnalyzer:
             raw_text = resp.json().get("response", "")
             # Strip markdown code fences if Ollama wraps JSON
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip())
-            data = _require_ollama_schema(json.loads(cleaned))
-            draft = AnalysisDraft(
-                summary=str(data["summary"]),
-                decisions=[str(d) for d in data["decisions"]],
-                action_items=[
-                    ActionItem(
-                        text=str(a["text"]), owner=a.get("owner"), due_date=a.get("due_date")
-                    )
-                    for a in data["action_items"]
-                ],
-            )
+            parsed = json.loads(cleaned)
+            if use_selection and looks_like_selection(parsed):
+                summary_sentences = materialize_selection(
+                    parsed.get("summary_sentences"), menu, MAX_SUMMARY_SENTENCES
+                )
+                draft = AnalysisDraft(
+                    summary=" ".join(summary_sentences),
+                    decisions=materialize_selection(
+                        parsed.get("decision_sentences"), menu, MAX_DECISION_SENTENCES
+                    ),
+                    action_items=[
+                        ActionItem(text=text, owner=owner, due_date=due_date)
+                        for text, owner, due_date in materialize_action_items(
+                            parsed.get("action_item_sentences"), menu
+                        )
+                    ],
+                )
+            else:
+                # The model ignored the index contract (or the transcript had no
+                # selectable sentence). Keep the pre-#3444 behaviour rather than
+                # failing the analysis; the verifier still gates every claim.
+                data = _require_ollama_schema(parsed)
+                draft = AnalysisDraft(
+                    summary=str(data["summary"]),
+                    decisions=[str(d) for d in data["decisions"]],
+                    action_items=[
+                        ActionItem(
+                            text=str(a["text"]), owner=a.get("owner"), due_date=a.get("due_date")
+                        )
+                        for a in data["action_items"]
+                    ],
+                )
         except httpx.HTTPError as exc:
             # Transcript-free message (KVKK): class name + endpoint only.
             raise BackendUnavailableError(
