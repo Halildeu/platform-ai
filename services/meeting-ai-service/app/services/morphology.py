@@ -58,6 +58,7 @@ from __future__ import annotations
 import logging
 import threading
 from functools import lru_cache
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +68,12 @@ _MIN_SHARED_LEMMA_CHARS = 4
 _FINAL_SOFTENING = {"p": "b", "ç": "c", "t": "d", "k": "ğ"}
 _FINAL_SOFTENING_ALT = {"k": "g"}  # renk → rengi
 
-_analyzer = None
+_analyzer: Any = None
 _analyzer_lock = threading.Lock()
 _import_failed = False
 
 
-def _get_analyzer():
+def _get_analyzer() -> Any | None:
     """Lazily build the shared Zeyrek analyzer; None when unavailable.
 
     Zeyrek's word-level `_parse` is deliberately used instead of the public
@@ -90,7 +91,7 @@ def _get_analyzer():
         if _analyzer is not None or _import_failed:
             return _analyzer
         try:
-            from zeyrek import MorphAnalyzer
+            from zeyrek import MorphAnalyzer  # type: ignore[import-untyped]
 
             # PII discipline: zeyrek logs every analysis — INCLUDING the
             # analyzed token, i.e. transcript content — and does so at
@@ -103,11 +104,13 @@ def _get_analyzer():
             zeyrek_logger.handlers = [logging.NullHandler()]
             _analyzer = MorphAnalyzer()
             logger.info("citation morphology active analyzer=zeyrek")
-        except Exception as exc:  # pragma: no cover - exercised via fallback test
+        # Any import/init failure (missing wheel, corrupt data file, future
+        # zeyrek API drift) must fall back to exact-surface grounding — an
+        # analysis run must never crash because the OPTIONAL recall layer did.
+        except Exception as exc:  # noqa: BLE001
             _import_failed = True
             logger.warning(
-                "citation morphology unavailable — exact-surface grounding only "
-                "(err_class=%s)",
+                "citation morphology unavailable — exact-surface grounding only " "(err_class=%s)",
                 type(exc).__name__,
             )
     return _analyzer
@@ -129,8 +132,10 @@ def content_lemmas(token: str) -> frozenset[str]:
     if analyzer is None:
         return frozenset()
     try:
+        # Private zeyrek API by design; the contract test pins it (see module doc).
         parses = analyzer._parse(token)
-    except Exception:  # noqa: BLE001 - malformed input must degrade, not raise
+    # Malformed/edge input must degrade to exact-match, never raise.
+    except Exception:  # noqa: BLE001
         return frozenset()
     if not parses:
         return frozenset()

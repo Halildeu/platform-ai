@@ -340,8 +340,7 @@ def _token_covered(claim_token: str, sent_tokens: set[str]) -> bool:
     if not morphology.available():
         return False
     return any(
-        morphology.tokens_share_nominal_lemma(claim_token, sent_token)
-        for sent_token in sent_tokens
+        morphology.tokens_share_nominal_lemma(claim_token, sent_token) for sent_token in sent_tokens
     )
 
 
