@@ -82,6 +82,10 @@ function Get-MeetingAiConfigSchema {
         # "lease > timeout + 2 transcript windows" (default lease 120 < 120+20).
         # ready_consumer_lease_sec already reads this via env_prefix.
         "MAI_READY_CONSUMER_LEASE_SEC" = @{ Required = $false; SecretTarget = "" }
+        # gitops#3484: last link of the lease chain — claim-idle must cover the
+        # lease (config guard at ready_redis_claim_idle_ms). Field reads env via
+        # env_prefix; only this allowlist gated it.
+        "MAI_READY_REDIS_CLAIM_IDLE_MS" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_MAX_ATTEMPTS" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_BASE_BACKOFF_SEC" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_MAX_BACKOFF_SEC" = @{ Required = $false; SecretTarget = "" }
