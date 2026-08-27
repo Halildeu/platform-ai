@@ -78,6 +78,10 @@ function Get-MeetingAiConfigSchema {
         # loader allowlist was the only gate. 60s default starves long transcripts
         # under GPU load (2026-08-27: three recovered events re-died on it).
         "MAI_REQUEST_TIMEOUT" = @{ Required = $false; SecretTarget = "" }
+        # gitops#3484 follow-up: raising MAI_REQUEST_TIMEOUT trips the safety rule
+        # "lease > timeout + 2 transcript windows" (default lease 120 < 120+20).
+        # ready_consumer_lease_sec already reads this via env_prefix.
+        "MAI_READY_CONSUMER_LEASE_SEC" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_MAX_ATTEMPTS" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_BASE_BACKOFF_SEC" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_MAX_BACKOFF_SEC" = @{ Required = $false; SecretTarget = "" }
