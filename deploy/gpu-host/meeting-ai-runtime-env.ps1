@@ -73,6 +73,11 @@ function Get-MeetingAiConfigSchema {
             SecretTarget = "MAI_INGESTION_ENCRYPTION_KEYS_JSON"
         }
         "MAI_INGESTION_TIMEOUT_SEC" = @{ Required = $false; SecretTarget = "" }
+        # gitops#3484: Ollama analysis ceiling. Python-side field request_timeout
+        # (ge=1, le=300) already reads MAI_REQUEST_TIMEOUT via env_prefix; the
+        # loader allowlist was the only gate. 60s default starves long transcripts
+        # under GPU load (2026-08-27: three recovered events re-died on it).
+        "MAI_REQUEST_TIMEOUT" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_MAX_ATTEMPTS" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_BASE_BACKOFF_SEC" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_MAX_BACKOFF_SEC" = @{ Required = $false; SecretTarget = "" }

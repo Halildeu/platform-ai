@@ -120,7 +120,11 @@ $env:STT_MIN_SPEECH_RMS = "$script:LiveSttMinSpeechRms"
 # Drafts are ephemeral (always superseded by the VAD-gated finals), so the
 # cost of decoding quiet live windows is bounded while the durable transcript
 # keeps full VAD protection on the final lane.
-$env:STT_STREAM_LIVE_VAD_FILTER = "false"
+# gitops#3484: live-path VAD ON. With it off, Whisper hallucinates Turkish
+    # subtitle credits ("Çeviri ve Altyazı M.K.") into silent stretches — reported
+    # live on 2026-08-17. Final path already runs VAD; the same Silero gate now
+    # protects the live stream too.
+    $env:STT_STREAM_LIVE_VAD_FILTER = "true"
 $env:STT_STREAM_FINAL_VAD_FILTER = "true"
 $env:STT_STREAM_VAD_THRESHOLD = "$script:LiveSttStreamVadThreshold"
 $env:STT_STREAM_VAD_MIN_SPEECH_DURATION_MS = `
@@ -210,7 +214,11 @@ $env:STT_STREAM_PRELOAD_READINESS_BUDGET_SEC = "$script:LiveSttReadinessDeadline
 # is intentionally allowed to replace only those two source baseline values.
 $env:STT_SPEECH_GATE_PROFILE = "$script:LiveSttSpeechGateProfile"
 # Mirrors the primary block above: live lane VAD off so drafts keep flowing.
-$env:STT_STREAM_LIVE_VAD_FILTER = "false"
+# gitops#3484: live-path VAD ON. With it off, Whisper hallucinates Turkish
+    # subtitle credits ("Çeviri ve Altyazı M.K.") into silent stretches — reported
+    # live on 2026-08-17. Final path already runs VAD; the same Silero gate now
+    # protects the live stream too.
+    $env:STT_STREAM_LIVE_VAD_FILTER = "true"
 $env:STT_STREAM_FINAL_VAD_FILTER = "true"
 $env:STT_STREAM_VAD_THRESHOLD = "$script:LiveSttStreamVadThreshold"
 $env:STT_STREAM_VAD_MIN_SPEECH_DURATION_MS = `
