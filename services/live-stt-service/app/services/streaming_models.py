@@ -11,12 +11,13 @@ time, so CPU/CI environments are unaffected unless `/ws/stream` is used.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import math
 import multiprocessing as mp
+import multiprocessing.connection as mp_connection
 import os
-import queue
 import stat
 import threading
 import time
@@ -431,7 +432,16 @@ class DirectWhisperService:
             ).strip()
 
 
-def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_queue: Any) -> None:
+def _supervised_worker_main(
+    config: dict[str, object], address: str | tuple[str, int], authkey: bytes
+) -> None:
+    # Handle-free IPC (gitops#3485 WinError-5 class): the parent passes only a
+    # picklable pipe/socket ADDRESS + authkey, never a live Connection/Queue.
+    # Under Windows scheduled tasks, spawning with a pickled PipeConnection
+    # dies in DuplicateHandle(DUPLICATE_CLOSE_SOURCE) with WinError 5 during
+    # the restart storm (the parent recycles the queue while the child is
+    # still importing). Connecting BY NAME removes every handle transfer.
+    conn = mp_connection.Client(address, authkey=authkey)
     service = DirectWhisperService(
         cast(str, config["model_name"]),
         cast(str, config["device"]),
@@ -449,8 +459,9 @@ def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_q
         vad_parameters=cast(dict[str, float | int], config["vad_parameters"]),
     )
     while True:
-        task = task_queue.get()
+        task = conn.recv()
         if task.get("type") == "stop":
+            conn.close()
             return
         job_id = str(task.get("job_id", ""))
         try:
@@ -469,7 +480,7 @@ def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_q
                     bool(task.get("vad", False)),
                     hotwords,
                 )
-            result_queue.put({"job_id": job_id, "ok": True, "text": text})
+            conn.send({"job_id": job_id, "ok": True, "text": text})
         except BaseException as exc:  # noqa: BLE001 - inference reports class only
             response: dict[str, object] = {
                 "job_id": job_id,
@@ -484,7 +495,7 @@ def _supervised_worker_main(config: dict[str, object], task_queue: Any, result_q
                 # failure surface as an opaque "RuntimeError: ValueError" with
                 # no way to tell a bad path from a digest mismatch.
                 response["error_detail"] = str(exc)[:200]
-            result_queue.put(response)
+            conn.send(response)
 
 
 class _SupervisedWhisperService:
@@ -535,8 +546,9 @@ class _SupervisedWhisperService:
         self._call_lock = threading.Lock()
         self._closing = threading.Event()
         self._process: Any | None = None
-        self._task_queue: Any = None
-        self._result_queue: Any = None
+        self._listener: Any = None
+        self._conn: Any = None
+        self._conn_ready: threading.Event = threading.Event()
         self._model_loaded = False
         self._restart_blocked = False
         self._generation = 0
@@ -546,11 +558,40 @@ class _SupervisedWhisperService:
         if self._is_closing():
             raise WorkerCrashedError(f"streaming {self.role} worker is shutting down")
         self._generation = getattr(self, "_generation", 0) + 1
-        self._task_queue = self._ctx.Queue(maxsize=1)
-        self._result_queue = self._ctx.Queue(maxsize=1)
+        # Handle-free IPC (gitops#3485): the child connects BY ADDRESS, so no
+        # Connection/Queue handle is ever pickled into the spawn args. Under
+        # Windows scheduled tasks the pickled-handle path dies in
+        # DuplicateHandle(DUPLICATE_CLOSE_SOURCE) → WinError 5 whenever the
+        # parent recycles the channel while the child is still importing
+        # (30-60s of numpy/CUDA on a cold host), which the recovery loop then
+        # turns into a permanent respawn storm ("loading" forever).
+        authkey = os.urandom(32)
+        listener = mp_connection.Listener(address=None, authkey=authkey)
+        self._listener = listener
+        self._conn = None
+        conn_ready = threading.Event()
+        self._conn_ready = conn_ready
+        generation = self._generation
+
+        def _accept() -> None:
+            try:
+                conn = listener.accept()
+            except (OSError, EOFError, mp.AuthenticationError):
+                return
+            # A late accept from a superseded generation must not clobber the
+            # current channel: hand the socket back instead.
+            if self._generation != generation or self._is_closing():
+                conn.close()
+                return
+            self._conn = conn
+            conn_ready.set()
+
+        threading.Thread(
+            target=_accept, name=f"stt-stream-{self.role}-accept", daemon=True
+        ).start()
         self._process = self._ctx.Process(
             target=_supervised_worker_main,
-            args=(self._config, self._task_queue, self._result_queue),
+            args=(self._config, listener.address, bytes(authkey)),
             name=f"stt-stream-{self.role}-worker",
             daemon=True,
         )
@@ -566,19 +607,17 @@ class _SupervisedWhisperService:
         return closing is not None and closing.is_set()
 
     @staticmethod
-    def _close_queue(queue_object: Any) -> None:
-        close = getattr(queue_object, "close", None)
+    def _close_channel(channel: Any) -> None:
+        close = getattr(channel, "close", None)
         if callable(close):
-            close()
-        cancel_join_thread = getattr(queue_object, "cancel_join_thread", None)
-        if callable(cancel_join_thread):
-            cancel_join_thread()
+            with contextlib.suppress(OSError):
+                close()
 
     def _terminate_and_restart(
         self, *, restart: bool = True, deadline: float | None = None
     ) -> None:
-        task_queue = self._task_queue
-        result_queue = self._result_queue
+        conn = self._conn
+        listener = self._listener
         process = self._process
         # Invalidate readiness before touching the child. Even an unkillable
         # process must not leave the accepted stream's generation valid.
@@ -605,8 +644,11 @@ class _SupervisedWhisperService:
                 raise WorkerCrashedError(
                     f"streaming {getattr(self, 'role', 'final')} worker could not be stopped safely"
                 )
-        self._close_queue(task_queue)
-        self._close_queue(result_queue)
+        self._close_channel(conn)
+        self._close_channel(listener)
+        self._conn = None
+        self._listener = None
+        self._conn_ready = threading.Event()
         self._process = None
         if restart and not self._is_closing():
             if deadline is not None and time.monotonic() >= deadline:
@@ -657,24 +699,37 @@ class _SupervisedWhisperService:
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
             )
         job_id = str(uuid.uuid4())
-        try:
-            self._task_queue.put(
-                {
-                    "type": operation,
-                    "job_id": job_id,
-                    "audio": audio,
-                    "vad": vad,
-                    "hotwords": hotwords,
-                },
-                timeout=remaining,
-            )
-        except queue.Full as exc:
+        # Wait for the child to dial back in (it may spend tens of seconds in
+        # imports on a cold host). Deadline semantics are unchanged.
+        conn_ready = self._conn_ready
+        if not conn_ready.wait(timeout=remaining):
             self._terminate_and_restart(
                 restart=restart_on_failure,
                 deadline=effective_cleanup_deadline,
             )
             raise WorkerTimeoutError(
                 f"streaming {getattr(self, 'role', 'final')} worker queue exceeded timeout"
+            )
+        conn = self._conn
+        try:
+            # The single-flight call lock guarantees an idle worker here, so
+            # send() does not block on an unread previous payload.
+            conn.send(
+                {
+                    "type": operation,
+                    "job_id": job_id,
+                    "audio": audio,
+                    "vad": vad,
+                    "hotwords": hotwords,
+                }
+            )
+        except (OSError, EOFError, BrokenPipeError) as exc:
+            self._terminate_and_restart(
+                restart=restart_on_failure,
+                deadline=effective_cleanup_deadline,
+            )
+            raise WorkerCrashedError(
+                f"streaming {getattr(self, 'role', 'final')} worker channel broke"
             ) from exc
         while True:
             if self._is_closing():
@@ -699,9 +754,17 @@ class _SupervisedWhisperService:
                     f"streaming {getattr(self, 'role', 'final')} worker exceeded timeout"
                 )
             try:
-                response = self._result_queue.get(timeout=min(0.1, remaining))
-            except queue.Empty:
-                continue
+                if not conn.poll(min(0.1, remaining)):
+                    continue
+                response = conn.recv()
+            except (OSError, EOFError, BrokenPipeError) as exc:
+                self._terminate_and_restart(
+                    restart=restart_on_failure,
+                    deadline=effective_cleanup_deadline,
+                )
+                raise WorkerCrashedError(
+                    f"streaming {getattr(self, 'role', 'final')} worker channel broke"
+                ) from exc
             if response.get("job_id") != job_id:
                 continue
             if not response.get("ok"):
