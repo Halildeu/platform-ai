@@ -208,7 +208,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # fail-closed while this bounded loop reloads the same pinned service;
             # ensure_model() will never start a replacement while an unkillable old
             # child remains alive because the supervisor's restart_blocked guard wins.
-            while not preload_state.stop_event.wait(settings.stream_recovery_poll_sec):
+            # gitops#3485: exponential backoff on consecutive recovery failures.
+            # The unbounded 1s respawn loop is what turned a slow child import
+            # into a permanent WinError-5 storm; growing the pause gives each
+            # generation time to finish connecting before the next one starts.
+            recovery_failures = 0
+            while not preload_state.stop_event.wait(
+                min(
+                    settings.stream_recovery_poll_sec * (2 ** min(recovery_failures, 6)),
+                    60.0,
+                )
+            ):
+                round_had_failure = False
                 for label, service in preload_services:
                     healthy = bool(getattr(service, "healthy", True))
                     loaded = bool(getattr(service, "model_loaded", False))
@@ -220,12 +231,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         label,
                         extra={"correlation_id": "recovery", "model_role": label},
                     )
+                    round_had_failure = True
                     recovery_deadline = (
                         time.monotonic() + settings.stream_preload_readiness_budget_sec
                     )
                     _load_role(label, service, deadline=recovery_deadline)
                     if preload_state.stop_event.is_set():
                         return
+                recovery_failures = recovery_failures + 1 if round_had_failure else 0
 
         preload_thread = threading.Thread(target=_preload_models, name="model-preload", daemon=True)
         preload_thread.start()
