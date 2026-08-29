@@ -432,7 +432,9 @@ class DirectWhisperService:
             ).strip()
 
 
-def _supervised_worker_main(config: dict[str, object], address: object, authkey: bytes) -> None:
+def _supervised_worker_main(
+    config: dict[str, object], address: str | tuple[str, int], authkey: bytes
+) -> None:
     # Handle-free IPC (gitops#3485 WinError-5 class): the parent passes only a
     # picklable pipe/socket ADDRESS + authkey, never a live Connection/Queue.
     # Under Windows scheduled tasks, spawning with a pickled PipeConnection
@@ -574,7 +576,7 @@ class _SupervisedWhisperService:
         def _accept() -> None:
             try:
                 conn = listener.accept()
-            except (OSError, EOFError, mp_connection.AuthenticationError):
+            except (OSError, EOFError, mp.AuthenticationError):
                 return
             # A late accept from a superseded generation must not clobber the
             # current channel: hand the socket back instead.
