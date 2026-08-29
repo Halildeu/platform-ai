@@ -11,13 +11,13 @@ time, so CPU/CI environments are unaffected unless `/ws/stream` is used.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import math
 import multiprocessing as mp
 import multiprocessing.connection as mp_connection
 import os
-import queue
 import stat
 import threading
 import time
@@ -608,10 +608,8 @@ class _SupervisedWhisperService:
     def _close_channel(channel: Any) -> None:
         close = getattr(channel, "close", None)
         if callable(close):
-            try:
+            with contextlib.suppress(OSError):
                 close()
-            except OSError:
-                pass
 
     def _terminate_and_restart(
         self, *, restart: bool = True, deadline: float | None = None
