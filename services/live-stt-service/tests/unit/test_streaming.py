@@ -11,6 +11,7 @@ import stat
 import sys
 import threading
 import time
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import numpy as np
@@ -676,6 +677,61 @@ def test_live_and_final_services_are_distinct_singletons() -> None:
     assert final.model_loaded is False
 
 
+class FakeConn:
+    """In-process stand-in for the worker Connection (handle-free IPC).
+
+    The supervisor only uses send/poll/recv/close under the single-flight
+    call lock, so a plain queue-backed fake is a faithful replacement for
+    the old task/result queue pair these tests used to wire up directly.
+    """
+
+    def __init__(
+        self,
+        responder: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
+        preloaded: list[dict[str, object]] | None = None,
+    ) -> None:
+        self._responder = responder
+        self._pending: queue.Queue[dict[str, object]] = queue.Queue()
+        for item in preloaded or []:
+            self._pending.put(item)
+        self._buffered: list[dict[str, object]] = []
+        self.sent: list[dict[str, object]] = []
+        self.closed = False
+
+    def send(self, msg: dict[str, object]) -> None:
+        self.sent.append(msg)
+        if self._responder is not None:
+            response = self._responder(msg)
+            if response is not None:
+                self._pending.put(response)
+
+    def poll(self, timeout: float | None = None) -> bool:
+        if self._buffered:
+            return True
+        try:
+            self._buffered.append(self._pending.get(timeout=timeout))
+            return True
+        except queue.Empty:
+            return False
+
+    def recv(self) -> dict[str, object]:
+        if self._buffered:
+            return self._buffered.pop(0)
+        return self._pending.get_nowait()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _wire_fake_conn(service: object, conn: FakeConn) -> None:
+    """Attach a ready fake channel the way _start() would after accept()."""
+    service._listener = None  # type: ignore[attr-defined]
+    service._conn = conn  # type: ignore[attr-defined]
+    ready = threading.Event()
+    ready.set()
+    service._conn_ready = ready  # type: ignore[attr-defined]
+
+
 def test_supervised_final_worker_timeout_terminates_and_respawns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -704,8 +760,7 @@ def test_supervised_final_worker_timeout_terminates_and_respawns(
     service._kill_grace_sec = 0.0
     service._call_lock = threading.Lock()
     service._process = FakeProcess()
-    service._task_queue = queue.Queue(maxsize=1)
-    service._result_queue = queue.Queue(maxsize=1)
+    _wire_fake_conn(service, FakeConn())  # never answers → timeout path
     service._model_loaded = True
     service._generation = 1
     old_process = service._process
@@ -715,25 +770,16 @@ def test_supervised_final_worker_timeout_terminates_and_respawns(
         process = FakeProcess()
         restarts.append(process)
         service._process = process
-        service._result_queue = queue.Queue(maxsize=1)
-
-        class ResponsiveTaskQueue(queue.Queue[dict[str, object]]):
-            def put(  # type: ignore[override]
-                self,
-                item: dict[str, object],
-                block: bool = True,
-                timeout: float | None = None,
-            ) -> None:
-                del block, timeout
-                service._result_queue.put(
-                    {
-                        "job_id": item["job_id"],
-                        "ok": True,
-                        "text": "Yeniden başlayan worker yanıtı",
-                    }
-                )
-
-        service._task_queue = ResponsiveTaskQueue(maxsize=1)
+        _wire_fake_conn(
+            service,
+            FakeConn(
+                responder=lambda item: {
+                    "job_id": item["job_id"],
+                    "ok": True,
+                    "text": "Yeniden başlayan worker yanıtı",
+                }
+            ),
+        )
         service._model_loaded = False
 
     monkeypatch.setattr(service, "_start", fake_start)
@@ -778,8 +824,7 @@ def test_supervised_final_worker_does_not_respawn_when_kill_cannot_stop_process(
     service._kill_grace_sec = 0.0
     service._call_lock = threading.Lock()
     service._process = UnkillableProcess()
-    service._task_queue = queue.Queue(maxsize=1)
-    service._result_queue = queue.Queue(maxsize=1)
+    _wire_fake_conn(service, FakeConn())  # never answers → timeout path
     service._model_loaded = True
     service._generation = 1
     service._restart_blocked = False
@@ -828,8 +873,7 @@ def test_supervised_live_worker_timeout_kills_native_child_without_spawning_thre
     service._kill_grace_sec = 0.0
     service._call_lock = threading.Lock()
     service._process = FakeProcess()
-    service._task_queue = queue.Queue(maxsize=1)
-    service._result_queue = queue.Queue(maxsize=1)
+    _wire_fake_conn(service, FakeConn())  # never answers → timeout path
     service._model_loaded = True
     service._restart_blocked = False
     service._generation = 1
@@ -936,9 +980,10 @@ def test_load_failure_recycles_worker_before_preload_retry(
     service._call_lock = threading.Lock()
     service._closing = threading.Event()
     service._process = FakeProcess()
-    service._task_queue = queue.Queue(maxsize=1)
-    service._result_queue = queue.Queue(maxsize=1)
-    service._result_queue.put({"job_id": "load-job", "ok": False, "error_class": "RuntimeError"})
+    _wire_fake_conn(
+        service,
+        FakeConn(preloaded=[{"job_id": "load-job", "ok": False, "error_class": "RuntimeError"}]),
+    )
     service._model_loaded = False
     service._restart_blocked = False
     service._generation = 1
@@ -985,9 +1030,12 @@ def test_transcribe_failure_invalidates_generation_until_explicit_recovery(
     service._call_lock = threading.Lock()
     service._closing = threading.Event()
     service._process = FakeProcess()
-    service._task_queue = queue.Queue(maxsize=1)
-    service._result_queue = queue.Queue(maxsize=1)
-    service._result_queue.put({"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"})
+    _wire_fake_conn(
+        service,
+        FakeConn(
+            preloaded=[{"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"}]
+        ),
+    )
     service._model_loaded = True
     service._restart_blocked = False
     service._generation = 11
@@ -995,30 +1043,20 @@ def test_transcribe_failure_invalidates_generation_until_explicit_recovery(
     starts: list[None] = []
     operations: list[str] = []
 
-    class ResponsiveTaskQueue(queue.Queue[dict[str, object]]):
-        def put(  # type: ignore[override]
-            self,
-            item: dict[str, object],
-            block: bool = True,
-            timeout: float | None = None,
-        ) -> None:
-            del block, timeout
-            operation = str(item["type"])
-            operations.append(operation)
-            service._result_queue.put(
-                {
-                    "job_id": item["job_id"],
-                    "ok": True,
-                    "text": "recovered" if operation == "transcribe" else "",
-                }
-            )
+    def responsive(item: dict[str, object]) -> dict[str, object]:
+        operation = str(item["type"])
+        operations.append(operation)
+        return {
+            "job_id": item["job_id"],
+            "ok": True,
+            "text": "recovered" if operation == "transcribe" else "",
+        }
 
     def fake_start() -> None:
         starts.append(None)
         service._generation += 1
         service._process = FakeProcess()
-        service._result_queue = queue.Queue(maxsize=1)
-        service._task_queue = ResponsiveTaskQueue(maxsize=1)
+        _wire_fake_conn(service, FakeConn(responder=responsive))
         service._model_loaded = False
         service._restart_blocked = False
 
@@ -1107,9 +1145,12 @@ def test_loaded_transcribe_failure_invalidates_generation_without_stream_retry(
     service._call_lock = threading.Lock()
     service._closing = threading.Event()
     service._process = FakeProcess()
-    service._task_queue = queue.Queue(maxsize=1)
-    service._result_queue = queue.Queue(maxsize=1)
-    service._result_queue.put({"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"})
+    _wire_fake_conn(
+        service,
+        FakeConn(
+            preloaded=[{"job_id": "transcribe-job", "ok": False, "error_class": "CudaError"}]
+        ),
+    )
     service._model_loaded = True
     service._restart_blocked = False
     service._generation = 7
@@ -1370,8 +1411,7 @@ def test_terminal_decode_timeout_never_reloads_model_inside_declared_budget(
     service._kill_grace_sec = 0.0
     service._call_lock = threading.Lock()
     service._process = FakeProcess()
-    service._task_queue = queue.Queue(maxsize=1)
-    service._result_queue = queue.Queue(maxsize=1)
+    _wire_fake_conn(service, FakeConn())  # never answers → timeout path
     service._model_loaded = True
     service._restart_blocked = False
     service._generation = 1
@@ -1411,8 +1451,8 @@ def test_terminal_decode_rechecks_ready_generation_after_waiting_for_lock() -> N
     service._kill_grace_sec = 0.0
     service._call_lock = threading.Lock()
     service._process = FakeProcess()
-    service._task_queue = queue.Queue(maxsize=1)
-    service._result_queue = queue.Queue(maxsize=1)
+    fake_conn = FakeConn()
+    _wire_fake_conn(service, fake_conn)
     service._model_loaded = True
     service._restart_blocked = False
     service._generation = 1
@@ -1442,7 +1482,7 @@ def test_terminal_decode_rechecks_ready_generation_after_waiting_for_lock() -> N
     assert len(result) == 1
     assert isinstance(result[0], WorkerCrashedError)
     assert "readiness changed" in str(result[0])
-    assert service._task_queue.empty()
+    assert fake_conn.sent == []
 
 
 @pytest.mark.parametrize(
