@@ -11,25 +11,45 @@ $configureScript = Join-Path $deployDir "configure-meeting-ai.ps1"
 $startScript = Join-Path $deployDir "start-meeting-ai.ps1"
 . $runtimeScript
 
+# CI sets RUNNER_TEMP; a developer/GPU-host run has no such variable, so the
+# suite fell over at its first Join-Path (gitops#3486 harness fix). Fall back
+# to the OS temp dir — CI behaviour is byte-identical (RUNNER_TEMP wins).
+$runnerTemp = $env:RUNNER_TEMP
+if ([string]::IsNullOrWhiteSpace($runnerTemp)) {
+    $runnerTemp = [IO.Path]::GetTempPath()
+}
+
+# The suite exercises the REAL provisioning scripts, and every path they use
+# derives from $env:ProgramData (Get-MeetingAiRuntimeRoot). Point ProgramData
+# at a per-run fixture BEFORE deriving $runtimeRoot, so a non-CI run (dev
+# laptop, GPU host) can never touch the production runtime root. This is the
+# same sandbox pattern test-live-stt-restart-acceptance.ps1 already uses.
+# 2026-08-30 incident: the pre-sandbox suite recursively removed the LIVE
+# C:\ProgramData\Acik\platform-ai on the GPU host at its very first step.
+$originalProgramData = $env:ProgramData
+$sandboxProgramData = Join-Path $runnerTemp ("meeting-ai-runtime-programdata-{0}" -f [Guid]::NewGuid().ToString("N").Substring(0, 8))
+New-Item -ItemType Directory -Force -Path $sandboxProgramData | Out-Null
+$env:ProgramData = $sandboxProgramData
+
 $runtimeRoot = Get-MeetingAiRuntimeRoot
 $configPath = Join-Path $runtimeRoot "meeting-ai.env"
 $storePath = Join-Path $runtimeRoot "meeting-ai\analysis-delivery.sqlite3"
 $plainTestCredential = "ci-ephemeral-credential"
 $secureCredential = ConvertTo-SecureString $plainTestCredential -AsPlainText -Force
-$tlsSourceRoot = Join-Path $env:RUNNER_TEMP "meeting-ai-mtls-source"
+$tlsSourceRoot = Join-Path $runnerTemp "meeting-ai-mtls-source"
 $tlsCaSource = Join-Path $tlsSourceRoot "ca.pem"
 $tlsCertSource = Join-Path $tlsSourceRoot "client.pem"
 $tlsKeySource = Join-Path $tlsSourceRoot "client.key"
-$startupProbeRoot = Join-Path $env:RUNNER_TEMP "meeting-ai-startup-cleanup"
+$startupProbeRoot = Join-Path $runnerTemp "meeting-ai-startup-cleanup"
 $plainTestKey = "-----BEGIN PRIVATE KEY-----`nci-ephemeral-key`n-----END PRIVATE KEY-----"
 $plainReadyRedisUrl = "redis://ci-user:ci-password@127.0.0.1:6379/0"
 $secureReadyRedisUrl = ConvertTo-SecureString $plainReadyRedisUrl -AsPlainText -Force
 $plainTranscriptCredential = "ci-transcript-credential"
 $secureTranscriptCredential = ConvertTo-SecureString `
     $plainTranscriptCredential -AsPlainText -Force
-$permitSource = Join-Path $env:RUNNER_TEMP "transcript-ready-pre-enable.dsse.json"
-$permitTrustRootSource = Join-Path $env:RUNNER_TEMP "transcript-ready-trust-root.json"
-$permitPrivateKeyPath = Join-Path $env:RUNNER_TEMP "transcript-ready-test-key.raw"
+$permitSource = Join-Path $runnerTemp "transcript-ready-pre-enable.dsse.json"
+$permitTrustRootSource = Join-Path $runnerTemp "transcript-ready-trust-root.json"
+$permitPrivateKeyPath = Join-Path $runnerTemp "transcript-ready-test-key.raw"
 $permitFixtureScript = Join-Path $PSScriptRoot `
     "create-transcript-ready-permit-fixture.py"
 $pythonExe = (Get-Command python -CommandType Application -ErrorAction Stop | `
@@ -384,8 +404,8 @@ try {
     Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
         "Mutual TLS runtime config import must be idempotent before launcher startup."
     $parentRuntimeKeyPath = Get-MeetingAiRuntimeTlsKeyPath
-    $childRuntimeKeyRecord = Join-Path $env:RUNNER_TEMP "meeting-ai-child-key-path.txt"
-    $childRuntimeScript = Join-Path $env:RUNNER_TEMP "meeting-ai-child-import.ps1"
+    $childRuntimeKeyRecord = Join-Path $runnerTemp "meeting-ai-child-key-path.txt"
+    $childRuntimeScript = Join-Path $runnerTemp "meeting-ai-child-import.ps1"
     $childScriptContent = @"
 `$ErrorActionPreference = "Stop"
 . "$runtimeScript"
@@ -413,9 +433,9 @@ Clear-MeetingAiManagedProcessEnvironment
         "Child cleanup must remove its own TLS key."
     Remove-Item -LiteralPath $childRuntimeScript, $childRuntimeKeyRecord -Force
 
-    $forcedChildKeyRecord = Join-Path $env:RUNNER_TEMP `
+    $forcedChildKeyRecord = Join-Path $runnerTemp `
         "meeting-ai-forced-child-key-path.txt"
-    $forcedChildScript = Join-Path $env:RUNNER_TEMP `
+    $forcedChildScript = Join-Path $runnerTemp `
         "meeting-ai-forced-child-import.ps1"
     $forcedChildContent = @"
 `$ErrorActionPreference = "Stop"
@@ -1389,5 +1409,9 @@ Clear-MeetingAiManagedProcessEnvironment
         if (Test-Path -LiteralPath $artifact) {
             Remove-Item -LiteralPath $artifact -Force
         }
+    }    # Restore the real ProgramData and drop the per-run sandbox root.
+    $env:ProgramData = $originalProgramData
+    if (Test-Path -LiteralPath $sandboxProgramData) {
+        Remove-Item -LiteralPath $sandboxProgramData -Recurse -Force
     }
 }

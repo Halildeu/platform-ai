@@ -25,7 +25,14 @@ function Test-ProcessExited {
     return $false
 }
 
-$fixtureRoot = Join-Path $env:RUNNER_TEMP ("gpu-host-bootstrap-{0}" -f `
+# CI sets RUNNER_TEMP; a developer/GPU-host run has no such variable, so the
+# suite fell over at its first Join-Path (gitops#3486 harness fix). Fall back
+# to the OS temp dir — CI behaviour is byte-identical (RUNNER_TEMP wins).
+$runnerTemp = $env:RUNNER_TEMP
+if ([string]::IsNullOrWhiteSpace($runnerTemp)) {
+    $runnerTemp = [IO.Path]::GetTempPath()
+}
+$fixtureRoot = Join-Path $runnerTemp ("gpu-host-bootstrap-{0}" -f `
     [Guid]::NewGuid().ToString('N'))
 $childPath = Join-Path $fixtureRoot "controller-child.ps1"
 $preflightResult = Join-Path $fixtureRoot "preflight.json"

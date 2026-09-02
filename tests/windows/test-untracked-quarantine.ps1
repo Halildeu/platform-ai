@@ -6,7 +6,14 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $preserveScript = Join-Path $repoRoot `
     "deploy\gpu-host\preserve-untracked.ps1"
 $stateModule = Join-Path $repoRoot "deploy\gpu-host\deployment-state.ps1"
-$tempRoot = $env:RUNNER_TEMP
+# CI sets RUNNER_TEMP; a developer/GPU-host run has no such variable, so the
+# suite fell over at its first Join-Path (gitops#3486 harness fix). Fall back
+# to the OS temp dir — CI behaviour is byte-identical (RUNNER_TEMP wins).
+$runnerTemp = $env:RUNNER_TEMP
+if ([string]::IsNullOrWhiteSpace($runnerTemp)) {
+    $runnerTemp = [IO.Path]::GetTempPath()
+}
+$tempRoot = $runnerTemp
 if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = $env:TEMP }
 $fixtureRoot = Join-Path $tempRoot "platform-ai-untracked-quarantine"
 $source = Join-Path $fixtureRoot "source"
