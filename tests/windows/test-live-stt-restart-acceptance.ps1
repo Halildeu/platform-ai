@@ -361,7 +361,14 @@ Assert-True (Test-GpuHostListenerStable -Port 8200 -ExpectedOwnerId 100 `
     -ProcessProofQuery $stableProof -StableSamples 2) `
     "Stable exact listener proof must pass."
 
-$tempRoot = Join-Path $env:RUNNER_TEMP "live-stt-runtime-env"
+# CI sets RUNNER_TEMP; a developer/GPU-host run has no such variable, so the
+# suite fell over at its first Join-Path (gitops#3486 harness fix). Fall back
+# to the OS temp dir — CI behaviour is byte-identical (RUNNER_TEMP wins).
+$runnerTemp = $env:RUNNER_TEMP
+if ([string]::IsNullOrWhiteSpace($runnerTemp)) {
+    $runnerTemp = [IO.Path]::GetTempPath()
+}
+$tempRoot = Join-Path $runnerTemp "live-stt-runtime-env"
 New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 $configPath = Join-Path $tempRoot "live-stt.env"
 $oldCi = $env:CI
@@ -515,7 +522,7 @@ try {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$configureFixtureRoot = Join-Path $env:RUNNER_TEMP "live-stt-configure"
+$configureFixtureRoot = Join-Path $runnerTemp "live-stt-configure"
 $configureDeployRoot = Join-Path $configureFixtureRoot "deploy\gpu-host"
 $configureProgramData = Join-Path $configureFixtureRoot "ProgramData"
 $configureScript = Join-Path $configureDeployRoot "configure-live-stt.ps1"

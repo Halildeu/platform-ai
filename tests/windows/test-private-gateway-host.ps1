@@ -6,7 +6,14 @@ Set-StrictMode -Version 2.0
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $scriptPath = Join-Path $repoRoot "deploy\gpu-host\configure-private-gateway-host.ps1"
-$fixtureRoot = Join-Path $env:RUNNER_TEMP "private-gateway-host-contract"
+# CI sets RUNNER_TEMP; a developer/GPU-host run has no such variable, so the
+# suite fell over at its first Join-Path (gitops#3486 harness fix). Fall back
+# to the OS temp dir — CI behaviour is byte-identical (RUNNER_TEMP wins).
+$runnerTemp = $env:RUNNER_TEMP
+if ([string]::IsNullOrWhiteSpace($runnerTemp)) {
+    $runnerTemp = [IO.Path]::GetTempPath()
+}
+$fixtureRoot = Join-Path $runnerTemp "private-gateway-host-contract"
 $hostsPath = Join-Path $fixtureRoot "hosts"
 $targetHost = "meeting-ai-gateway.internal"
 $targetIp = "10.99.0.1"
