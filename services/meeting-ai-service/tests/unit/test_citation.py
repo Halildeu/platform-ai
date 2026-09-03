@@ -126,12 +126,27 @@ def test_split_sentences_glues_unpunctuated_stt_lines_into_one_sentence() -> Non
     sents = split_sentences(transcript)
     assert [s.text for s in sents] == [
         "Bütçe konuşuldu.",
-        "En geç\nCuma gününe kadar\nbitirilecek.",
-        "Sergen Bediroğlu\nraporu hazırlayacak.",
+        "En geç Cuma gününe kadar bitirilecek.",
+        "Sergen Bediroğlu raporu hazırlayacak.",
     ]
     for i, s in enumerate(sents):
         assert s.index == i
-        assert transcript[s.start_char:s.end_char] == s.text
+        # Offsets still address the raw slice; only the shipped text is collapsed.
+        assert " ".join(transcript[s.start_char : s.end_char].split()) == s.text
+
+
+def test_split_sentences_merged_text_reattaches_lone_punctuation_line() -> None:
+    # Live 2026-09-03 (run 44f66d9d): STT emitted the final "." as its own line,
+    # which shipped as "bitirilecek\n." in the decision title.
+    transcript = "Birinci\nkararımız\nCuma gününe kadar\nbitirilecek\n.\nİkinci konu tedarikçi."
+    sents = split_sentences(transcript)
+    assert [s.text for s in sents] == [
+        "Birinci kararımız Cuma gününe kadar bitirilecek.",
+        "İkinci konu tedarikçi.",
+    ]
+    assert transcript[sents[0].start_char : sents[0].end_char] == (
+        "Birinci\nkararımız\nCuma gününe kadar\nbitirilecek\n."
+    )
 
 
 def test_split_sentences_keeps_punctuated_short_sentences_standalone() -> None:
