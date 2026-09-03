@@ -114,3 +114,38 @@ def test_service_response_carries_citations() -> None:
     assert len(r.citations) >= 1
     assert all(c.grounded for c in r.citations)
     assert r.ungrounded_count == 0
+
+
+def test_split_sentences_glues_unpunctuated_stt_lines_into_one_sentence() -> None:
+    # Zeynep 2026-09-03 (meeting b8ca6dbf): finalized transcripts carry one STT
+    # segment per line without punctuation; the selector shipped the decision "En geç".
+    transcript = (
+        "Bütçe konuşuldu.\nEn geç\nCuma gününe kadar\nbitirilecek.\n"
+        "Sergen Bediroğlu\nraporu hazırlayacak."
+    )
+    sents = split_sentences(transcript)
+    assert [s.text for s in sents] == [
+        "Bütçe konuşuldu.",
+        "En geç\nCuma gününe kadar\nbitirilecek.",
+        "Sergen Bediroğlu\nraporu hazırlayacak.",
+    ]
+    for i, s in enumerate(sents):
+        assert s.index == i
+        assert transcript[s.start_char:s.end_char] == s.text
+
+
+def test_split_sentences_keeps_punctuated_short_sentences_standalone() -> None:
+    transcript = "Bütçe onaylandı. Ali hazırlayacak. Tamam."
+    assert [s.text for s in split_sentences(transcript)] == [
+        "Bütçe onaylandı.",
+        "Ali hazırlayacak.",
+        "Tamam.",
+    ]
+
+
+def test_split_sentences_caps_merging_for_unpunctuated_transcripts() -> None:
+    words = [f"kelime{i}" for i in range(100)]
+    transcript = "\n".join(" ".join(words[i : i + 5]) for i in range(0, 100, 5))
+    sents = split_sentences(transcript)
+    assert len(sents) >= 2
+    assert all(len(s.text.split()) <= 45 for s in sents)

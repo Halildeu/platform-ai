@@ -230,7 +230,63 @@ def split_sentences(
         )
         pos = end
         idx += 1
-    return out
+    return _merge_unpunctuated_fragments(out, transcript)
+
+
+# STT finalization writes one segment per line, mostly WITHOUT terminal
+# punctuation ("en geç" / "Cuma gününe kadar" / "bitirilecek"), and
+# `_SENTENCE_SPLIT` treats every line break as a sentence boundary — so a spoken
+# decision became three "sentences" and the extractive selector shipped "En geç"
+# (Zeynep 2026-09-03, meeting b8ca6dbf). A fragment that does not END with
+# sentence punctuation is glued to what follows; punctuated sentences are never
+# touched, so genuine short sentences ("Bütçe onaylandı.") stay standalone.
+_TERMINAL_PUNCT = (".", "!", "?", "…")
+# Safety valve for transcripts with no punctuation at all: never grow a merged
+# sentence beyond this many words, so the selector still gets sentence-sized units.
+_MAX_MERGED_WORDS = 40
+
+
+def _merge_unpunctuated_fragments(
+    sentences: list[Sentence], transcript: str
+) -> list[Sentence]:
+    """Glue line-broken, unpunctuated fragments to the following sentence.
+
+    Offsets stay true to the transcript: a merged sentence spans from the first
+    fragment's start to the last one's end and its text is that transcript slice,
+    so extractive selection, the verifier and timestamping all keep seeing the
+    same sentence list (the alignment invariant in `extractive.py`).
+    """
+    if not sentences:
+        return sentences
+    merged: list[Sentence] = []
+    carry: Sentence | None = None
+    for sent in sentences:
+        if carry is not None:
+            sent = Sentence(
+                index=0,
+                text=transcript[carry.start_char:sent.end_char].strip(),
+                start_char=carry.start_char,
+                end_char=sent.end_char,
+                start_sec=carry.start_sec,
+            )
+            carry = None
+        unpunctuated = not sent.text.rstrip().endswith(_TERMINAL_PUNCT)
+        if unpunctuated and len(_WORD.findall(sent.text)) < _MAX_MERGED_WORDS:
+            carry = sent
+            continue
+        merged.append(sent)
+    if carry is not None:
+        merged.append(carry)
+    return [
+        Sentence(
+            index=i,
+            text=m.text,
+            start_char=m.start_char,
+            end_char=m.end_char,
+            start_sec=m.start_sec,
+        )
+        for i, m in enumerate(merged)
+    ]
 
 
 def best_matching_sentence(query: str, sentences: list[Sentence]) -> Sentence | None:
