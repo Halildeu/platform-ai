@@ -241,14 +241,26 @@ def split_sentences(
 # sentence punctuation is glued to what follows; punctuated sentences are never
 # touched, so genuine short sentences ("Bütçe onaylandı.") stay standalone.
 _TERMINAL_PUNCT = (".", "!", "?", "…")
+# A merged sentence spans several STT lines; its *offsets* keep pointing at the
+# raw transcript slice (verifier + timestamps are offset-based), but its *text*
+# is what ships as decision/action/summary prose, so line breaks and runs of
+# whitespace collapse to one space and a lone punctuation line ("bitirilecek\n.")
+# re-attaches to the word before it. Live evidence 2026-09-03: meeting-service
+# decisions arrived as "Birinci\nkararımız\nkonfederasyon\nçalışmak." after #334.
+_WS_RUN = re.compile(r"\s+")
+_SPACE_BEFORE_PUNCT = re.compile(r"\s+(?=[.,!?;:…])")
+
+
+def _collapse_line_breaks(text: str) -> str:
+    return _SPACE_BEFORE_PUNCT.sub("", _WS_RUN.sub(" ", text.strip()))
+
+
 # Safety valve for transcripts with no punctuation at all: never grow a merged
 # sentence beyond this many words, so the selector still gets sentence-sized units.
 _MAX_MERGED_WORDS = 40
 
 
-def _merge_unpunctuated_fragments(
-    sentences: list[Sentence], transcript: str
-) -> list[Sentence]:
+def _merge_unpunctuated_fragments(sentences: list[Sentence], transcript: str) -> list[Sentence]:
     """Glue line-broken, unpunctuated fragments to the following sentence.
 
     Offsets stay true to the transcript: a merged sentence spans from the first
@@ -264,7 +276,7 @@ def _merge_unpunctuated_fragments(
         if carry is not None:
             sent = Sentence(
                 index=0,
-                text=transcript[carry.start_char:sent.end_char].strip(),
+                text=_collapse_line_breaks(transcript[carry.start_char : sent.end_char]),
                 start_char=carry.start_char,
                 end_char=sent.end_char,
                 start_sec=carry.start_sec,
