@@ -6,6 +6,7 @@ import json
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY
 
 from app.core.config import Settings
 from app.services.analyze import (
@@ -50,6 +51,26 @@ def test_ollama_strips_markdown_fences(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(fenced))
     draft = OllamaAnalyzer(_settings()).analyze("redacted transcript")
     assert draft.summary == "Özet."
+
+
+@pytest.mark.parametrize("duration", [2_000_000_000, None, -1, True, "private text", 2**64])
+def test_ollama_records_only_valid_optional_timing_metadata(
+    monkeypatch: pytest.MonkeyPatch, duration: object
+) -> None:
+    metric = "mai_ollama_stage_seconds_sum"
+    before = REGISTRY.get_sample_value(metric, {"stage": "load"}) or 0.0
+    response = httpx.Response(
+        200,
+        json={
+            "response": json.dumps({"summary": "x", "decisions": [], "action_items": []}),
+            "load_duration": duration,
+        },
+        request=httpx.Request("POST", "http://localhost:11434/api/generate"),
+    )
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: response)
+    assert OllamaAnalyzer(_settings()).analyze("synthetic transcript").summary == "x"
+    expected = 2.0 if type(duration) is int and duration == 2_000_000_000 else 0.0
+    assert (REGISTRY.get_sample_value(metric, {"stage": "load"}) or 0.0) == before + expected
 
 
 def test_ollama_unreachable_raises_backend_error(monkeypatch: pytest.MonkeyPatch) -> None:

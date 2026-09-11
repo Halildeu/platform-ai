@@ -19,6 +19,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from app.api.metrics import mai_ollama_stage_seconds
 from app.core.config import Settings
 from app.models.schemas import ActionItem, AnalyzeResponse, Citation, RejectedClaim
 from app.services.citation import Citation as GroundedCitation
@@ -297,13 +298,21 @@ class OllamaAnalyzer:
             "keep_alive": self._settings.ollama_keep_alive,
         }
         try:
-            resp = httpx.post(
-                f"{self._settings.ollama_host}/api/generate",
-                json=payload,
-                timeout=self._settings.request_timeout,
-            )
+            with mai_ollama_stage_seconds.labels(stage="http").time():
+                resp = httpx.post(
+                    f"{self._settings.ollama_host}/api/generate",
+                    json=payload,
+                    timeout=self._settings.request_timeout,
+                )
             resp.raise_for_status()
-            raw_text = resp.json().get("response", "")
+            envelope = resp.json()
+            for stage in ("load", "prompt_eval", "eval"):
+                duration = envelope.get(f"{stage}_duration")
+                # Optional nanosecond metadata is never a response acceptance
+                # gate. Reject malformed telemetry; never label with model text.
+                if type(duration) is int and 0 <= duration < 2**63:
+                    mai_ollama_stage_seconds.labels(stage=stage).observe(duration / 1e9)
+            raw_text = envelope.get("response", "")
             # Strip markdown code fences if Ollama wraps JSON
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip())
             parsed = json.loads(cleaned)
