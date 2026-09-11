@@ -596,6 +596,21 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertIn('$readiness.speech_gate.vad.empty_window_action -eq "skip_decode"', script)
         self.assertNotIn("/transcribe?language=tr&session_id=deploy-warmup", script)
 
+    def test_acceptance_requires_the_startup_live_vad_policy(self) -> None:
+        startup = self._read_script("start-live-stt.ps1")
+        updater = self._read_script("update.ps1")
+        assignments = re.findall(
+            r'\$env:STT_STREAM_LIVE_VAD_FILTER\s*=\s*"(true|false)"', startup
+        )
+        self.assertTrue(assignments)
+        self.assertEqual(set(assignments), {"true"})
+        self.assertIn(
+            "$readiness.speech_gate.vad.live_enabled -eq $true -and", updater
+        )
+        self.assertNotIn(
+            "$readiness.speech_gate.vad.live_enabled -eq $false", updater
+        )
+
     def test_acceptance_evidence_outlives_the_console_that_produced_it(
         self,
     ) -> None:
