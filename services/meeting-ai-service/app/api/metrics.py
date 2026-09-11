@@ -38,6 +38,26 @@ mai_analyze_duration_seconds = Histogram(
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
 )
 
+mai_analysis_stage_seconds = Histogram(
+    "mai_analysis_stage_seconds",
+    "Analysis capacity wait and actual worker lifetime, including abandoned requests",
+    ["stage", "outcome"],
+    buckets=(0.01, 0.1, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0),
+)
+
+mai_analysis_deadline_total = Counter(
+    "mai_analysis_deadline_total",
+    "Application deadlines by the stage in which the caller stopped waiting",
+    ["stage"],
+)
+
+mai_ollama_stage_seconds = Histogram(
+    "mai_ollama_stage_seconds",
+    "Ollama HTTP wall time and optional server-reported load and inference durations",
+    ["stage"],
+    buckets=(0.01, 0.1, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0),
+)
+
 mai_transcript_chars_total = Counter(
     "mai_transcript_chars_total",
     "Total transcript characters received",
