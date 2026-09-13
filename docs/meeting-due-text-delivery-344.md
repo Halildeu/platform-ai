@@ -21,7 +21,8 @@ The analyzer-only evaluation did not exercise this persistence conversion.
 
 - `due` retains the existing UTC-normalized Instant contract. A relative date
   leaves it null; no calendar date or timezone is inferred.
-- `due_text` is nullable source-supported text, at most 255 Unicode code points.
+- `due_text` is nullable source-supported text, at most 255 UTF-16 code units,
+  matching the backend's existing Jakarta `@Size` string contract.
   Case and Unicode are preserved; surrounding whitespace follows the existing
   analyzer's trimming behavior. Null/blank input produces null.
 - The producer repeats the existing source-support guard against the grounded
@@ -36,8 +37,8 @@ The analyzer-only evaluation did not exercise this persistence conversion.
 
 ## Source Verification
 
-Local unit verification: 462 tests passed, 88% app coverage. Focused delivery and
-ready-consumer suite: 46 passed. Ruff, Black on changed Python files, mypy (31 app
+Local unit verification: 465 tests passed, 88% app coverage. Focused delivery and
+ready-consumer suite: 49 passed. Ruff, Black on changed Python files, mypy (31 app
 files), and `git diff --check` passed. One existing Starlette deprecation warning
 remains. No model inference, host/config mutation or deployment was performed.
 
@@ -54,7 +55,7 @@ analyzer, prompt, model transport and configuration. The old 31-file fingerprint
 does not represent this new source head; no new model-evaluation claim is made.
 
 New delivery module SHA256:
-`e049f871e506dce3220d497eba6582ee56460aa4a87bb1768784391a21f2cd80`.
+`e6b48f8d9d6e1885455e3ccf92a5a411af9fe58dfa939ffa9f99c68615633a2c`.
 
 Runtime acceptance remains open until parent #3753 verifies a new canonical TEST
 recording, persisted/reopened result and unchanged negative authorization gates.

@@ -167,7 +167,8 @@ def _action_payload(item: dict[str, object]) -> dict[str, object]:
         raise AnalysisDeliveryContractError("action due date must be text or null")
     due_text = due_date.strip() if isinstance(due_date, str) and due_date.strip() else None
     if due_text is not None:
-        if len(due_text) > 255:
+        # Match the backend's Jakarta @Size String contract (UTF-16 code units).
+        if sum(2 if ord(char) > 0xFFFF else 1 for char in due_text) > 255:
             raise AnalysisDeliveryContractError("action due text exceeds backend contract limit")
         source = item.get("text")
         if not isinstance(source, str) or not due_date_supported_by_source(due_text, source):

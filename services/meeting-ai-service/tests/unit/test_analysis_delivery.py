@@ -291,11 +291,19 @@ def test_due_text_rejects_non_string_metadata(invalid: object) -> None:
         _action_payload({"text": "Raporu hazırla.", "owner": None, "due_date": invalid})
 
 
-@pytest.mark.parametrize("size", [255, 256])
-def test_due_text_limit_counts_unicode_code_points(size: int) -> None:
-    phrase = "ü" * size
+@pytest.mark.parametrize(
+    ("phrase", "valid"),
+    [
+        ("ü" * 255, True),
+        ("ü" * 256, False),
+        ("📅" * 127, True),
+        ("📅" * 127 + "a", True),
+        ("📅" * 128, False),
+    ],
+)
+def test_due_text_limit_matches_backend_utf16_units(phrase: str, valid: bool) -> None:
     action = {"text": phrase, "owner": None, "due_date": phrase}
-    if size == 256:
+    if not valid:
         with pytest.raises(AnalysisDeliveryContractError, match="exceeds backend contract limit"):
             _action_payload(action)
     else:
