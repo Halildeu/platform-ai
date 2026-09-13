@@ -850,6 +850,43 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertNotIn("falling back to mock", script)
         self.assertIn("refusing mock fallback", script)
 
+    def test_meeting_ai_model_override_uses_protected_config(self) -> None:
+        runtime = self._read_script("meeting-ai-runtime-env.ps1")
+        configure = self._read_script("configure-meeting-ai.ps1")
+        launcher = self._read_script("start-meeting-ai.ps1")
+        task_contract = self._read_script("task-action-contract.ps1")
+        for key in ("MAI_OLLAMA_MODEL", "MAI_OLLAMA_EXPECTED_DIGEST"):
+            self.assertIn(f'"{key}" = @{{ Required = $false; SecretTarget = "" }}', runtime)
+            self.assertIn(f'Name = "{key}"; Supplied = $', configure)
+        validation = runtime.split("function Assert-MeetingAiConfigValues", 1)[1]
+        self.assertLess(
+            validation.index("Ollama runtime override requires both"),
+            validation.index('if ($enabled -eq "false") { return }'),
+        )
+        self.assertIn(r"\A[0-9a-f]{64}\z", validation)
+        self.assertIn("Get-SuppliedOrExistingValue -Existing $existing", configure)
+        self.assertIn('[string]$OllamaModel = "llama3.1:8b"', launcher)
+        self.assertNotIn("OllamaModel", task_contract)
+
+    def test_meeting_ai_config_preserves_only_existing_analysis_budgets(self) -> None:
+        script = self._read_script("configure-meeting-ai.ps1")
+        block = script.split("# Preserve the coupled analysis/lease budget", 1)[1].split(
+            "if (-not [string]::IsNullOrWhiteSpace($installedCaPath))", 1
+        )[0]
+        for key in (
+            "MAI_REQUEST_TIMEOUT",
+            "MAI_READY_CONSUMER_LEASE_SEC",
+            "MAI_READY_REDIS_CLAIM_IDLE_MS",
+        ):
+            self.assertIn(f'"{key}"', block)
+        self.assertIn("$existing.ContainsKey($name)", block)
+        self.assertIn("$config[$name] = $existing[$name]", block)
+        self.assertNotIn("InitialDefault", block)
+        self.assertNotIn("effectiveReadyEnabled", block)
+        self.assertLess(
+            script.index(block), script.index("$content = ConvertTo-MeetingAiConfigContent")
+        )
+
     def test_meeting_ai_runtime_env_is_strict_and_dpapi_protected(self) -> None:
         script = self._read_script("meeting-ai-runtime-env.ps1")
 

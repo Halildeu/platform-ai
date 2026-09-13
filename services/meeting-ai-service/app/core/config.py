@@ -103,6 +103,7 @@ class Settings(BaseSettings):
     # Option B (Ollama) settings — #54
     ollama_host: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="llama3.1:8b")
+    ollama_expected_digest: str = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
     # Ollama decoding controls (#162 — fair/reproducible G-INT eval, see ADR-0034).
     # Defaults target DETERMINISTIC STRUCTURED EXTRACTION, not chat:
     #   - temperature 0      → greedy, repeatable (Ollama default 0.8 made the eval

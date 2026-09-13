@@ -93,6 +93,53 @@ this service. This ADR records the requirement; the manifest is its enforcement.
 
 ## Consequences
 
+### 2026-09-13 TEST Semantic Profile (#3753)
+
+The existing deployment interface remains on-prem Ollama. A TEST-only candidate
+selects the already installed `qwen2.5:14b` artifact
+`7cdf5a0187d5c58cc5d369b255592f7841d1c4696d45a8c8a9489440385b22f6`
+through the protected model/digest pair, not task XML, a global environment
+override, or a changed production default. The default remains `llama3.1:8b`.
+This is a measured model/prompt PoC; real-meeting pilot status above is unchanged.
+
+The frozen 12-case synthetic sentence-label corpus has 9 decision and 11 action
+labels. Baseline llama with the previous prompt scored decision TP/FP/FN 4/1/5,
+action 8/5/3, and exact action plus owner/date 4/9/7. The candidate's contrast
+prompt, schema-constrained selection and qwen14 scored decisions 9/1/0 and
+actions including metadata 11/0/0. The separately authored six-case challenge
+scored decisions 4/0/0 and actions including metadata 9/1/0. Both meet the fixed
+project regression targets (precision >=0.90, recall >=0.85, zero execution
+errors), not an industry-wide accuracy standard. Source citation fidelity is
+reported separately from class precision/recall. Prior failed model/prompt
+trials are retained; labels and thresholds were not relaxed to pass a candidate.
+
+Known residuals remain explicit: a no-new-decision statement was selected as a
+decision, and the cancellation challenge retained one extra action. The small
+visible synthetic sets do not establish human meeting accuracy, calibrate a
+semantic confidence score, or authorize automatic execution of extracted tasks.
+Do not call a source-similarity badge semantic confidence. The actual customer
+acceptance still requires fresh TEST recording, persisted result, authenticated
+reopen/citation navigation and negative authorization checks on exact artifacts.
+
+The source runtime now checks the selected model's digest before and after both
+analysis and follow-up-question generation. Missing/ambiguous/mismatched model
+inventory fails closed, and readiness checks the selected model rather than just
+an HTTP 200 from Ollama. This detects ordinary mutable-tag replacement; it is
+not an atomic model-registry lock. Checks share the existing request budget.
+Windows model and expected digest must be supplied together; unrelated configure
+and consumer disable preserve the pair and the existing timeout/lease values.
+Before rolling back to older code that does not recognize these keys, restore
+the protected compatible original config before restarting the old revision,
+then issue a fresh permit for its exact host/producer identity.
+
+See [semantic evaluation](../../services/meeting-ai-service/docs/semantic-evaluation.md)
+for labels, reproducible commands, evidence level and project thresholds.
+The structured-output transport follows the official
+[Ollama schema contract](https://docs.ollama.com/capabilities/structured-outputs),
+and model inventory comes from [the tags API](https://docs.ollama.com/api/tags).
+Neither protocol guarantees semantic correctness; that is why separate labeled
+regressions and real user acceptance are required.
+
 - A tenant switches deployment mode by config (`MAI_BACKEND`), not a code change;
   self-host is one mode among several, satisfying the "tek mod yapma" requirement.
 - G-INT is measurable end-to-end: CPU/mock for logic in CI, and real numbers via

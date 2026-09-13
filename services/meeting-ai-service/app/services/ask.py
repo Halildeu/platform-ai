@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import time
 
-import httpx
-
 from app.core.config import Settings
 from app.models.schemas import AskResponse, Citation
 from app.services.citation import best_matching_sentence, ground_claim, split_sentences
+from app.services.ollama_runtime import generate
 from app.services.redact import assert_no_residual_pii, redact_pii
 
 _UNSUPPORTED_ANSWER = "Metinde bu bilgi yok."
@@ -44,9 +43,9 @@ def _mock_answer(question: str, transcript: str) -> str:
 
 def _ollama_answer(question: str, transcript: str, settings: Settings) -> str:
     prompt = _ASK_PROMPT.format(transcript=transcript, question=question)
-    resp = httpx.post(
-        f"{settings.ollama_host}/api/generate",
-        json={
+    resp = generate(
+        settings,
+        {
             "model": settings.ollama_model,
             "prompt": prompt,
             "stream": False,
@@ -56,9 +55,7 @@ def _ollama_answer(question: str, transcript: str, settings: Settings) -> str:
             "options": settings.ollama_options(),
             "keep_alive": settings.ollama_keep_alive,
         },
-        timeout=settings.request_timeout,
     )
-    resp.raise_for_status()
     return str(resp.json().get("response", "")).strip()
 
 

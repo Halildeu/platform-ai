@@ -15,6 +15,8 @@ param(
     [string]$TlsClientCertPath = "",
     [string]$TlsClientKeyPath = "",
     [ValidateSet("", "test", "stage", "prod")][string]$RuntimeAppEnv = "",
+    [string]$OllamaModel = "",
+    [string]$OllamaExpectedDigest = "",
     [ValidateSet("", "true", "false")][string]$ReadyConsumerEnabled = "",
     [Security.SecureString]$ReadyRedisUrl,
     [string]$ReadyRedisStream = "",
@@ -977,6 +979,23 @@ try {
     }
     if (-not [string]::IsNullOrWhiteSpace($effectiveAppEnv)) {
         $config["MAI_APP_ENV"] = $effectiveAppEnv.ToLowerInvariant()
+    }
+    foreach ($modelSetting in @(
+            @{ Name = "MAI_OLLAMA_MODEL"; Supplied = $OllamaModel },
+            @{ Name = "MAI_OLLAMA_EXPECTED_DIGEST"; Supplied = $OllamaExpectedDigest }
+        )) {
+        $value = Get-SuppliedOrExistingValue -Existing $existing `
+            -Name $modelSetting.Name -Supplied $modelSetting.Supplied
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $config[$modelSetting.Name] = $value
+        }
+    }
+    # Preserve the coupled analysis/lease budget across unrelated config writes.
+    foreach ($name in @("MAI_REQUEST_TIMEOUT", "MAI_READY_CONSUMER_LEASE_SEC",
+            "MAI_READY_REDIS_CLAIM_IDLE_MS")) {
+        if ($null -ne $existing -and $existing.ContainsKey($name)) {
+            $config[$name] = $existing[$name]
+        }
     }
     if (-not [string]::IsNullOrWhiteSpace($installedCaPath)) {
         $config["MAI_MEETING_SERVICE_TLS_CA_PATH"] = $installedCaPath

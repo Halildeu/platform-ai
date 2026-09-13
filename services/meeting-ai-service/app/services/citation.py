@@ -358,6 +358,28 @@ def owner_supported_by_source(owner: str | None, source_text: str) -> bool:
     """
     if owner is None or not owner.strip():
         return True
+    # A quoted pronoun is grounded text, but it does not identify an assignee.
+    if owner.strip().casefold() in {
+        "ben",
+        "biz",
+        "sen",
+        "siz",
+        "o",
+        "onlar",
+        "kendim",
+        "kendimiz",
+        "i",
+        "we",
+        "you",
+        "he",
+        "she",
+        "they",
+        "me",
+        "us",
+        "null",
+        "none",
+    }:
+        return False
     if _phrase_present(owner, source_text):
         return True
 
