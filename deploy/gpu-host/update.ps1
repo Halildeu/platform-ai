@@ -1144,17 +1144,21 @@ function Invoke-LiveSttFixtureAcceptance {
       return $false
     }
     $output = $stdoutTask.GetAwaiter().GetResult()
-    [void]$stderrTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     $exitCode = $process.ExitCode
     $process.Dispose()
-    if ($exitCode -ne 0 -or
-        -not (Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec)) {
+    $deadlineOpen = Test-GpuHostDeadlineOpen -Clock $Clock -DeadlineSec $DeadlineSec
+    if ($exitCode -ne 0 -or -not $deadlineOpen) {
+      $failureDiagnostic = ConvertTo-GpuHostSmokeFailureDiagnostic `
+        -StandardOutput $output -StandardError $stderr `
+        -ExitCode $exitCode -DeadlineOpen $deadlineOpen
       Write-Host ("[update] direct stream inference acceptance failed (exit {0})" -f `
         $exitCode) -ForegroundColor Yellow
       Write-GpuHostAcceptanceReceipt -Fixture $FixtureBaseName `
         -RepeatAudio $RepeatAudio -DraftPathOnly ([bool]$DraftPathOnly) `
         -Verdict "smoke-process-failed" `
-        -FailedChecks @("smoke_exit_code_or_deadline")
+        -FailedChecks @("smoke_exit_code_or_deadline") `
+        -FailureDiagnostic $failureDiagnostic
       return $false
     }
     try {

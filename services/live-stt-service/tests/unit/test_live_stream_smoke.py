@@ -666,14 +666,100 @@ def test_main_redacts_failure_stderr_and_exception_details(
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
 
-    assert payload == {
+    expected = {
         "schema": "platform-ai.live-stt.stream-smoke.error.v1",
         "ok": False,
         "error_code": expected_code,
+        "error_class": "SmokeError" if failure == "contract" else "RuntimeError",
     }
+    if failure == "contract":
+        expected["failure_stage"] = "unclassified"
+    assert payload == expected
     assert captured.err == ""
     assert secret not in captured.out
     assert "Traceback" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "stage", ["argument", "fixture", "ready", "transcript", "terminal", "stream", "private-stage"]
+)
+def test_main_contract_stage_is_allowlisted_without_message(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str
+) -> None:
+    smoke = _load_smoke_module()
+
+    async def fail(_args: object) -> dict[str, object]:
+        raise smoke.SmokeError("private-message-and-token", stage=stage)
+
+    monkeypatch.setattr(smoke, "run_smoke", fail)
+    assert smoke.main([]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["failure_stage"] == (
+        stage if stage in smoke.SMOKE_FAILURE_STAGES else "unclassified"
+    )
+    assert "private" not in captured.out and captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "validator,stage", [("validate_ready_event", "ready"), ("validate_stream_url", "argument")]
+)
+def test_real_contract_validators_assign_fixed_failure_stage(validator: str, stage: str) -> None:
+    smoke = _load_smoke_module()
+    with pytest.raises(smoke.SmokeError) as caught:
+        getattr(smoke, validator)({} if stage == "ready" else "private-invalid-url")
+    assert caught.value.stage == stage
+
+
+def test_main_unknown_exception_class_is_not_emitted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    smoke = _load_smoke_module()
+    private_error = type("PrivateTenantException", (Exception,), {})
+
+    async def fail(_args: object) -> dict[str, object]:
+        raise private_error("private-message-and-token")
+
+    monkeypatch.setattr(smoke, "run_smoke", fail)
+    assert smoke.main([]) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["error_class"] == "unclassified"
+    assert "private" not in captured.out.lower() and captured.err == ""
+
+
+@pytest.mark.parametrize("status", [100, 403, 599, True, "403", 99, 600])
+def test_handshake_failure_emits_only_bounded_status_and_class(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: object
+) -> None:
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    smoke = _load_smoke_module()
+    response = Response(status, "private-reason", Headers({"Authorization": "private-token"}))
+
+    async def fail(_args: object) -> dict[str, object]:
+        raise InvalidStatus(response)
+
+    monkeypatch.setattr(smoke, "run_smoke", fail)
+    assert smoke.main([]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["error_class"] == "InvalidStatus"
+    expected = status if type(status) is int and 100 <= status <= 599 else None
+    assert payload.get("http_status") == expected
+    assert "private" not in captured.out and "Authorization" not in captured.out
+    assert captured.err == ""
+
+
+def test_unknown_handshake_subclass_keeps_safe_family_not_private_class() -> None:
+    from websockets.exceptions import InvalidHandshake
+
+    smoke = _load_smoke_module()
+    private_error = type("PrivateHandshakeClass", (InvalidHandshake,), {})
+    assert smoke.smoke_exception_metadata(private_error("private-message")) == {
+        "error_class": "InvalidHandshake"
+    }
 
 
 def test_main_retrieves_concurrent_receiver_failure_without_stderr_leak(
@@ -737,6 +823,7 @@ def test_main_retrieves_concurrent_receiver_failure_without_stderr_leak(
         "schema": "platform-ai.live-stt.stream-smoke.error.v1",
         "ok": False,
         "error_code": "smoke_internal_failed",
+        "error_class": "RuntimeError",
     }
     assert captured.err == ""
     assert secret not in captured.out

@@ -510,7 +510,7 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertLess(script.index(stdout_drain), script.index(process_wait))
         self.assertLess(script.index(stderr_drain), script.index(process_wait))
         self.assertIn("$output = $stdoutTask.GetAwaiter().GetResult()", script)
-        self.assertIn("[void]$stderrTask.GetAwaiter().GetResult()", script)
+        self.assertIn("$stderr = $stderrTask.GetAwaiter().GetResult()", script)
         self.assertNotIn("$process.StandardOutput.ReadToEnd()", script)
         self.assertIn(
             "Stop-GpuHostProcessTreeBounded -Process $process -GraceSec 10",
@@ -679,6 +679,21 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
             '-Verdict "not-executed"',
         ):
             self.assertIn(verdict, script)
+
+    def test_failed_smoke_preserves_only_allowlisted_child_diagnostic(self) -> None:
+        script = self._read_script("update.ps1")
+        writer = self._read_script("acceptance-receipt.ps1")
+        self.assertIn("$stderr = $stderrTask.GetAwaiter().GetResult()", script)
+        self.assertIn("-FailureDiagnostic $failureDiagnostic", script)
+        self.assertIn("if ($exitCode -ne 0 -or -not $deadlineOpen)", script)
+        self.assertIn("ConvertTo-GpuHostSmokeFailureDiagnostic", writer)
+        self.assertIn("$StandardOutput.Length -gt 65536", writer)
+        self.assertIn("$StandardError.Length -gt 65536", writer)
+        self.assertIn("stderrExceptionClass", writer)
+        self.assertIn("smoke_contract_failed", writer)
+        self.assertNotRegex(writer, r"(?m)^\s*summary\s*=\s*\$StandardOutput\s*$")
+        self.assertNotIn("stderr = $StandardError", writer)
+        self.assertIn("failureDiagnostic = $FailureDiagnostic", writer)
 
     def test_live_stt_production_launcher_reasserts_pinned_runtime_profile(
         self,

@@ -18,6 +18,146 @@
 
 Set-StrictMode -Version 2.0
 
+function Get-GpuHostSmokeField {
+  param($Object, [string]$Name)
+  if ($null -eq $Object) { return $null }
+  $property = $Object.PSObject.Properties[$Name]
+  if ($null -ne $property) { return ,$property.Value }
+  return $null
+}
+
+function ConvertTo-GpuHostSmokeFailureDiagnostic {
+  param(
+    [string]$StandardOutput = "",
+    [string]$StandardError = "",
+    [int]$ExitCode,
+    [bool]$DeadlineOpen
+  )
+  # Child output is untrusted, even for an allowlisted fixture. Never persist
+  # exception messages, traceback paths, URL fields or arbitrary JSON members.
+  $diagnostic = [ordered]@{
+    schemaVersion = "platform-ai.smoke-failure-diagnostic.v1"
+    exitCode = $ExitCode
+    deadlineOpen = $DeadlineOpen
+    stdoutShape = "empty"
+    stderrShape = "empty"
+    errorCode = $null
+    errorClass = $null
+    httpStatus = $null
+    failureStage = $null
+    stderrExceptionClass = $null
+    reportedOk = $null
+    metrics = [ordered]@{}
+    terminalSequence = @()
+    qualityFailures = @()
+  }
+  if (-not [string]::IsNullOrEmpty($StandardError)) {
+    $diagnostic.stderrShape = "present"
+    if ($StandardError.Length -gt 65536) {
+      $diagnostic.stderrShape = "oversized"
+    } else {
+      $classes = @("ModuleNotFoundError", "ImportError", "FileNotFoundError",
+        "PermissionError", "ConnectionRefusedError", "ConnectionResetError",
+        "ConnectionClosedError", "ConnectionClosedOK", "TimeoutError",
+        "OSError", "RuntimeError", "ValueError", "TypeError", "KeyError",
+        "AttributeError", "UnicodeDecodeError", "UnicodeEncodeError",
+        "JSONDecodeError", "SyntaxError", "IndentationError", "MemoryError",
+        "InvalidHandshake", "InvalidStatus", "InvalidStatusCode", "InvalidHeader",
+        "InvalidHeaderFormat", "InvalidHeaderValue", "InvalidMessage", "InvalidUpgrade",
+        "SecurityError", "NegotiationError", "InvalidProxyStatus", "InvalidProxyMessage", "ProxyError")
+      $pattern = '(?m)^[ \t]*(' + ($classes -join '|') + ')(?=:|\r?$)'
+      $matches = [regex]::Matches($StandardError, $pattern)
+      if ($matches.Count -gt 0) {
+        $diagnostic.stderrExceptionClass = $matches[$matches.Count - 1].Groups[1].Value
+      } elseif ($StandardError -match '(?m)^usage:' -and
+          $StandardError -match '(?m)^[^\r\n]*: error:') {
+        $diagnostic.stderrExceptionClass = "ArgumentParserError"
+      }
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($StandardOutput)) { return [pscustomobject]$diagnostic }
+  if ($StandardOutput.Length -gt 65536) {
+    $diagnostic.stdoutShape = "oversized"
+    return [pscustomobject]$diagnostic
+  }
+  try {
+    $summary = $StandardOutput | ConvertFrom-Json -ErrorAction Stop
+    $schema = Get-GpuHostSmokeField $summary "schema"
+    $ok = Get-GpuHostSmokeField $summary "ok"
+    if ($ok -is [bool]) { $diagnostic.reportedOk = $ok }
+    if ($schema -is [string] -and $schema -ceq "platform-ai.live-stt.stream-smoke.error.v1") {
+      $diagnostic.stdoutShape = "smoke-error"
+      $code = Get-GpuHostSmokeField $summary "error_code"
+      if ($code -is [string] -and $code -cin @("smoke_contract_failed", "smoke_internal_failed")) {
+        $diagnostic.errorCode = $code
+      }
+      $errorClass = Get-GpuHostSmokeField $summary "error_class"
+      if ($errorClass -is [string] -and $errorClass -cin @("SmokeError", "unclassified",
+          "ModuleNotFoundError", "ImportError", "FileNotFoundError", "PermissionError",
+          "ConnectionRefusedError", "ConnectionResetError", "ConnectionClosedError",
+          "ConnectionClosedOK", "TimeoutError", "OSError", "RuntimeError", "ValueError",
+          "TypeError", "KeyError", "AttributeError", "UnicodeDecodeError", "UnicodeEncodeError",
+          "JSONDecodeError", "MemoryError", "InvalidHandshake", "InvalidStatus", "InvalidStatusCode",
+          "InvalidHeader", "InvalidHeaderFormat", "InvalidHeaderValue", "InvalidMessage",
+          "InvalidUpgrade", "SecurityError", "NegotiationError", "InvalidProxyStatus",
+          "InvalidProxyMessage", "ProxyError")) {
+        $diagnostic.errorClass = $errorClass
+      }
+      $httpStatus = Get-GpuHostSmokeField $summary "http_status"
+      if (($httpStatus -is [int] -or $httpStatus -is [long]) -and
+          $httpStatus -ge 100 -and $httpStatus -le 599) {
+        $diagnostic.httpStatus = $httpStatus
+      }
+      $stage = Get-GpuHostSmokeField $summary "failure_stage"
+      if ($stage -is [string] -and $stage -cin @("argument", "fixture", "ready",
+          "transcript", "terminal", "stream", "unclassified")) {
+        $diagnostic.failureStage = $stage
+      }
+    } elseif ($schema -is [string] -and $schema -ceq "platform-ai.live-stt.stream-smoke.v1") {
+      $diagnostic.stdoutShape = "smoke-summary"
+      foreach ($group in @(
+          @{ Name = "events"; Fields = @("partial_count", "final_count",
+              "final_hallucination_count", "error_count", "max_transcript_gap_ms") },
+          @{ Name = "coverage"; Fields = @("final_words", "reference_words",
+              "final_word_coverage", "reference_token_coverage", "word_error_rate") },
+          @{ Name = "latency"; Fields = @("ready_ms", "elapsed_ms") }
+        )) {
+        $container = Get-GpuHostSmokeField $summary $group.Name
+        foreach ($field in $group.Fields) {
+          $value = Get-GpuHostSmokeField $container $field
+          if (($value -is [int] -or $value -is [long] -or $value -is [double] -or
+              $value -is [decimal]) -and $value -ge 0 -and $value -le 1000000000) {
+            $diagnostic.metrics["$($group.Name).$field"] = $value
+          }
+        }
+      }
+      $events = Get-GpuHostSmokeField $summary "events"
+      $terminal = Get-GpuHostSmokeField $events "terminal_sequence"
+      $diagnostic.terminalSequence = @($terminal | Select-Object -First 4 | ForEach-Object {
+        if ($_ -is [string] -and $_ -cin @("eof_ack", "drained")) { $_ }
+        else { "unrecognized" }
+      })
+      $gate = Get-GpuHostSmokeField $summary "quality_gate"
+      $allowedFailures = @("ready_missing", "error_events_present", "terminal_sequence_invalid",
+        "final_event_count_below_min", "partial_event_count_below_min",
+        "final_hallucination_detected", "final_word_coverage_below_min",
+        "reference_quality_unavailable", "reference_token_coverage_below_min",
+        "word_error_rate_above_max", "transcript_event_gap_above_max")
+      $failures = Get-GpuHostSmokeField $gate "failures"
+      $diagnostic.qualityFailures = @($failures |
+        Select-Object -First 16 | ForEach-Object {
+          if ($_ -is [string] -and $_ -cin $allowedFailures) { $_ }
+          else { "unrecognized" }
+        })
+    } else {
+      $diagnostic.stdoutShape = "unrecognized-json"
+    }
+  } catch {
+    $diagnostic.stdoutShape = "invalid-json"
+  }
+  return [pscustomobject]$diagnostic
+}
+
 function Write-GpuHostAcceptanceReceipt {
   param(
     [Parameter(Mandatory = $true)][string]$Fixture,
@@ -26,6 +166,7 @@ function Write-GpuHostAcceptanceReceipt {
     [Parameter(Mandatory = $true)][string]$Verdict,
     [string[]]$FailedChecks = @(),
     $Summary = $null,
+    $FailureDiagnostic = $null,
     # Follows the caller's -StatePath instead of a second hardcoded root, so a
     # test or a non-default ledger location keeps its receipts together with
     # the ledger it belongs to.
@@ -58,6 +199,7 @@ function Write-GpuHostAcceptanceReceipt {
       verdict       = $Verdict
       failedChecks  = @($FailedChecks)
       summary       = $Summary
+      failureDiagnostic = $FailureDiagnostic
     }
     [IO.File]::WriteAllText(
       $receiptPath,
