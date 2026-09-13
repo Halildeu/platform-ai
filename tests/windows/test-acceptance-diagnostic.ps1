@@ -34,15 +34,24 @@ Write-Host 'Acceptance diagnostic metadata contract: PASS'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 . (Join-Path $repoRoot 'deploy\gpu-host\acceptance-receipt.ps1')
 $privateMarker = 'PRIVATE-CONTENT-DO-NOT-PERSIST'
-$errorJson = '{"schema":"platform-ai.live-stt.stream-smoke.error.v1","ok":false,"error_code":"smoke_contract_failed","message":"PRIVATE-CONTENT-DO-NOT-PERSIST"}'
+$errorJson = '{"schema":"platform-ai.live-stt.stream-smoke.error.v1","ok":false,"error_code":"smoke_contract_failed","error_class":"SmokeError","failure_stage":"ready","message":"PRIVATE-CONTENT-DO-NOT-PERSIST"}'
 $diagnostic = ConvertTo-GpuHostSmokeFailureDiagnostic -StandardOutput $errorJson `
     -StandardError "Traceback at C:\$privateMarker\file.py`nFileNotFoundError: $privateMarker" `
     -ExitCode 1 -DeadlineOpen $true
 if ($diagnostic.errorCode -cne 'smoke_contract_failed' -or
+    $diagnostic.failureStage -cne 'ready' -or
+    $diagnostic.errorClass -cne 'SmokeError' -or
     $diagnostic.stderrExceptionClass -cne 'FileNotFoundError' -or
     $diagnostic.exitCode -ne 1 -or -not $diagnostic.deadlineOpen -or
     ($diagnostic | ConvertTo-Json -Depth 8) -match $privateMarker) {
     throw 'Nonzero smoke error projection lost metadata or leaked private content.'
+}
+$unknownStage = $errorJson.Replace('"ready"', '"PRIVATE-CONTENT-DO-NOT-PERSIST"').Replace('"SmokeError"', '"PRIVATE-CONTENT-DO-NOT-PERSIST"')
+$diagnostic = ConvertTo-GpuHostSmokeFailureDiagnostic -StandardOutput $unknownStage `
+    -ExitCode 1 -DeadlineOpen $true
+if ($null -ne $diagnostic.failureStage -or $null -ne $diagnostic.errorClass -or
+    ($diagnostic | ConvertTo-Json -Depth 8) -match $privateMarker) {
+    throw 'Unrecognized failure stage must never reach the receipt.'
 }
 $summaryJson = @'
 {"schema":"platform-ai.live-stt.stream-smoke.v1","ok":false,"url":"https://PRIVATE-CONTENT-DO-NOT-PERSIST","events":{"partial_count":2,"final_count":1,"error_count":0,"terminal_sequence":["eof_ack","drained","PRIVATE-CONTENT-DO-NOT-PERSIST"],"text":"PRIVATE-CONTENT-DO-NOT-PERSIST"},"coverage":{"word_error_rate":0.375,"final_words":"PRIVATE-CONTENT-DO-NOT-PERSIST","reference_words":true},"quality_gate":{"failures":["word_error_rate_above_max","PRIVATE-CONTENT-DO-NOT-PERSIST"]},"errors":["PRIVATE-CONTENT-DO-NOT-PERSIST"]}
@@ -136,6 +145,7 @@ try {
     foreach ($case in @(
         @{ Out = $errorJson; Err = ''; Exit = 1; Shape = 'smoke-error'; Closed = $false },
         @{ Out = $summaryJson; Err = ''; Exit = 1; Shape = 'smoke-summary'; Closed = $false },
+        @{ Out = $summaryJson.Replace('"ok":false', '"ok":true'); Err = ''; Exit = 1; Shape = 'smoke-summary'; Closed = $false },
         @{ Out = ''; Err = "ModuleNotFoundError: $privateMarker"; Exit = 1; Shape = 'empty'; Closed = $false },
         @{ Out = $privateMarker; Err = $privateMarker; Exit = 2; Shape = 'invalid-json'; Closed = $false },
         @{ Out = $errorJson; Err = ''; Exit = 0; Shape = 'smoke-error'; Closed = $true }

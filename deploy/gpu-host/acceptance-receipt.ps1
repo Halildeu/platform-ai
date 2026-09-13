@@ -42,6 +42,8 @@ function ConvertTo-GpuHostSmokeFailureDiagnostic {
     stdoutShape = "empty"
     stderrShape = "empty"
     errorCode = $null
+    errorClass = $null
+    failureStage = $null
     stderrExceptionClass = $null
     reportedOk = $null
     metrics = [ordered]@{}
@@ -84,6 +86,20 @@ function ConvertTo-GpuHostSmokeFailureDiagnostic {
       $code = Get-GpuHostSmokeField $summary "error_code"
       if ($code -is [string] -and $code -cin @("smoke_contract_failed", "smoke_internal_failed")) {
         $diagnostic.errorCode = $code
+      }
+      $errorClass = Get-GpuHostSmokeField $summary "error_class"
+      if ($errorClass -is [string] -and $errorClass -cin @("SmokeError", "unclassified",
+          "ModuleNotFoundError", "ImportError", "FileNotFoundError", "PermissionError",
+          "ConnectionRefusedError", "ConnectionResetError", "ConnectionClosedError",
+          "ConnectionClosedOK", "TimeoutError", "OSError", "RuntimeError", "ValueError",
+          "TypeError", "KeyError", "AttributeError", "UnicodeDecodeError", "UnicodeEncodeError",
+          "JSONDecodeError", "MemoryError")) {
+        $diagnostic.errorClass = $errorClass
+      }
+      $stage = Get-GpuHostSmokeField $summary "failure_stage"
+      if ($stage -is [string] -and $stage -cin @("argument", "fixture", "ready",
+          "transcript", "terminal", "stream", "unclassified")) {
+        $diagnostic.failureStage = $stage
       }
     } elseif ($schema -is [string] -and $schema -ceq "platform-ai.live-stt.stream-smoke.v1") {
       $diagnostic.stdoutShape = "smoke-summary"

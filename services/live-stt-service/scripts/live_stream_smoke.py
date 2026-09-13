@@ -68,18 +68,50 @@ FINAL_REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 AudioArray = NDArray[np.float32]
 
 
+SMOKE_FAILURE_STAGES = frozenset(
+    {"argument", "fixture", "ready", "transcript", "terminal", "stream", "unclassified"}
+)
+SMOKE_ERROR_CLASSES = frozenset(
+    {
+        "ModuleNotFoundError",
+        "ImportError",
+        "FileNotFoundError",
+        "PermissionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "ConnectionClosedError",
+        "ConnectionClosedOK",
+        "TimeoutError",
+        "OSError",
+        "RuntimeError",
+        "ValueError",
+        "TypeError",
+        "KeyError",
+        "AttributeError",
+        "UnicodeDecodeError",
+        "UnicodeEncodeError",
+        "JSONDecodeError",
+        "MemoryError",
+    }
+)
+
+
 class SmokeError(RuntimeError):
-    """Expected smoke failure with a redacted message."""
+    """Expected failure; only its fixed stage, never its message, is emitted."""
+
+    def __init__(self, message: str, *, stage: str = "unclassified") -> None:
+        super().__init__(message)
+        self.stage = stage if stage in SMOKE_FAILURE_STAGES else "unclassified"
 
 
 def validate_stream_url(value: str) -> None:
     parsed = urlparse(value)
     if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
-        raise SmokeError("stream URL must be an absolute ws/wss URL")
+        raise SmokeError("stream URL must be an absolute ws/wss URL", stage="argument")
     if parsed.username is not None or parsed.password is not None:
-        raise SmokeError("stream URL must not contain userinfo")
+        raise SmokeError("stream URL must not contain userinfo", stage="argument")
     if parse_qsl(parsed.query, keep_blank_values=True) != [("protocol", STREAM_PROTOCOL)]:
-        raise SmokeError(f"stream URL must negotiate protocol={STREAM_PROTOCOL}")
+        raise SmokeError(f"stream URL must negotiate protocol={STREAM_PROTOCOL}", stage="argument")
 
 
 def redacted_stream_url(value: str) -> str:
@@ -108,7 +140,7 @@ def validate_ready_event(event: dict[str, Any]) -> None:
         or not isinstance(expected_terminal_timeout_ms, int)
         or not 1_000 <= expected_terminal_timeout_ms <= 120_000
     ):
-        raise SmokeError("ready event does not satisfy source-ranges-v1 contract")
+        raise SmokeError("ready event does not satisfy source-ranges-v1 contract", stage="ready")
 
 
 def _is_non_negative_int(value: object) -> bool:
@@ -174,7 +206,10 @@ def validate_transcript_event(
         valid = False
 
     if not valid:
-        raise SmokeError(f"{event_type or 'unknown'} event violates source-ranges-v1 contract")
+        raise SmokeError(
+            f"{event_type or 'unknown'} event violates source-ranges-v1 contract",
+            stage="transcript",
+        )
 
 
 def _word_count(text: str) -> int:
@@ -282,9 +317,9 @@ def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> Audio
         frames = wav.readframes(wav.getnframes())
 
     if channels < 1:
-        raise SmokeError("audio fixture has no channels")
+        raise SmokeError("audio fixture has no channels", stage="fixture")
     if sample_width != 2:
-        raise SmokeError("audio fixture must be PCM16 WAV")
+        raise SmokeError("audio fixture must be PCM16 WAV", stage="fixture")
 
     pcm = np.frombuffer(frames, dtype="<i2").astype(np.float32)
     if channels > 1:
@@ -295,7 +330,7 @@ def load_wav_float32(path: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> Audio
         return audio
 
     if source_rate <= 0:
-        raise SmokeError("audio fixture has an invalid sample rate")
+        raise SmokeError("audio fixture has an invalid sample rate", stage="fixture")
     duration = audio.shape[0] / source_rate
     target_len = max(1, int(round(duration * sample_rate)))
     source_x = np.linspace(0.0, duration, num=audio.shape[0], endpoint=False)
@@ -510,7 +545,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     wav_path = Path(args.wav).expanduser().resolve()
     reference_text_path = resolve_reference_text(wav_path, args.reference_text)
     if args.repeat_audio < 1:
-        raise SmokeError("repeat-audio must be at least 1")
+        raise SmokeError("repeat-audio must be at least 1", stage="argument")
     audio = load_wav_float32(wav_path)
     if args.repeat_audio > 1:
         audio = np.tile(audio, args.repeat_audio)
@@ -545,7 +580,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             if event_type == "loading":
                 stage = event.get("stage", "-")
                 if stage not in {"live_model", "final_model"}:
-                    raise SmokeError("loading event has an invalid stage")
+                    raise SmokeError("loading event has an invalid stage", stage="ready")
                 loading_events.append(f"loading:{stage}")
             elif event_type == "ready":
                 validate_ready_event(event)
@@ -575,14 +610,16 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     try:
                         event = json.loads(await websocket.recv())
                     except ConnectionClosedOK as exc:
-                        raise SmokeError("stream closed before drained") from exc
+                        raise SmokeError("stream closed before drained", stage="terminal") from exc
                     except ConnectionClosed as exc:
-                        raise SmokeError("stream closed uncleanly") from exc
+                        raise SmokeError("stream closed uncleanly", stage="terminal") from exc
                     received_at_ms = int((time.perf_counter() - started_at) * 1000)
                     event_type = event.get("type")
                     if event_type in {"partial", "final"}:
                         if terminal_state == "acked" and event_type == "partial":
-                            raise SmokeError("partial event received after eof_ack")
+                            raise SmokeError(
+                                "partial event received after eof_ack", stage="terminal"
+                            )
                         validate_transcript_event(
                             event,
                             cumulative_samples_sent=samples_sent,
@@ -596,12 +633,14 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                             last_final_source_end = int(cast(int, event["source_end_sample"]))
                     elif event_type == "eof_ack":
                         if not eof_sent.is_set() or terminal_state != "streaming":
-                            raise SmokeError("eof_ack is not caused by local eof")
+                            raise SmokeError("eof_ack is not caused by local eof", stage="terminal")
                         terminal_state = "acked"
                         terminal_events.append("eof_ack")
                     elif event_type == "drained":
                         if not eof_sent.is_set() or terminal_state != "acked":
-                            raise SmokeError("drained received before valid eof_ack")
+                            raise SmokeError(
+                                "drained received before valid eof_ack", stage="terminal"
+                            )
                         terminal_state = "drained"
                         terminal_events.append("drained")
                         try:
@@ -609,19 +648,25 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                         except ConnectionClosedOK as exc:
                             if exc.rcvd is None or exc.rcvd.code != 1000:
                                 raise SmokeError(
-                                    "stream did not close with code 1000 after drained"
+                                    "stream did not close with code 1000 after drained",
+                                    stage="terminal",
                                 ) from exc
                             return
                         except ConnectionClosed as exc:
-                            raise SmokeError("stream closed uncleanly after drained") from exc
+                            raise SmokeError(
+                                "stream closed uncleanly after drained", stage="terminal"
+                            ) from exc
                         raise SmokeError(
-                            f"trailing event received after drained: {type(trailing).__name__}"
+                            f"trailing event received after drained: {type(trailing).__name__}",
+                            stage="terminal",
                         )
                     elif event_type == "error":
                         errors.append("upstream_error")
                         return
                     else:
-                        raise SmokeError("unexpected event type in stream state machine")
+                        raise SmokeError(
+                            "unexpected event type in stream state machine", stage="stream"
+                        )
 
             receiver_task = asyncio.create_task(receiver())
             try:
@@ -662,7 +707,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     transport = getattr(websocket, "transport", None)
                     if transport is not None:
                         transport.abort()
-                    raise SmokeError("stream receiver cancellation timed out")
+                    raise SmokeError("stream receiver cancellation timed out", stage="terminal")
                 for task in done:
                     if not task.cancelled():
                         task.exception()
@@ -762,25 +807,34 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         summary = asyncio.run(run_smoke(args))
-    except SmokeError:
+    except SmokeError as exc:
         print(
             json.dumps(
                 {
                     "schema": "platform-ai.live-stt.stream-smoke.error.v1",
                     "ok": False,
                     "error_code": "smoke_contract_failed",
+                    "error_class": "SmokeError",
+                    "failure_stage": (
+                        exc.stage if exc.stage in SMOKE_FAILURE_STAGES else "unclassified"
+                    ),
                 },
                 separators=(",", ":"),
             )
         )
         return 1
-    except Exception:  # noqa: BLE001 - CLI boundary must never emit raw traceback/evidence
+    except Exception as exc:  # noqa: BLE001 - never emit raw traceback/evidence
         print(
             json.dumps(
                 {
                     "schema": "platform-ai.live-stt.stream-smoke.error.v1",
                     "ok": False,
                     "error_code": "smoke_internal_failed",
+                    "error_class": (
+                        type(exc).__name__
+                        if type(exc).__name__ in SMOKE_ERROR_CLASSES
+                        else "unclassified"
+                    ),
                 },
                 separators=(",", ":"),
             )

@@ -32,7 +32,11 @@ The failed-child receipt now adds `failureDiagnostic` with an explicit v1 schema
 - Actual integer exit code and boolean deadline-open state.
 - Empty, oversized, invalid, recognized or unrecognized stdout shape; stderr
   presence/oversize shape, never its contents.
-- Only the two existing fixed smoke error codes.
+- Only the two existing fixed smoke error codes. The CLI additionally emits a
+  fixed allowlisted exception class and, for `SmokeError`, a call-site stage:
+  `argument`, `fixture`, `ready`, `transcript`, `terminal`, `stream` or
+  `unclassified`. The original exception message and event contents never leave
+  the CLI; unknown class/stage values are not projected into receipts.
 - Only a fixed allowlist of exception class names from anchored stderr lines,
   or the fixed `ArgumentParserError` category. This is an observed diagnostic
   classification, not a causal verdict; unknown classes remain null.
@@ -45,6 +49,8 @@ The existing asynchronous pipe draining remains unchanged. The nonzero exit or
 closed-deadline branch still returns false even if stdout claims `ok: true`.
 Malformed evidence cannot make acceptance pass. Success acceptance, thresholds,
 deadlines, fixture selection, model/prompt and rollback behavior are unchanged.
+The smoke script changes only diagnostic classification, not parser predicates,
+stream state transitions, audio processing or quality thresholds.
 Original failure receipts remain valid; no new host probe or deployment is part
 of this source task.
 
@@ -52,6 +58,8 @@ of this source task.
 
 ```bash
 python -m unittest discover -s tests/unit -p test_gpu_host_update_script.py
+cd services/live-stt-service
+python -m pytest tests/unit/test_live_stream_smoke.py -q
 ```
 
 The existing Windows CI `gpu-host-windows-contract` runs
@@ -63,3 +71,9 @@ boolean false. Windows execution is CI evidence, not local Linux or deployed-hos
 acceptance. All meeting app hashes must continue matching the four final semantic
 reports from PR #341; no additional model inference is required for this isolated
 diagnostic change.
+
+Local verification: 351 live-STT unit tests passed (84% app coverage), including
+40 smoke CLI tests; 28 updater static tests passed. Live-STT Ruff, mypy (19 app
+files), changed smoke-file Black and diff checks passed. Existing pytest-asyncio
+and Starlette deprecation warnings remain. Full-file Black differences in the
+older updater static-test file predate this change and were not reformatted.
