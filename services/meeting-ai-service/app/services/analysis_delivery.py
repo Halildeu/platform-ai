@@ -24,6 +24,7 @@ from app.api.metrics import (
 from app.core.config import Settings
 from app.models.schemas import AnalysisDeliveryHealth, AnalyzeResponse
 from app.services.canonical_transcript_client import HttpCanonicalTranscriptClient
+from app.services.citation import due_date_supported_by_source
 from app.services.durable_outbox import (
     ClaimedMessage,
     OutboxError,
@@ -161,12 +162,24 @@ def _validate_backend_contract(settings: Settings, result: AnalyzeResponse) -> N
 
 
 def _action_payload(item: dict[str, object]) -> dict[str, object]:
-    # Backend accepts an Instant. Relative phrases such as "cuma" remain useful
-    # in the grounded response but cannot be truthfully coerced into a timestamp.
+    due_date = item.get("due_date")
+    if due_date is not None and not isinstance(due_date, str):
+        raise AnalysisDeliveryContractError("action due date must be text or null")
+    due_text = due_date.strip() if isinstance(due_date, str) and due_date.strip() else None
+    if due_text is not None:
+        # Match the backend's Jakarta @Size String contract (UTF-16 code units).
+        if sum(2 if ord(char) > 0xFFFF else 1 for char in due_text) > 255:
+            raise AnalysisDeliveryContractError("action due text exceeds backend contract limit")
+        source = item.get("text")
+        if not isinstance(source, str) or not due_date_supported_by_source(due_text, source):
+            raise AnalysisDeliveryContractError("action due text is not source supported")
+    # Preserve the grounded phrase separately; a relative date must never be
+    # guessed into the legacy Instant field without authoritative calendar context.
     return {
         "text": item.get("text"),
         "assignee": item.get("owner"),
-        "due": _strict_iso_instant(item.get("due_date")),
+        "due": _strict_iso_instant(due_text),
+        "due_text": due_text,
     }
 
 

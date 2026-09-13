@@ -18,9 +18,10 @@ from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.models.ready_event import parse_transcript_ready_event
+from app.models.schemas import ActionItem
 from app.services.analysis_application import AnalysisApplicationService
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
-from app.services.analyze import MeetingAnalysisService
+from app.services.analyze import AnalysisDraft, Analyzer, MeetingAnalysisService
 from app.services.canonical_transcript_client import (
     CanonicalTranscriptRetryableError,
     CanonicalTranscriptSnapshot,
@@ -282,10 +283,11 @@ def _runtime(
     *,
     transcript_client: FakeTranscriptClient | None = None,
     settings_overrides: dict[str, object] | None = None,
+    analyzer: Analyzer | None = None,
 ) -> tuple[ReadyEventConsumerRuntime, AnalysisDeliveryRuntime, FakeRedis, FakeTranscriptClient]:
     settings = _settings(tmp_path, **(settings_overrides or {}))
     delivery = AnalysisDeliveryRuntime(settings, transport=FakeDeliveryTransport())
-    application = AnalysisApplicationService(settings, MeetingAnalysisService(settings))
+    application = AnalysisApplicationService(settings, MeetingAnalysisService(settings, analyzer))
     redis = FakeRedis()
     transcripts = transcript_client or FakeTranscriptClient()
     runtime = ReadyEventConsumerRuntime(
@@ -316,6 +318,51 @@ def test_ready_event_outboxes_once_then_duplicate_only_acks(tmp_path: Path) -> N
     assert ack_count == 2
     assert pending == 1
     assert RAW_TRANSCRIPT.encode() not in durable_bytes
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_ready_event_preserves_only_grounded_due_phrase_in_encrypted_outbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, supported: bool
+) -> None:
+    source = "Sonuçları Perşembe günü paylaşacağım."
+    monkeypatch.setattr(sys.modules[__name__], "RAW_TRANSCRIPT", source)
+
+    class DraftAnalyzer:
+        model_loaded = True
+
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            assert transcript == source
+            return AnalysisDraft(
+                summary=source,
+                action_items=[
+                    ActionItem(
+                        text=source,
+                        due_date="Perşembe günü" if supported else "pazartesi",
+                    )
+                ],
+            )
+
+    async def scenario():  # type: ignore[no-untyped-def]
+        runtime, delivery, redis, _ = _runtime(tmp_path, analyzer=DraftAnalyzer())
+        await runtime.process_message("1-0", _fields())
+        assert delivery.store is not None
+        assert len(redis.acked) == 1
+        assert source.encode() not in runtime.settings.ingestion_store_path.read_bytes()
+        return delivery.store.claim_next(owner="assertion", lease_sec=10.0)
+
+    message = asyncio.run(scenario())
+    assert message is not None
+    assert message.payload["actions"] == [
+        {
+            "text": source,
+            "assignee": None,
+            "due": None,
+            "due_text": "Perşembe günü" if supported else None,
+        }
+    ]
+    assert len(message.payload["rejected_claims"]) == (0 if supported else 1)
+    if not supported:
+        assert message.payload["rejected_claims"][0]["kind"] == "action_due_date"
 
 
 def test_upgrade_replay_outboxes_with_stored_analysis_run_id(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from app.models.schemas import ActionItem, AnalyzeResponse, Citation, RejectedCl
 from app.services.analysis_delivery import (
     AnalysisDeliveryContractError,
     AnalysisDeliveryRuntime,
+    _action_payload,
     build_ingestion_payload,
 )
 from app.services.durable_outbox import (
@@ -115,7 +116,7 @@ def _result() -> AnalyzeResponse:
         summary_grounding_status="verified",
         summary_citations=[citation],
         decisions=["Bütçe onaylandı."],
-        action_items=[ActionItem(text="Raporu hazırla", owner="Ayşe", due_date="cuma")],
+        action_items=[ActionItem(text="Raporu cuma hazırla", owner="Ayşe", due_date="cuma")],
         citations=[citation],
         rejected_claims=[
             RejectedClaim(
@@ -168,7 +169,9 @@ def test_payload_matches_backend_contract_and_preserves_grounding(tmp_path: Path
     assert payload["summary_citations"]
     assert payload["citations"]
     assert payload["rejected_claims"]
-    assert payload["actions"] == [{"text": "Raporu hazırla", "assignee": "Ayşe", "due": None}]
+    assert payload["actions"] == [
+        {"text": "Raporu cuma hazırla", "assignee": "Ayşe", "due": None, "due_text": "cuma"}
+    ]
     assert payload["generated_at"] == "2026-07-11T20:00:00Z"
     assert set(payload) == {
         "meeting_id",
@@ -201,6 +204,7 @@ def test_payload_matches_backend_contract_and_preserves_grounding(tmp_path: Path
 def test_valid_iso_due_is_normalized_to_utc(tmp_path: Path) -> None:
     result = _result()
     result.action_items[0].due_date = "2026-07-12T12:00:00+03:00"
+    result.action_items[0].text = "Raporu 2026-07-12T12:00:00+03:00 tarihinde hazırla."
     payload = build_ingestion_payload(
         settings=_settings(tmp_path / "outbox.sqlite3"),
         meeting_id=MEETING_ID,
@@ -211,8 +215,99 @@ def test_valid_iso_due_is_normalized_to_utc(tmp_path: Path) -> None:
         generated_at=datetime.now(UTC),
     )
     assert payload["actions"] == [
-        {"text": "Raporu hazırla", "assignee": "Ayşe", "due": "2026-07-12T09:00:00Z"}
+        {
+            "text": result.action_items[0].text,
+            "assignee": "Ayşe",
+            "due": "2026-07-12T09:00:00Z",
+            "due_text": "2026-07-12T12:00:00+03:00",
+        }
     ]
+
+
+@pytest.mark.parametrize("due_date", [None, "", "  "])
+def test_delivery_preserves_absent_due_text(tmp_path: Path, due_date: str | None) -> None:
+    result = _result()
+    result.action_items[0].due_date = due_date
+    payload = build_ingestion_payload(
+        settings=_settings(tmp_path / "outbox.sqlite3"),
+        meeting_id=MEETING_ID,
+        **_canonical_tuple(),
+        session_id="session-1",
+        transcript="A",
+        result=result,
+        generated_at=datetime.now(UTC),
+    )
+    assert payload["actions"][0]["due"] is None
+    assert payload["actions"][0]["due_text"] is None
+
+
+def test_observed_asr_due_phrase_survives_delivery_boundary(tmp_path: Path) -> None:
+    from app.services.semantic_eval import GoldCorpus
+
+    corpus = GoldCorpus.model_validate_json(
+        (Path(__file__).parents[1] / "fixtures/meeting-semantic-runtime-asr-v1.json").read_text()
+    )
+    case = corpus.cases[0]
+    result = _result()
+    result.action_items = [
+        ActionItem(text=case.sentences[item.sentence - 1], owner=item.owner, due_date=item.due_date)
+        for item in case.actions
+    ]
+    payload = build_ingestion_payload(
+        settings=_settings(tmp_path / "outbox.sqlite3"),
+        meeting_id=MEETING_ID,
+        **_canonical_tuple(),
+        session_id="session-1",
+        transcript=case.transcript,
+        result=result,
+        generated_at=datetime.now(UTC),
+    )
+    assert [item["due"] for item in payload["actions"]] == [None, None, None]
+    assert [item["due_text"] for item in payload["actions"]] == [None, None, "Perşembe günü"]
+
+
+@pytest.mark.parametrize("due_date", ["pazartesi", "2026-07-12T09:00:00Z", "PRIVATE_" + "x" * 250])
+def test_delivery_rejects_unsupported_or_oversized_due_metadata(
+    tmp_path: Path, due_date: str
+) -> None:
+    result = _result()
+    result.action_items[0].due_date = due_date
+    with pytest.raises(AnalysisDeliveryContractError) as caught:
+        build_ingestion_payload(
+            settings=_settings(tmp_path / "outbox.sqlite3"),
+            meeting_id=MEETING_ID,
+            **_canonical_tuple(),
+            session_id="session-1",
+            transcript="A",
+            result=result,
+            generated_at=datetime.now(UTC),
+        )
+    assert due_date not in str(caught.value)
+
+
+@pytest.mark.parametrize("invalid", [123, True, [], {}])
+def test_due_text_rejects_non_string_metadata(invalid: object) -> None:
+    with pytest.raises(AnalysisDeliveryContractError, match="must be text or null"):
+        _action_payload({"text": "Raporu hazırla.", "owner": None, "due_date": invalid})
+
+
+@pytest.mark.parametrize(
+    ("phrase", "valid"),
+    [
+        ("ü" * 255, True),
+        ("ü" * 256, False),
+        ("📅" * 127, True),
+        ("📅" * 127 + "a", True),
+        ("📅" * 128, False),
+    ],
+)
+def test_due_text_limit_matches_backend_utf16_units(phrase: str, valid: bool) -> None:
+    action = {"text": phrase, "owner": None, "due_date": phrase}
+    if not valid:
+        with pytest.raises(AnalysisDeliveryContractError, match="exceeds backend contract limit"):
+            _action_payload(action)
+    else:
+        assert _action_payload(action)["due_text"] == phrase
 
 
 def test_delivery_refuses_unredacted_or_backend_oversized_output(tmp_path: Path) -> None:
