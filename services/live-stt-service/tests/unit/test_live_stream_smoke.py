@@ -727,6 +727,41 @@ def test_main_unknown_exception_class_is_not_emitted(
     assert "private" not in captured.out.lower() and captured.err == ""
 
 
+@pytest.mark.parametrize("status", [100, 403, 599, True, "403", 99, 600])
+def test_handshake_failure_emits_only_bounded_status_and_class(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: object
+) -> None:
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    smoke = _load_smoke_module()
+    response = Response(status, "private-reason", Headers({"Authorization": "private-token"}))
+
+    async def fail(_args: object) -> dict[str, object]:
+        raise InvalidStatus(response)
+
+    monkeypatch.setattr(smoke, "run_smoke", fail)
+    assert smoke.main([]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["error_class"] == "InvalidStatus"
+    expected = status if type(status) is int and 100 <= status <= 599 else None
+    assert payload.get("http_status") == expected
+    assert "private" not in captured.out and "Authorization" not in captured.out
+    assert captured.err == ""
+
+
+def test_unknown_handshake_subclass_keeps_safe_family_not_private_class() -> None:
+    from websockets.exceptions import InvalidHandshake
+
+    smoke = _load_smoke_module()
+    private_error = type("PrivateHandshakeClass", (InvalidHandshake,), {})
+    assert smoke.smoke_exception_metadata(private_error("private-message")) == {
+        "error_class": "InvalidHandshake"
+    }
+
+
 def test_main_retrieves_concurrent_receiver_failure_without_stderr_leak(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

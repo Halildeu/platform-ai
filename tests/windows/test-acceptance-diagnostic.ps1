@@ -56,6 +56,19 @@ if ($null -ne $diagnostic.failureStage -or $null -ne $diagnostic.errorClass -or
 $summaryJson = @'
 {"schema":"platform-ai.live-stt.stream-smoke.v1","ok":false,"url":"https://PRIVATE-CONTENT-DO-NOT-PERSIST","events":{"partial_count":2,"final_count":1,"error_count":0,"terminal_sequence":["eof_ack","drained","PRIVATE-CONTENT-DO-NOT-PERSIST"],"text":"PRIVATE-CONTENT-DO-NOT-PERSIST"},"coverage":{"word_error_rate":0.375,"final_words":"PRIVATE-CONTENT-DO-NOT-PERSIST","reference_words":true},"quality_gate":{"failures":["word_error_rate_above_max","PRIVATE-CONTENT-DO-NOT-PERSIST"]},"errors":["PRIVATE-CONTENT-DO-NOT-PERSIST"]}
 '@
+$handshakeJson = '{"schema":"platform-ai.live-stt.stream-smoke.error.v1","ok":false,"error_code":"smoke_internal_failed","error_class":"InvalidStatus","http_status":403,"headers":{"Authorization":"PRIVATE-CONTENT-DO-NOT-PERSIST"}}'
+$diagnostic = ConvertTo-GpuHostSmokeFailureDiagnostic -StandardOutput $handshakeJson `
+    -ExitCode 1 -DeadlineOpen $true
+if ($diagnostic.errorClass -cne 'InvalidStatus' -or $diagnostic.httpStatus -ne 403 -or
+    ($diagnostic | ConvertTo-Json -Depth 8) -match $privateMarker) {
+    throw 'Handshake diagnostic must retain bounded HTTP status without headers.'
+}
+foreach ($invalidStatus in @('true', '"403"', '99', '600', '403.5', 'null')) {
+    $invalidHandshake = $handshakeJson.Replace('"http_status":403', ('"http_status":' + $invalidStatus))
+    $diagnostic = ConvertTo-GpuHostSmokeFailureDiagnostic -StandardOutput $invalidHandshake `
+        -ExitCode 1 -DeadlineOpen $true
+    if ($null -ne $diagnostic.httpStatus) { throw 'HTTP status must be a bounded integer.' }
+}
 $diagnostic = ConvertTo-GpuHostSmokeFailureDiagnostic -StandardOutput $summaryJson `
     -ExitCode 1 -DeadlineOpen $true
 if ($diagnostic.stdoutShape -cne 'smoke-summary' -or
@@ -144,6 +157,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $fixtures 'sample-tr-cv17-001.txt'), 'synthetic')
     foreach ($case in @(
         @{ Out = $errorJson; Err = ''; Exit = 1; Shape = 'smoke-error'; Closed = $false },
+        @{ Out = $handshakeJson; Err = ''; Exit = 1; Shape = 'smoke-error'; Closed = $false },
         @{ Out = $summaryJson; Err = ''; Exit = 1; Shape = 'smoke-summary'; Closed = $false },
         @{ Out = $summaryJson.Replace('"ok":false', '"ok":true'); Err = ''; Exit = 1; Shape = 'smoke-summary'; Closed = $false },
         @{ Out = ''; Err = "ModuleNotFoundError: $privateMarker"; Exit = 1; Shape = 'empty'; Closed = $false },

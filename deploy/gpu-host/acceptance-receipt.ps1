@@ -43,6 +43,7 @@ function ConvertTo-GpuHostSmokeFailureDiagnostic {
     stderrShape = "empty"
     errorCode = $null
     errorClass = $null
+    httpStatus = $null
     failureStage = $null
     stderrExceptionClass = $null
     reportedOk = $null
@@ -60,7 +61,10 @@ function ConvertTo-GpuHostSmokeFailureDiagnostic {
         "ConnectionClosedError", "ConnectionClosedOK", "TimeoutError",
         "OSError", "RuntimeError", "ValueError", "TypeError", "KeyError",
         "AttributeError", "UnicodeDecodeError", "UnicodeEncodeError",
-        "JSONDecodeError", "SyntaxError", "IndentationError", "MemoryError")
+        "JSONDecodeError", "SyntaxError", "IndentationError", "MemoryError",
+        "InvalidHandshake", "InvalidStatus", "InvalidStatusCode", "InvalidHeader",
+        "InvalidHeaderFormat", "InvalidHeaderValue", "InvalidMessage", "InvalidUpgrade",
+        "SecurityError", "NegotiationError", "InvalidProxyStatus", "InvalidProxyMessage", "ProxyError")
       $pattern = '(?m)^[ \t]*(' + ($classes -join '|') + ')(?=:|\r?$)'
       $matches = [regex]::Matches($StandardError, $pattern)
       if ($matches.Count -gt 0) {
@@ -93,8 +97,16 @@ function ConvertTo-GpuHostSmokeFailureDiagnostic {
           "ConnectionRefusedError", "ConnectionResetError", "ConnectionClosedError",
           "ConnectionClosedOK", "TimeoutError", "OSError", "RuntimeError", "ValueError",
           "TypeError", "KeyError", "AttributeError", "UnicodeDecodeError", "UnicodeEncodeError",
-          "JSONDecodeError", "MemoryError")) {
+          "JSONDecodeError", "MemoryError", "InvalidHandshake", "InvalidStatus", "InvalidStatusCode",
+          "InvalidHeader", "InvalidHeaderFormat", "InvalidHeaderValue", "InvalidMessage",
+          "InvalidUpgrade", "SecurityError", "NegotiationError", "InvalidProxyStatus",
+          "InvalidProxyMessage", "ProxyError")) {
         $diagnostic.errorClass = $errorClass
+      }
+      $httpStatus = Get-GpuHostSmokeField $summary "http_status"
+      if (($httpStatus -is [int] -or $httpStatus -is [long]) -and
+          $httpStatus -ge 100 -and $httpStatus -le 599) {
+        $diagnostic.httpStatus = $httpStatus
       }
       $stage = Get-GpuHostSmokeField $summary "failure_stage"
       if ($stage -is [string] -and $stage -cin @("argument", "fixture", "ready",

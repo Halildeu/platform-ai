@@ -25,7 +25,7 @@ from urllib.parse import parse_qsl, urlparse, urlunsplit
 import numpy as np
 import websockets
 from numpy.typing import NDArray
-from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, InvalidHandshake
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVICE_ROOT) not in sys.path:
@@ -92,6 +92,19 @@ SMOKE_ERROR_CLASSES = frozenset(
         "UnicodeEncodeError",
         "JSONDecodeError",
         "MemoryError",
+        "InvalidHandshake",
+        "InvalidStatus",
+        "InvalidStatusCode",
+        "InvalidHeader",
+        "InvalidHeaderFormat",
+        "InvalidHeaderValue",
+        "InvalidMessage",
+        "InvalidUpgrade",
+        "SecurityError",
+        "NegotiationError",
+        "InvalidProxyStatus",
+        "InvalidProxyMessage",
+        "ProxyError",
     }
 )
 
@@ -803,6 +816,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def smoke_exception_metadata(exc: Exception) -> dict[str, str | int]:
+    name = type(exc).__name__
+    error_class = name if name in SMOKE_ERROR_CLASSES else "unclassified"
+    if error_class == "unclassified" and isinstance(exc, InvalidHandshake):
+        error_class = "InvalidHandshake"
+    metadata: dict[str, str | int] = {"error_class": error_class}
+    if isinstance(exc, InvalidHandshake) or error_class == "InvalidProxyStatus":
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", getattr(exc, "status_code", None))
+        if type(status) is int and 100 <= status <= 599:
+            metadata["http_status"] = status
+    return metadata
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -830,11 +857,7 @@ def main(argv: list[str] | None = None) -> int:
                     "schema": "platform-ai.live-stt.stream-smoke.error.v1",
                     "ok": False,
                     "error_code": "smoke_internal_failed",
-                    "error_class": (
-                        type(exc).__name__
-                        if type(exc).__name__ in SMOKE_ERROR_CLASSES
-                        else "unclassified"
-                    ),
+                    **smoke_exception_metadata(exc),
                 },
                 separators=(",", ":"),
             )

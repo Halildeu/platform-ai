@@ -37,6 +37,12 @@ The failed-child receipt now adds `failureDiagnostic` with an explicit v1 schema
   `argument`, `fixture`, `ready`, `transcript`, `terminal`, `stream` or
   `unclassified`. The original exception message and event contents never leave
   the CLI; unknown class/stage values are not projected into receipts.
+- Known WebSocket handshake classes (including `InvalidStatus` and the legacy
+  `InvalidStatusCode`) retain a safe class/family. A status already present on the
+  exception's response is emitted only when it is an actual integer in 100-599.
+  No reason phrase, header, response body or URL is copied. Installed DEV
+  websockets 17.1 source and synthetic `InvalidStatus(Response(...))` tests verify
+  the modern response field; the legacy status attribute remains supported.
 - Only a fixed allowlist of exception class names from anchored stderr lines,
   or the fixed `ArgumentParserError` category. This is an observed diagnostic
   classification, not a causal verdict; unknown classes remain null.
@@ -72,8 +78,8 @@ acceptance. All meeting app hashes must continue matching the four final semanti
 reports from PR #341; no additional model inference is required for this isolated
 diagnostic change.
 
-Local verification: 351 live-STT unit tests passed (84% app coverage), including
-40 smoke CLI tests; 28 updater static tests passed. Live-STT Ruff, mypy (19 app
+Local verification: 359 live-STT unit tests passed (84% app coverage), including
+48 smoke CLI tests; 28 updater static tests passed. Live-STT Ruff, mypy (19 app
 files), changed smoke-file Black and diff checks passed. Existing pytest-asyncio
 and Starlette deprecation warnings remain. Full-file Black differences in the
 older updater static-test file predate this change and were not reformatted.
