@@ -125,7 +125,11 @@ def test_ollama_sends_deterministic_decoding_options(monkeypatch: pytest.MonkeyP
     settings = _settings(ollama_num_ctx=16384, ollama_temperature=0.0, ollama_seed=7)
     OllamaAnalyzer(settings).analyze("redacted transcript")
 
-    assert captured["format"] == "json"
+    schema = captured["format"]
+    assert isinstance(schema, dict)
+    assert schema["type"] == "object"
+    assert schema["properties"]["decision_sentences"]["items"]["maximum"] == 1
+    assert schema["$defs"]["SelectedAction"]["required"] == ["sentence", "owner", "due_date"]
     assert captured["keep_alive"] == settings.ollama_keep_alive
     opts = captured["options"]
     assert isinstance(opts, dict)
@@ -170,6 +174,67 @@ def test_ollama_prompt_requires_extractive_summary_and_independent_actions(
     assert "HER İKİ listeye de yaz" in prompt
     # The transcript is present as a numbered menu, not as a raw blob.
     assert f"[1] {transcript}" in prompt
+
+
+def test_selection_prompt_has_no_fabricated_example_indices_or_assignments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(captured))
+    OllamaAnalyzer(_settings()).analyze("Tasarım raporunu ayrıntılı biçimde inceledim.")
+    prompt = str(captured["prompt"])
+    template = json.loads(prompt[prompt.rfind("{") :])
+    assert template == {
+        "summary_sentences": [],
+        "decision_sentences": [],
+        "action_item_sentences": [],
+    }
+    assert "NOT a current decision" in prompt
+    assert "Proposals" in prompt
+    assert "owner null" in prompt
+    assert "cancelled later" in prompt
+
+
+def test_empty_semantic_selection_does_not_invent_decisions_from_grounded_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {"summary_sentences": [1], "decision_sentences": [], "action_item_sentences": []}
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
+    transcript = "Tasarım raporunu ayrıntılı biçimde inceledim."
+    result = MeetingAnalysisService(_settings()).analyze(transcript)
+    assert result.summary == transcript
+    assert result.decisions == []
+    assert result.action_items == []
+
+
+@pytest.mark.parametrize("owner", ["ben", "Ben", "biz", "BEN", "we", "null"])
+def test_grounded_pronoun_is_not_an_identified_assignee(
+    monkeypatch: pytest.MonkeyPatch, owner: str
+) -> None:
+    transcript = f"Raporu hazırlama görevini {owner} üstleniyorum."
+    payload = {
+        "summary_sentences": [1],
+        "decision_sentences": [],
+        "action_item_sentences": [{"sentence": 1, "owner": owner, "due_date": None}],
+    }
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
+    result = MeetingAnalysisService(_settings()).analyze(transcript)
+    assert len(result.action_items) == 1
+    assert result.action_items[0].owner is None
+    assert any(rejected.kind == "action_owner" for rejected in result.rejected_claims)
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [[2], [{"sentence_number": 2}], [{"sentence": True, "owner": None, "due_date": None}]],
+)
+def test_malformed_selection_is_a_schema_error_not_successful_empty_actions(
+    monkeypatch: pytest.MonkeyPatch, actions: object
+) -> None:
+    payload = {"summary_sentences": [1], "decision_sentences": [], "action_item_sentences": actions}
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
+    with pytest.raises(OllamaSchemaInvalidError):
+        OllamaAnalyzer(_settings()).analyze("Raporu inceledim. Test ekibi belgeyi hazırlayacak.")
 
 
 def test_overlapping_decision_action_and_summary_survive_grounding(

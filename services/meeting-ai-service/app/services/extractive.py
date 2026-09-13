@@ -45,6 +45,9 @@ An empty selection is a legitimate answer ("bu toplantıda karar yok").
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Annotated, Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.citation import Sentence, is_groundable_evidence
 
@@ -53,6 +56,31 @@ from app.services.citation import Sentence, is_groundable_evidence
 MAX_SUMMARY_SENTENCES = 3
 MAX_DECISION_SENTENCES = 10
 MAX_ACTION_ITEMS = 10
+
+
+class SelectedAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sentence: int = Field(ge=1)
+    owner: str | None
+    due_date: str | None
+
+
+class SentenceSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    summary_sentences: list[Annotated[int, Field(ge=1)]] = Field(max_length=MAX_SUMMARY_SENTENCES)
+    decision_sentences: list[Annotated[int, Field(ge=1)]] = Field(max_length=MAX_DECISION_SENTENCES)
+    action_item_sentences: list[SelectedAction] = Field(max_length=MAX_ACTION_ITEMS)
+
+
+def selection_schema(sentence_count: int) -> dict[str, Any]:
+    """Constrain generation to real menu indices and explicit nullable metadata."""
+    schema = SentenceSelection.model_json_schema()
+    for field in ("summary_sentences", "decision_sentences"):
+        schema["properties"][field]["items"]["maximum"] = sentence_count
+    schema["$defs"]["SelectedAction"]["properties"]["sentence"]["maximum"] = sentence_count
+    return schema
 
 
 def selectable_sentences(sentences: list[Sentence]) -> list[Sentence]:

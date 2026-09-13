@@ -447,6 +447,31 @@ soyunda degil. Basarili sonuc yalnız bu bounded source contract'ini kanitlar;
 servis health, mTLS/JWT ve Electron canli kabulunun yerine gecmez.
 
 ## Kaldırma / geri alma
+
+### Pinned meeting analyzer override
+
+After a measured model decision, `configure-meeting-ai.ps1` accepts the paired
+nonsecret parameters `-OllamaModel` and `-OllamaExpectedDigest`. The model must
+include an explicit tag; the digest is the exact 64-character lowercase value
+from Ollama's `/api/tags` entry. The protected runtime file is authoritative;
+do not change the Scheduled Task action or machine-wide environment. Existing
+configurations without either key retain the launcher's `llama3.1:8b` default.
+Subsequent configure writes, ready-consumer disable, and backup restore preserve
+the configured pair. A model name alone is not immutable artifact evidence.
+
+Normal configuration writes also retain existing `MAI_REQUEST_TIMEOUT`,
+`MAI_READY_CONSUMER_LEASE_SEC`, and `MAI_READY_REDIS_CLAIM_IDLE_MS` together,
+including ready-consumer disable/enable. No new budget defaults are introduced;
+the existing Python Settings validation remains authoritative for the coupled
+lease/timeout bounds. Check all three values after model activation and rollback.
+
+Before deployment, preserve the original protected configuration and its hash
+outside the automatically replaced `.bak` slot. Older source revisions reject
+the new keys as unknown: restore a compatible protected configuration with the
+ready consumer disabled **before** restarting an older revision. Then collect
+fresh evidence and activate a new permit for the restored exact source and
+producer; an old consumed permit or enabled backup is not a rollback shortcut.
+
 ```powershell
 .\deploy\gpu-host\install.ps1 -Uninstall
 ```

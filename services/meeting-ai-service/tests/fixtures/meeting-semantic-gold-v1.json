@@ -1,0 +1,88 @@
+{
+  "schema_version": "meeting-semantic-gold-v1",
+  "synthetic": true,
+  "definitions": {
+    "scope": "Independently annotated synthetic regression corpus, not a human benchmark or population accuracy estimate. Labels are frozen before candidate prompt measurement.",
+    "decision": "An explicit adopted choice, approval, rejection, no-change policy or agreed release condition, with a concrete subject in the same sentence. Historical progress reports, questions, unaccepted suggestions and unspecified acknowledgements are not decisions.",
+    "action": "A concrete outstanding task explicitly assigned, accepted or committed to. Reports of completed work, unaccepted suggestions, unmet wishes and general policy are not tasks. A sentence can have both labels when it explicitly contains both meanings.",
+    "metadata": "Copy only explicit same-sentence owner and due phrase. First-person or anonymous speaker pronouns do not identify an owner. Do not borrow a date from a neighboring sentence or invent calendar dates.",
+    "matching": "Exact canonical sentence equality with one-to-one matching, not token overlap. An extra duplicate is a false positive. Metadata is exact string/null equality.",
+    "threshold": "Project regression target: decision and action precision >= 0.90, recall >= 0.85, exact action-with-metadata precision >= 0.90, zero execution errors. These are project targets, not industry-standard accuracy. Grounding is reported independently."
+  },
+  "cases": [
+    {
+      "id": "past-report-not-decision",
+      "sentences": ["Tasarım raporunu inceledim.", "Geçen haftaki testleri tamamladık.", "Bugün yeni bir karar alınmadı."],
+      "decisions": [], "actions": [],
+      "rationale": "Completed work and absence of a decision do not create a new decision or task."
+    },
+    {
+      "id": "unaccepted-suggestion-question",
+      "sentences": ["Önbelleği değiştirmeyi öneriyorum.", "Bunu yarın tekrar değerlendirelim mi?", "Öneri henüz kabul edilmedi ve görev atanmadı."],
+      "decisions": [], "actions": [],
+      "rationale": "Proposal and question have no adoption or commitment."
+    },
+    {
+      "id": "explicit-no-change",
+      "sentences": ["Ek bütçe talebini tartıştık.", "Kararımız mevcut bütçeyi değiştirmemek.", "Yeni sunucu satın alma önerisini reddediyoruz."],
+      "decisions": [2, 3], "actions": [],
+      "rationale": "Explicit no-change and rejection are decisions, not missing decisions merely because of negation."
+    },
+    {
+      "id": "assigned-owner-date",
+      "sentences": ["Test ekibi cuma günü regresyon raporunu hazırlayacak.", "Operasyon ekibi pazartesi günü yedekleme denemesini yapacak.", "Önceki yedekleme denemesi başarılıydı."],
+      "decisions": [],
+      "actions": [{"sentence": 1, "owner": "Test ekibi", "due_date": "cuma günü"}, {"sentence": 2, "owner": "Operasyon ekibi", "due_date": "pazartesi günü"}],
+      "rationale": "Two future assigned tasks have explicit role owners and exact due phrases; historical success is neither."
+    },
+    {
+      "id": "anonymous-commitment-no-date",
+      "sentences": ["Hata kaydını inceleme görevini ben üstleniyorum.", "Ekran görüntüleri dün paylaşıldı."],
+      "decisions": [], "actions": [{"sentence": 1, "owner": null, "due_date": null}],
+      "rationale": "First-person commitment is a task but does not establish a named assignee."
+    },
+    {
+      "id": "date-not-in-task-source",
+      "sentences": ["Destek ekibi kullanım kılavuzunu güncelleyecek.", "Bir sonraki toplantı perşembe günü yapılacak."],
+      "decisions": [], "actions": [{"sentence": 1, "owner": "Destek ekibi", "due_date": null}],
+      "rationale": "A meeting schedule is not a task deadline or assigned task; neighboring dates must not leak into metadata."
+    },
+    {
+      "id": "code-switch-policy-and-task",
+      "sentences": ["Release için mevcut feature flag kapalı kalacak; bu yaklaşım onaylandı.", "Platform ekibi yarın smoke test raporunu paylaşacak.", "Dashboard geçen hafta güncellendi."],
+      "decisions": [1], "actions": [{"sentence": 2, "owner": "Platform ekibi", "due_date": "yarın"}],
+      "rationale": "Mixed terminology does not change policy, task and historical status boundaries."
+    },
+    {
+      "id": "conditional-release-policy",
+      "sentences": ["Hata oranı yükselirse yayını durdurup önceki sürüme geri döneceğiz.", "Gecikme eşiği aşılırsa ikinci bölgeye geçme kararını onaylıyoruz.", "Şu anda eşikler aşılmadı."],
+      "decisions": [1, 2], "actions": [],
+      "rationale": "Adopted contingency policies are decisions, not already-triggered tasks."
+    },
+    {
+      "id": "wish-versus-accepted-work",
+      "sentences": ["Arama ekranı daha hızlı olmalı.", "Henüz performans işi için sorumlu belirlemedik.", "Geliştirme ekibi salı günü arama gecikmesini ölçecek."],
+      "decisions": [], "actions": [{"sentence": 3, "owner": "Geliştirme ekibi", "due_date": "salı günü"}],
+      "rationale": "A wish and missing assignment are not tasks; explicit future assignment is."
+    },
+    {
+      "id": "approval-and-distinct-commitment",
+      "sentences": ["Eski API sürümünü kullanımdan kaldırma kararını onayladık.", "Geçiş belgesini hazırlamayı ben üstleniyorum.", "Belgeyi yarın paylaşacağım."],
+      "decisions": [1], "actions": [{"sentence": 2, "owner": null, "due_date": null}, {"sentence": 3, "owner": null, "due_date": "yarın"}],
+      "rationale": "Approval and two explicit commitments are separate exact sentence labels, with no inferred personal identity."
+    },
+    {
+      "id": "historical-quote-not-current-choice",
+      "sentences": ["Geçen yıl bütçeyi artırmayı onayladığımızı hatırlattı.", "Bu toplantıda bütçeye ilişkin yeni karar vermiyoruz.", "Yeni bir görev de üstlenilmedi."],
+      "decisions": [], "actions": [],
+      "rationale": "Quoted historical approval and explicit absence of new choice/task must not be relabeled as current outputs."
+    },
+    {
+      "id": "two-speaker-tr-v1-regression",
+      "sentences": ["Bugünkü toplantıda yeni projenin bütçesini ve teslim tarihini konuşacağız.", "Önce geçen haftanın görevlerini kontrol edelim.", "Tasarım raporu hazırlandı, ancak teknik testler henüz bitmedi.", "Önceliğimiz eksik testleri güvenli biçimde tamamlamak.", "Tasarım raporunu inceledim.", "Müşteri ekranında iki değişiklik gerekiyor.", "Başvuru formu daha anlaşılır olmalı ve sonuç kaydedildikten sonra tekrar açılabilmeli.", "Bu iki görev için yarın öğleden sonra yeni bir değerlendirme yapalım.", "Öneriyi kabul ediyorum.", "Test raporunu hazırlama görevini ben üstleniyorum.", "Teslim tarihi cuma günü olacak.", "Bütçeyi şimdilik değiştirmiyoruz.", "Hata oranı yükselirse yayını durdurup önceki sürüme geri döneceğiz.", "Ben de ekran değişikliklerini ve kullanıcı testlerini üstleniyorum.", "Sonuçları perşembe günü paylaşacağım.", "Kararımız açık: önce test ortamında doğrulama yapılacak, ardından yayın kararı verilecek.", "Bugünkü toplantıyı bu görevlerle kapatabiliriz."],
+      "decisions": [12, 13, 16],
+      "actions": [{"sentence": 10, "owner": null, "due_date": null}, {"sentence": 14, "owner": null, "due_date": null}, {"sentence": 15, "owner": null, "due_date": "perşembe günü"}],
+      "rationale": "Existing synthetic recording regression: past report is not a decision, generic acceptance lacks concrete subject, agreed policies and explicit commitments remain. Same-source contract does not attach the standalone Friday sentence to another action."
+    }
+  ]
+}

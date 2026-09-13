@@ -1382,6 +1382,95 @@ Clear-MeetingAiManagedProcessEnvironment
         [Threading.Thread]::CurrentThread.CurrentUICulture = $previousUiCulture
     }
 
+    $modelConfigPath = Join-Path $runtimeRoot "model-override.env"
+    $modelSeed = Copy-ConfigValues -Values $restoredValues
+    $modelSeed["MAI_APP_ENV"] = "test"
+    $analysisBudget = @{
+        MAI_REQUEST_TIMEOUT = "120"
+        MAI_READY_CONSUMER_LEASE_SEC = "180"
+        MAI_READY_REDIS_CLAIM_IDLE_MS = "180000"
+    }
+    foreach ($name in $analysisBudget.Keys) { $modelSeed[$name] = $analysisBudget[$name] }
+    Write-MeetingAiSecretFileAtomic -Path $modelConfigPath `
+        -Content (ConvertTo-TestMeetingAiConfigContent -Values $modelSeed)
+    function Assert-AnalysisBudgetPreserved {
+        $values = Read-MeetingAiConfigFile -Path $modelConfigPath
+        foreach ($name in $analysisBudget.Keys) {
+            Assert-True ($values.ContainsKey($name) -and
+                $values[$name] -eq $analysisBudget[$name]) `
+                "Unrelated config writes must preserve the coupled analysis budget."
+        }
+        Assert-True (Import-MeetingAiRuntimeEnvironment -Path $modelConfigPath) `
+            "Preserved analysis budget must remain importable."
+        Assert-PythonRuntimeConfigLoads
+    }
+    $testModel = "qwen2.5:14b"
+    $testDigest = (("d" * 64) -join "")
+    & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
+        -OllamaModel $testModel -OllamaExpectedDigest $testDigest -Confirm:$false
+    Assert-AnalysisBudgetPreserved
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $modelConfigPath) `
+        "Pinned model runtime import must succeed."
+    Assert-True ($env:MAI_OLLAMA_MODEL -eq $testModel -and
+        $env:MAI_OLLAMA_EXPECTED_DIGEST -eq $testDigest) `
+        "Model and digest must round-trip through protected config."
+    & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
+        -ReadyConsumerEnabled false -Confirm:$false
+    Assert-AnalysisBudgetPreserved
+    $modelValues = Read-MeetingAiConfigFile -Path $modelConfigPath
+    Assert-True ($modelValues["MAI_OLLAMA_MODEL"] -eq $testModel -and
+        $modelValues["MAI_OLLAMA_EXPECTED_DIGEST"] -eq $testDigest) `
+        "Consumer disable must preserve the model override."
+    & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
+        -OllamaModel "llama3.1:8b" -OllamaExpectedDigest (("e" * 64) -join "") `
+        -Confirm:$false
+    Assert-AnalysisBudgetPreserved
+    & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
+        -RestoreBackup -Confirm:$false
+    Assert-AnalysisBudgetPreserved
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $modelConfigPath) `
+        "Model backup restore must remain importable."
+    Assert-True ($env:MAI_OLLAMA_MODEL -eq $testModel -and
+        $env:MAI_OLLAMA_EXPECTED_DIGEST -eq $testDigest) `
+        "Backup restore must preserve the previous exact model identity."
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
+        "Legacy config without a model override must remain importable."
+    Assert-True ([string]::IsNullOrWhiteSpace($env:MAI_OLLAMA_MODEL) -and
+        [string]::IsNullOrWhiteSpace($env:MAI_OLLAMA_EXPECTED_DIGEST)) `
+        "Legacy config must clear stale process model overrides."
+
+    foreach ($invalidModel in @("qwen2.5", "https://models.invalid/qwen:14b",
+            "qwen 2.5:14b", "qwen;exit:14b", "qwen:14b`n",
+            ((("a" * 200) -join "") + ":14b"))) {
+        Assert-ThrowsLike {
+            Assert-MeetingAiConfigValues -Values @{
+                MAI_INGESTION_ENABLED = "false"
+                MAI_OLLAMA_MODEL = $invalidModel
+                MAI_OLLAMA_EXPECTED_DIGEST = $testDigest
+            }
+        } "explicit tag"
+    }
+    foreach ($invalidDigest in @("", "sha256:$testDigest", "ABCDEF", (("D" * 64) -join ""))) {
+        Assert-ThrowsLike {
+            Assert-MeetingAiConfigValues -Values @{
+                MAI_INGESTION_ENABLED = "false"
+                MAI_OLLAMA_MODEL = $testModel
+                MAI_OLLAMA_EXPECTED_DIGEST = $invalidDigest
+            }
+        } "64 lowercase hexadecimal"
+    }
+    foreach ($unpaired in @(
+            @{ MAI_INGESTION_ENABLED = "false"; MAI_OLLAMA_MODEL = $testModel },
+            @{ MAI_INGESTION_ENABLED = "false"; MAI_OLLAMA_EXPECTED_DIGEST = $testDigest }
+        )) {
+        Assert-ThrowsLike { Assert-MeetingAiConfigValues -Values $unpaired } `
+            "requires both model and expected digest"
+    }
+    Assert-MeetingAiConfigValues -Values @{
+        MAI_INGESTION_ENABLED = "false"
+        MAI_OLLAMA_MODEL = "library/qwen2.5:14b-instruct-q4_K_M"
+        MAI_OLLAMA_EXPECTED_DIGEST = $testDigest
+    }
     Write-Host "meeting-ai Windows runtime contract: PASS"
 } finally {
     Clear-MeetingAiManagedProcessEnvironment

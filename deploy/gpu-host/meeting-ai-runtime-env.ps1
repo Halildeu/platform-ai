@@ -39,6 +39,8 @@ if ($null -eq (Get-Variable -Name MeetingAiOwnedRuntimeTlsKeyPath `
 function Get-MeetingAiConfigSchema {
     return @{
         "MAI_APP_ENV" = @{ Required = $false; SecretTarget = "" }
+        "MAI_OLLAMA_MODEL" = @{ Required = $false; SecretTarget = "" }
+        "MAI_OLLAMA_EXPECTED_DIGEST" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_ENABLED" = @{ Required = $true; SecretTarget = "" }
         "MAI_MEETING_SERVICE_BASE_URL" = @{ Required = $true; SecretTarget = "" }
         "MAI_MEETING_SERVICE_TOKEN_URL" = @{ Required = $true; SecretTarget = "" }
@@ -471,6 +473,23 @@ function Assert-MeetingAiConfigValues {
         [switch]$SkipReadyArtifactExistence,
         [switch]$AllowLegacyUpgrade
     )
+
+    # Model identity applies even when durable ingestion is disabled.
+    $hasModel = $Values.ContainsKey("MAI_OLLAMA_MODEL")
+    $hasDigest = $Values.ContainsKey("MAI_OLLAMA_EXPECTED_DIGEST")
+    if ($hasModel -ne $hasDigest) {
+        throw "Ollama runtime override requires both model and expected digest."
+    }
+    if ($hasModel) {
+        $model = [string]$Values["MAI_OLLAMA_MODEL"]
+        if ($model.Length -gt 200 -or
+            $model -cnotmatch '\A[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*:[a-zA-Z0-9][a-zA-Z0-9._-]*\z') {
+            throw "MAI_OLLAMA_MODEL must be a bounded model name with an explicit tag."
+        }
+        if ([string]$Values["MAI_OLLAMA_EXPECTED_DIGEST"] -cnotmatch '\A[0-9a-f]{64}\z') {
+            throw "MAI_OLLAMA_EXPECTED_DIGEST must be 64 lowercase hexadecimal characters."
+        }
+    }
 
     if (-not $Values.ContainsKey("MAI_INGESTION_ENABLED")) {
         throw "Runtime config is missing MAI_INGESTION_ENABLED."
