@@ -152,6 +152,33 @@ function Stop-Deploy {
   exit $Code
 }
 
+function Write-GpuHostAcceptanceDiagnostic {
+  param([string]$CandidateCommit, [string]$Reason)
+  $allowed = @(
+    'restart-failed-task-missing', 'restart-failed-task-contract',
+    'restart-failed-task-repo-root', 'restart-failed-task-query',
+    'restart-failed-owner-query', 'restart-failed-task-end',
+    'restart-failed-stale-task-instance', 'restart-failed-stale-listener',
+    'restart-failed-task-run', 'restart-failed-no-new-task-instance',
+    'restart-failed-no-new-listener', 'restart-failed-identity-unstable',
+    'meeting-ai-readiness-failed', 'meeting-ai-readiness-identity-changed',
+    'readiness-failed', 'readiness-failed-identity-changed',
+    'smoke-failed', 'smoke-failed-identity-changed',
+    'injected-acceptance-failure', 'acceptance-exception', 'acceptance-reason-unavailable'
+  )
+  if ($CandidateCommit -cnotmatch '\A[0-9a-f]{40}\z') {
+    throw 'Acceptance diagnostic candidate identity is invalid.'
+  }
+  if ($Reason -like 'acceptance-exception-*') { $Reason = 'acceptance-exception' }
+  if ($allowed -cnotcontains $Reason) { $Reason = 'acceptance-reason-unavailable' }
+  $metadata = [ordered]@{
+    schemaVersion = 'faz24.gpu-acceptance-diagnostic.v1'
+    candidateCommit = $CandidateCommit
+    reason = $Reason
+  }
+  [Console]::Out.WriteLine('FAZ24_GPU_ACCEPTANCE_REASON:' + ($metadata | ConvertTo-Json -Compress))
+}
+
 function Invoke-GitCapture {
   param([Parameter(Mandatory = $true)][string[]]$GitArgs)
   $oldEap = $ErrorActionPreference
@@ -1777,6 +1804,13 @@ if ($NoRestart) {
       -Reason ("acceptance-exception-{0}" -f $_.Exception.GetType().Name)
   }
   if (-not $acceptance.Succeeded) {
+    # Emit before rollback replaces lastResult; never include exception messages.
+    try {
+      Write-GpuHostAcceptanceDiagnostic -CandidateCommit $target -Reason $acceptance.Reason
+    } catch {
+      # Diagnostics must never prevent the compensating rollback.
+      [Console]::Error.WriteLine('[update] acceptance-diagnostic-unavailable')
+    }
     $restoreCommit = $before
     $restorePreviousCommit = $null
     if ($state) {

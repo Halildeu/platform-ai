@@ -17,6 +17,20 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class GpuHostUpdateScriptTests(unittest.TestCase):
+    def test_acceptance_diagnostic_precedes_rollback_without_raw_errors(self) -> None:
+        script = self._read_script("update.ps1")
+        emission = script.index("Write-GpuHostAcceptanceDiagnostic -CandidateCommit $target")
+        rollback = script.index("Invoke-GpuHostAutomaticRollback", emission)
+        self.assertLess(emission, rollback)
+        function = script.split("function Write-GpuHostAcceptanceDiagnostic {", 1)[1].split(
+            "function Invoke-GitCapture", 1
+        )[0]
+        self.assertIn("FAZ24_GPU_ACCEPTANCE_REASON:", function)
+        self.assertIn("$allowed -cnotcontains $Reason", function)
+        self.assertIn("acceptance-reason-unavailable", function)
+        self.assertNotIn("Exception.Message", function)
+        self.assertIn("Diagnostics must never prevent", script)
+
     def _read_script(self, name: str) -> str:
         return (ROOT / "deploy/gpu-host" / name).read_text(encoding="utf-8")
 

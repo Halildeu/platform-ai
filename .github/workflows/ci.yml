@@ -363,6 +363,10 @@ jobs:
         shell: powershell
         run: .\tests\windows\test-deployment-ledger.ps1
 
+      - name: Acceptance diagnostic metadata contract
+        shell: powershell
+        run: .\tests\windows\test-acceptance-diagnostic.ps1
+
       - name: Restricted untracked deploy-mirror quarantine contract
         shell: powershell
         run: .\tests\windows\test-untracked-quarantine.ps1
