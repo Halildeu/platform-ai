@@ -17,6 +17,7 @@ param(
     [ValidateSet("", "test", "stage", "prod")][string]$RuntimeAppEnv = "",
     [string]$OllamaModel = "",
     [string]$OllamaExpectedDigest = "",
+    [ValidateSet("", "true", "false", "unset")][string]$OllamaThink = "",
     [ValidateSet("", "true", "false")][string]$ReadyConsumerEnabled = "",
     [Security.SecureString]$ReadyRedisUrl,
     [string]$ReadyRedisStream = "",
@@ -982,8 +983,12 @@ try {
     }
     foreach ($modelSetting in @(
             @{ Name = "MAI_OLLAMA_MODEL"; Supplied = $OllamaModel },
-            @{ Name = "MAI_OLLAMA_EXPECTED_DIGEST"; Supplied = $OllamaExpectedDigest }
+            @{ Name = "MAI_OLLAMA_EXPECTED_DIGEST"; Supplied = $OllamaExpectedDigest },
+            @{ Name = "MAI_OLLAMA_THINK"; Supplied = $OllamaThink }
         )) {
+        if ($modelSetting.Name -eq "MAI_OLLAMA_THINK" -and $OllamaThink -eq "unset") {
+            continue
+        }
         $value = Get-SuppliedOrExistingValue -Existing $existing `
             -Name $modelSetting.Name -Supplied $modelSetting.Supplied
         if (-not [string]::IsNullOrWhiteSpace($value)) {

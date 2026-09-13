@@ -57,6 +57,7 @@ async def _health_response(request: Request, settings: Settings) -> HealthRespon
         backend=settings.backend,
         model=settings.effective_model,
         redact_pii=settings.redact_pii,
+        ollama_think=settings.ollama_think if settings.backend == "ollama" else None,
         analysis_delivery=delivery_health,
         ready_consumer=ready_health,
     )

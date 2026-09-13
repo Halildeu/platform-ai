@@ -138,6 +138,8 @@ def main() -> int:
             "backend": settings.backend,
             "redact_pii": settings.redact_pii,
             "ollama_options": settings.ollama_options(),
+            "ollama_think": settings.ollama_think,
+            "request_timeout_sec": settings.request_timeout,
             "fingerprint_before": before,
             "fingerprint_after": after,
             "model_fingerprint_stable": stable,

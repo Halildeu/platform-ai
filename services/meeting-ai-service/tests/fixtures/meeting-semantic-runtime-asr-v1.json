@@ -1,0 +1,83 @@
+{
+  "schema_version": "meeting-semantic-gold-v1",
+  "synthetic": true,
+  "definitions": {
+    "scope": "Observed synthetic TEST ASR source regression, annotated before repair candidate evaluation. Not an unseen holdout or human accuracy benchmark. Original meeting-semantic-gold-v1.json remains unchanged.",
+    "provenance": "First case comes from 112 ordered canonical transcript rows, 113 words, canonical newline-joined SHA256 b793cffc60d0cc3b56324d0cf82a28459e2d18c158e19476ac653ae175cd01b3. Original gold SHA256 6d09b0dc359d99d0598189cf78104021a0852b688c71fb22102e89f33aa7c1f0. The actual ASR source has 19 sentences rather than the original 17; no original punctuation is fabricated.",
+    "decision": "An adopted concrete choice or policy, including no-change and conditional rollback. An explicit adoption heading may establish adoption of immediately following concrete policy content. Label each source sentence containing a concrete policy fact, not the heading alone. The observed source splits the original combined validation-then-publication decision into two separately extractable policy facts, yielding four decision labels rather than three.",
+    "action": "An explicit outstanding concrete task assignment or commitment, not an impersonal adopted process policy. Unaccepted proposals, hypothetical plans and historical reports are not current commitments.",
+    "metadata": "Only explicit same-sentence owner/date phrases; personal pronouns never identify an owner. Preserve source case and the complete due phrase. Preceding headings may establish semantic classification but never donate metadata or sentence content.",
+    "matching": "Exact canonical source sentence and exact owner/date string or null. Duplicate predictions are false positives. Grounding remains independent of semantic classification.",
+    "threshold": "Project regression gates only. Preserve original corpus and original failed runtime measurements; a different source segmentation is explicitly versioned, not treated as an improved original-gold score."
+  },
+  "cases": [
+    {
+      "id": "two-speaker-tr-v1-observed-asr",
+      "sentences": [
+        "Bugünkü toplantıda yeni projenin bütçesini ve teslim tarihini konuşacağız.",
+        "Önce geçen haftanın görevlerini kontrol edelim.",
+        "Tasarım raporu hazırlandı ancak teknik testler henüz bitmedi.",
+        "Önceliğimiz eksik testleri, güvenli biçimde tamamlamak.",
+        "Tasarım raporunu inceledim.",
+        "Müşteri ekranında iki değişiklik gerekiyor.",
+        "Başvuru formu daha anlaşılır olmalı ve sonuç kaydedildikten sonra tekrar açılabilmeli.",
+        "Bu iki görev için yarın öğleden sonra yeni bir değerlendirme yapalım.",
+        "Öneriyi kabul ediyorum.",
+        "Test raporunu hazırlama görevini ben üstleniyorum.",
+        "Teslim tarihi Cuma günü olacak.",
+        "Bütçeyi şimdilik değiştirmiyoruz.",
+        "Hata oranı yükselirse yayını durdurup önceki sürüme geri döneceğiz.",
+        "Ben de ekran değişikliklerini ve kullanıcı testlerini üstleniyorum.",
+        "Sonuçları Perşembe günü paylaşacağım.",
+        "Kararımız açık.",
+        "Önce test ortamında doğrulama yapılacak.",
+        "Ardından yayın kararı verilecek.",
+        "Bugünkü toplantıyı bu görevlerle kapatabiliriz."
+      ],
+      "decisions": [12, 13, 17, 18],
+      "actions": [
+        {"sentence": 10, "owner": null, "due_date": null},
+        {"sentence": 14, "owner": null, "due_date": null},
+        {"sentence": 15, "owner": null, "due_date": "Perşembe günü"}
+      ],
+      "rationale": "Actual ASR punctuation turns a combined policy into an explicit decision heading followed by two concrete ordered policy facts. Extract both content sentences, never the content-free heading; do not fabricate a compound sentence. Preserve the actual uppercase weekday and do not attach the neighboring Cuma date to an action."
+    },
+    {
+      "id": "runtime-explicit-heading-adopted-policy",
+      "sentences": [
+        "İki yayın sürecini karşılaştırdık.",
+        "Uygulanacak süreç konusunda kararımız kesin.",
+        "Önce bağımsız güvenlik kontrolü yapılacak.",
+        "Ancak bu kontrolden sonra üretim yayınına izin verilecek.",
+        "Operasyon ekibi Salı günü kontrol listesini hazırlayacak."
+      ],
+      "decisions": [3, 4],
+      "actions": [{"sentence": 5, "owner": "Operasyon ekibi", "due_date": "Salı günü"}],
+      "rationale": "The explicit adoption heading scopes two concrete policy clauses. The later named-team assignment is an action and not a third policy decision."
+    },
+    {
+      "id": "runtime-unaccepted-heading-policy-proposal",
+      "sentences": [
+        "Henüz kabul edilmemiş önerim şu.",
+        "Önce bağımsız güvenlik kontrolü yapılacak.",
+        "Ancak bu kontrolden sonra üretim yayınına izin verilecek.",
+        "Bu öneriyi değerlendirmeye alıyoruz; bugün kabul etmedik ve görev atamadık."
+      ],
+      "decisions": [],
+      "actions": [],
+      "rationale": "Identical passive process clauses describe an explicitly unaccepted proposal, not an adopted policy or an outstanding commitment."
+    },
+    {
+      "id": "runtime-historical-heading-policy-report",
+      "sentences": [
+        "Geçen yılki tutanaktan eski karar metnini okuyorum.",
+        "Önce bağımsız güvenlik kontrolü yapılacak.",
+        "Ancak bu kontrolden sonra üretim yayınına izin verilecek.",
+        "Bu eski süreç geçen yıl sona erdi; bugün yeni bir süreç belirlemedik."
+      ],
+      "decisions": [],
+      "actions": [],
+      "rationale": "Quoted historical process clauses are not a current decision or current assignment. Context establishes history, not permission to borrow or rewrite source text."
+    }
+  ]
+}

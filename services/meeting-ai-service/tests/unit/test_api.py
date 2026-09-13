@@ -6,12 +6,40 @@ import base64
 import json
 from pathlib import Path
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models.schemas import AnalysisDeliveryHealth, ReadyConsumerHealth
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
 from app.services.ready_event_consumer import ReadyEventConsumerRuntime
+
+
+@pytest.mark.parametrize("think", [None, "false", "true"])
+def test_health_and_ready_report_effective_thinking_mode(
+    monkeypatch: pytest.MonkeyPatch, think: str | None
+) -> None:
+    monkeypatch.setenv("MAI_BACKEND", "ollama")
+    if think is not None:
+        monkeypatch.setenv("MAI_OLLAMA_THINK", think)
+    else:
+        monkeypatch.delenv("MAI_OLLAMA_THINK", raising=False)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *args, **kwargs: httpx.Response(
+            200,
+            json={"models": [{"name": "llama3.1:8b"}]},
+            request=httpx.Request("GET", "http://localhost:11434/api/tags"),
+        ),
+    )
+    with TestClient(app) as client:
+        for path in ("/health", "/ready"):
+            result = client.get(path)
+            assert result.status_code == 200
+            expected = None if think is None else think == "true"
+            assert result.json()["ollama_think"] is expected
 
 
 def test_analyze_mock_returns_summary() -> None:

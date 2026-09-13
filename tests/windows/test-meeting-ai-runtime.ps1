@@ -1407,37 +1407,69 @@ Clear-MeetingAiManagedProcessEnvironment
     $testModel = "qwen2.5:14b"
     $testDigest = (("d" * 64) -join "")
     & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
-        -OllamaModel $testModel -OllamaExpectedDigest $testDigest -Confirm:$false
+        -OllamaModel $testModel -OllamaExpectedDigest $testDigest `
+        -OllamaThink false -Confirm:$false
     Assert-AnalysisBudgetPreserved
     Assert-True (Import-MeetingAiRuntimeEnvironment -Path $modelConfigPath) `
         "Pinned model runtime import must succeed."
     Assert-True ($env:MAI_OLLAMA_MODEL -eq $testModel -and
-        $env:MAI_OLLAMA_EXPECTED_DIGEST -eq $testDigest) `
-        "Model and digest must round-trip through protected config."
+        $env:MAI_OLLAMA_EXPECTED_DIGEST -eq $testDigest -and
+        $env:MAI_OLLAMA_THINK -eq "false") `
+        "Model, digest and explicit false must round-trip through protected config."
     & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
         -ReadyConsumerEnabled false -Confirm:$false
     Assert-AnalysisBudgetPreserved
     $modelValues = Read-MeetingAiConfigFile -Path $modelConfigPath
     Assert-True ($modelValues["MAI_OLLAMA_MODEL"] -eq $testModel -and
-        $modelValues["MAI_OLLAMA_EXPECTED_DIGEST"] -eq $testDigest) `
-        "Consumer disable must preserve the model override."
+        $modelValues["MAI_OLLAMA_EXPECTED_DIGEST"] -eq $testDigest -and
+        $modelValues["MAI_OLLAMA_THINK"] -eq "false") `
+        "Consumer disable must preserve the model and thinking override."
     & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
         -OllamaModel "llama3.1:8b" -OllamaExpectedDigest (("e" * 64) -join "") `
-        -Confirm:$false
+        -OllamaThink true -Confirm:$false
     Assert-AnalysisBudgetPreserved
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $modelConfigPath) `
+        "Explicit true config must import before process environment verification."
+    Assert-True ($env:MAI_OLLAMA_THINK -eq "true") "Explicit true must be configurable."
     & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
         -RestoreBackup -Confirm:$false
     Assert-AnalysisBudgetPreserved
     Assert-True (Import-MeetingAiRuntimeEnvironment -Path $modelConfigPath) `
         "Model backup restore must remain importable."
     Assert-True ($env:MAI_OLLAMA_MODEL -eq $testModel -and
-        $env:MAI_OLLAMA_EXPECTED_DIGEST -eq $testDigest) `
-        "Backup restore must preserve the previous exact model identity."
+        $env:MAI_OLLAMA_EXPECTED_DIGEST -eq $testDigest -and
+        $env:MAI_OLLAMA_THINK -eq "false") `
+        "Backup restore must preserve the previous exact model and thinking mode."
+    & $configureScript -ConfigPath $modelConfigPath -StorePath $storePath `
+        -OllamaThink unset -Confirm:$false
+    Assert-AnalysisBudgetPreserved
+    $unsetValues = Read-MeetingAiConfigFile -Path $modelConfigPath
+    Assert-True (-not $unsetValues.ContainsKey("MAI_OLLAMA_THINK")) `
+        "Controlled unset must remove the new key before an older-source rollback."
+    Assert-True (Import-MeetingAiRuntimeEnvironment -Path $modelConfigPath) `
+        "Unset config must import before process environment verification."
+    Assert-True ([string]::IsNullOrWhiteSpace($env:MAI_OLLAMA_THINK)) `
+        "Unset config import must clear a stale process thinking override."
+    Assert-MeetingAiAcl -Path $modelConfigPath
+    Assert-True ($unsetValues.ContainsKey("MAI_MEETING_SERVICE_CLIENT_SECRET_DPAPI") -and
+        -not $unsetValues.ContainsKey("MAI_MEETING_SERVICE_CLIENT_SECRET")) `
+        "Controlled unset must retain DPAPI secret storage without plaintext keys."
+    $env:MAI_OLLAMA_THINK = "true"
     Assert-True (Import-MeetingAiRuntimeEnvironment -Path $configPath) `
         "Legacy config without a model override must remain importable."
     Assert-True ([string]::IsNullOrWhiteSpace($env:MAI_OLLAMA_MODEL) -and
-        [string]::IsNullOrWhiteSpace($env:MAI_OLLAMA_EXPECTED_DIGEST)) `
-        "Legacy config must clear stale process model overrides."
+        [string]::IsNullOrWhiteSpace($env:MAI_OLLAMA_EXPECTED_DIGEST) -and
+        [string]::IsNullOrWhiteSpace($env:MAI_OLLAMA_THINK)) `
+        "Legacy config must clear stale process model and thinking overrides."
+
+    foreach ($invalidThink in @("", "0", "1", "auto", "unset", "false`n", " true")) {
+        Assert-ThrowsLike {
+            Assert-MeetingAiConfigValues -Values @{
+                MAI_INGESTION_ENABLED = "false"
+                MAI_OLLAMA_THINK = $invalidThink
+            }
+        } "MAI_OLLAMA_THINK must be true or false"
+    }
 
     foreach ($invalidModel in @("qwen2.5", "https://models.invalid/qwen:14b",
             "qwen 2.5:14b", "qwen;exit:14b", "qwen:14b`n",

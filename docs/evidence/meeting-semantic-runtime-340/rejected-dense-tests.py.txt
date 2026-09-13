@@ -1,0 +1,170 @@
+"""Opt-in complete classification must not silently drop or invent positions."""
+
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from app.core.config import Settings
+from app.services.analyze import (
+    OllamaAnalyzer,
+    OllamaSchemaInvalidError,
+    effective_extractive_prompt,
+)
+from app.services.extractive import (
+    DENSE_MAX_PREDICT_TOKENS,
+    DENSE_TEMPLATE_RESERVE,
+    dense_context_fits,
+    dense_selection_to_sparse,
+    selection_schema,
+)
+
+
+def test_dense_is_opt_in_and_uses_a_distinct_effective_prompt() -> None:
+    default = Settings(backend="ollama")
+    dense = Settings(backend="ollama", ollama_dense_labels=True)
+    assert default.ollama_dense_labels is False
+    assert effective_extractive_prompt(default) != effective_extractive_prompt(dense)
+    assert "exactly {sentence_count} labels" in effective_extractive_prompt(dense)
+
+
+def test_dense_schema_requires_exact_cardinality_and_closed_labels() -> None:
+    schema = selection_schema(19, dense=True)
+    labels = schema["properties"]["sentence_labels"]
+    assert labels["minItems"] == labels["maxItems"] == 19
+    assert set(labels["items"]["enum"]) == {"neither", "decision", "action", "both"}
+    assert "sentence_labels" in schema["required"]
+    assert "decision_sentences" not in schema["properties"]
+    assert schema["$defs"]["SelectedAction"]["properties"]["sentence"]["maximum"] == 19
+
+
+def test_dense_maps_both_and_neither_without_shifting_indices() -> None:
+    data = {
+        "sentence_labels": ["neither", "decision", "both", "action"],
+        "summary_sentences": [2],
+        "action_item_sentences": [
+            {"sentence": 3, "owner": None, "due_date": None},
+            {"sentence": 4, "owner": "Test ekibi", "due_date": "Salı günü"},
+        ],
+    }
+    sparse = dense_selection_to_sparse(data, 4)
+    assert sparse["summary_sentences"] == [2]
+    assert sparse["decision_sentences"] == [2, 3]
+    assert sparse["action_item_sentences"] == data["action_item_sentences"]
+
+
+def test_dense_empty_categories_are_legitimate_complete_classification() -> None:
+    assert dense_selection_to_sparse(
+        {"sentence_labels": ["neither"], "summary_sentences": [], "action_item_sentences": []},
+        1,
+    ) == {"summary_sentences": [], "decision_sentences": [], "action_item_sentences": []}
+    assert dense_selection_to_sparse(
+        {"sentence_labels": [], "summary_sentences": [], "action_item_sentences": []}, 0
+    ) == {"summary_sentences": [], "decision_sentences": [], "action_item_sentences": []}
+    assert selection_schema(0, dense=True)["properties"]["sentence_labels"]["maxItems"] == 0
+
+
+@pytest.mark.parametrize(
+    "labels,actions,count",
+    [
+        ([], [], 1),
+        (["neither", "neither"], [], 1),
+        ([True], [], 1),
+        (["unknown"], [], 1),
+        (["action"], [], 1),
+        (["both"], [], 1),
+        (["neither"], [{"sentence": 1, "owner": None, "due_date": None}], 1),
+        (["action"], [{"sentence": 2, "owner": None, "due_date": None}], 1),
+        (
+            ["action"],
+            [{"sentence": 1, "owner": None, "due_date": None}] * 2,
+            1,
+        ),
+        (["decision"] * 11, [], 11),
+    ],
+)
+def test_dense_rejects_missing_extra_invalid_or_inconsistent_classification(
+    labels: object, actions: object, count: int
+) -> None:
+    with pytest.raises(ValueError):
+        dense_selection_to_sparse(
+            {"sentence_labels": labels, "summary_sentences": [], "action_item_sentences": actions},
+            count,
+        )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"summary_sentences": [], "decision_sentences": [], "action_item_sentences": []},
+        {"summary": "sensitive model contents", "decisions": [], "action_items": []},
+        {"sentence_labels": [], "summary_sentences": [], "action_item_sentences": []},
+    ],
+)
+def test_dense_service_rejects_sparse_fallback_with_transcript_free_error(
+    monkeypatch: pytest.MonkeyPatch, response: object
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(
+            200,
+            json={"response": json.dumps(response)},
+            request=httpx.Request("POST", "http://localhost:11434/api/generate"),
+        ),
+    )
+    with pytest.raises(OllamaSchemaInvalidError) as error:
+        OllamaAnalyzer(Settings(backend="ollama", ollama_dense_labels=True)).analyze(
+            "Mevcut bütçeyi değiştirmeme kararını onayladık."
+        )
+    assert str(error.value) == "Ollama returned invalid dense sentence classification"
+
+
+def test_dense_summary_out_of_range_keeps_existing_drop_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = {
+        "sentence_labels": ["decision"],
+        "summary_sentences": [99],
+        "action_item_sentences": [],
+    }
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(
+            200,
+            json={"response": json.dumps(response)},
+            request=httpx.Request("POST", "http://localhost:11434/api/generate"),
+        ),
+    )
+    text = "Mevcut bütçeyi değiştirmeme kararını onayladık."
+    draft = OllamaAnalyzer(Settings(backend="ollama", ollama_dense_labels=True)).analyze(text)
+    assert draft.summary == ""
+    assert draft.decisions == [text]
+
+
+def test_dense_context_budget_counts_utf8_bytes_and_caps_menu() -> None:
+    allowance = DENSE_MAX_PREDICT_TOKENS + DENSE_TEMPLATE_RESERVE
+    assert dense_context_fits("ş" * 100, 19, allowance + 200)
+    assert not dense_context_fits("ş" * 100, 19, allowance + 199)
+    assert not dense_context_fits("", 65, 8192)
+    assert not dense_context_fits("", 0, 8192)
+
+
+@pytest.mark.parametrize("sentence_count,num_ctx", [(65, 8192), (1, 512)])
+def test_dense_over_budget_fails_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch, sentence_count: int, num_ctx: int
+) -> None:
+    def unexpected_call(*args: object, **kwargs: object) -> httpx.Response:
+        raise AssertionError("over-budget input reached the provider")
+
+    monkeypatch.setattr(httpx, "post", unexpected_call)
+    transcript = " ".join(
+        f"Görev {index} için ayrıntılı kayıt tutuldu." for index in range(sentence_count)
+    )
+    with pytest.raises(OllamaSchemaInvalidError, match="bounded input budget"):
+        OllamaAnalyzer(
+            Settings(backend="ollama", ollama_dense_labels=True, ollama_num_ctx=num_ctx)
+        ).analyze(transcript)

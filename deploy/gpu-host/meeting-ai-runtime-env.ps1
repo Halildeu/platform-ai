@@ -41,6 +41,7 @@ function Get-MeetingAiConfigSchema {
         "MAI_APP_ENV" = @{ Required = $false; SecretTarget = "" }
         "MAI_OLLAMA_MODEL" = @{ Required = $false; SecretTarget = "" }
         "MAI_OLLAMA_EXPECTED_DIGEST" = @{ Required = $false; SecretTarget = "" }
+        "MAI_OLLAMA_THINK" = @{ Required = $false; SecretTarget = "" }
         "MAI_INGESTION_ENABLED" = @{ Required = $true; SecretTarget = "" }
         "MAI_MEETING_SERVICE_BASE_URL" = @{ Required = $true; SecretTarget = "" }
         "MAI_MEETING_SERVICE_TOKEN_URL" = @{ Required = $true; SecretTarget = "" }
@@ -489,6 +490,11 @@ function Assert-MeetingAiConfigValues {
         if ([string]$Values["MAI_OLLAMA_EXPECTED_DIGEST"] -cnotmatch '\A[0-9a-f]{64}\z') {
             throw "MAI_OLLAMA_EXPECTED_DIGEST must be 64 lowercase hexadecimal characters."
         }
+    }
+
+    if ($Values.ContainsKey("MAI_OLLAMA_THINK") -and
+        [string]$Values["MAI_OLLAMA_THINK"] -notmatch '\A(?:true|false)\z') {
+        throw "MAI_OLLAMA_THINK must be true or false when supplied."
     }
 
     if (-not $Values.ContainsKey("MAI_INGESTION_ENABLED")) {

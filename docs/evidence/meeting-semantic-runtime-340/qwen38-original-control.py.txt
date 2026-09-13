@@ -1,0 +1,36 @@
+"""Experimental transport-only think=false control, not runtime acceptance."""
+
+import hashlib
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd() / "scripts"))
+import meeting_semantic_eval as runner
+from app.services import analyze
+
+original_generate = analyze.generate
+original_run = runner.run_corpus
+calls = 0
+
+
+def generate(settings, payload):
+    global calls
+    calls += 1
+    return original_generate(settings, {**payload, "think": False})
+
+
+def run_corpus(service, corpus):
+    report = original_run(service, corpus)
+    report["experimental_transport_override"] = {
+        "think": False,
+        "canonical_source_support": False,
+        "runtime_acceptance": False,
+        "provider_calls": calls,
+        "wrapper_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    }
+    return report
+
+
+analyze.generate = generate
+runner.run_corpus = run_corpus
+raise SystemExit(runner.main())

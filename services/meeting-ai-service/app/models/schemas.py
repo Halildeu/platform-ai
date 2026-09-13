@@ -217,6 +217,7 @@ class HealthResponse(BaseModel):
     backend: str
     model: str
     redact_pii: bool
+    ollama_think: bool | None = None
     analysis_delivery: AnalysisDeliveryHealth | None = None
     ready_consumer: ReadyConsumerHealth | None = None
 
