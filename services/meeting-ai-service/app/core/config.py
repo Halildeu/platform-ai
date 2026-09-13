@@ -118,6 +118,7 @@ class Settings(BaseSettings):
     ollama_top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     ollama_seed: int | None = Field(default=None)
     ollama_keep_alive: str = Field(default="5m")
+    ollama_think: bool | None = Field(default=None)
 
     # #247 — durable meeting-service analysis-result delivery (default-off).
     ingestion_enabled: bool = Field(default=False)

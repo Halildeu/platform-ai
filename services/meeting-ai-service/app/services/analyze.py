@@ -256,6 +256,23 @@ to keep an existing budget or policy unchanged.
 - "Öneriye evet diyorum" or "Kabul ediyorum" does not state WHAT was adopted. \
 Do not select a bare acceptance sentence; the selected sentence itself must \
 state the concrete policy or choice. Do not borrow its subject from context.
+- Speech punctuation may separate an explicit current decision heading from \
+its concrete policy clauses. Use that heading to recognize adoption of the \
+immediately following policy content; select EACH concrete policy sentence, \
+not the content-free heading. Passive process rules can be adopted decisions \
+without being task assignments. In contrast, clauses introduced as an \
+unaccepted proposal or a quoted historical policy are not current decisions \
+or commitments. Context establishes adoption, never invented sentence content.
+- For example, "Kesin kararımız şudur." followed by "Önce risk denetimi \
+yapılacak." and "Sonra dağıtım izni verilecek." contains TWO concrete \
+DECISION sentences: the risk-control rule and the subsequent permission rule. \
+Select both policy clauses, not the heading, even though each clause alone \
+does not repeat the word "karar". These are ordered adopted process rules, \
+not two action items and not an undecided suggestion. In a declared adopted \
+sequence, the prerequisite check/validation step is itself part of the \
+decision, not merely background: do not select only the final release or \
+permission step and omit its preceding required check. A concrete policy \
+clause need not contain the word "karar".
 
 ACTION: a concrete outstanding task explicitly assigned or committed to \
 (including first-person commitments and future work by a named team). Include \

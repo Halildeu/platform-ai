@@ -1,0 +1,424 @@
+{
+  "schema_version": "meeting-semantic-runtime-probe-history-v1",
+  "synthetic": true,
+  "evidence_level": "visible-synthetic-source-service-regression-not-test-acceptance",
+  "fixture_sha256": "7ddd9d4346e7943df8c8c7e30b6d7af1fa4039403d27466a3f08409950af0097",
+  "canonical_input_sha256": "b793cffc60d0cc3b56324d0cf82a28459e2d18c158e19476ac653ae175cd01b3",
+  "input_rows": 112,
+  "sampling_boundary": "Same explicit defaults across probes; no seed or num_predict. Model digest separately recorded by the following immutable corpus evaluation, not captured for every probe.",
+  "trials": [
+    {
+      "variant": "baseline",
+      "raw_private_artifact_sha256": "1b864a087e948fd2c35b952f5a17a086c6649a568894c633460145bad9859193",
+      "expanded_prompt_sha256": "d20c76224125a2b6130c3e4b57eb294220e6af31844630fa883697867c944211",
+      "menu_sha256": "3c4f8d32fda7b98c2d63c942be6923fcf81e79353b36cfe733b45290a60cd1da",
+      "model": "qwen2.5:14b",
+      "ollama_options": {
+        "temperature": 0.0,
+        "num_ctx": 8192,
+        "top_p": 0.9
+      },
+      "elapsed_ms": 37589,
+      "score": {
+        "id": "two-speaker-tr-v1-observed-asr",
+        "error": false,
+        "decision": {
+          "true_positive": 2,
+          "false_positive": 0,
+          "false_negative": 2,
+          "precision": 1.0,
+          "recall": 0.5,
+          "f1": 0.6666666666666666
+        },
+        "action": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action_with_metadata": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "metadata": {
+          "owner": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          },
+          "due_date": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          }
+        },
+        "grounding": {
+          "exact_source_count": 5,
+          "claim_count": 5,
+          "rate": 1.0
+        },
+        "exact_case_match": false
+      }
+    },
+    {
+      "variant": "candidate1",
+      "raw_private_artifact_sha256": "5ac36d1647b19426220425b7c0437fbe76824dabaed4526f528a0a44a7f50edf",
+      "expanded_prompt_sha256": "af97c6308498322b3a59cae756c32ee597c01126e84f7cccad64ce484f3b1d8b",
+      "menu_sha256": "3c4f8d32fda7b98c2d63c942be6923fcf81e79353b36cfe733b45290a60cd1da",
+      "model": "qwen2.5:14b",
+      "ollama_options": {
+        "temperature": 0.0,
+        "num_ctx": 8192,
+        "top_p": 0.9
+      },
+      "elapsed_ms": 39163,
+      "score": {
+        "id": "two-speaker-tr-v1-observed-asr",
+        "error": false,
+        "decision": {
+          "true_positive": 2,
+          "false_positive": 0,
+          "false_negative": 2,
+          "precision": 1.0,
+          "recall": 0.5,
+          "f1": 0.6666666666666666
+        },
+        "action": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action_with_metadata": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "metadata": {
+          "owner": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          },
+          "due_date": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          }
+        },
+        "grounding": {
+          "exact_source_count": 5,
+          "claim_count": 5,
+          "rate": 1.0
+        },
+        "exact_case_match": false
+      }
+    },
+    {
+      "variant": "candidate2",
+      "raw_private_artifact_sha256": "42104807b22eda7a65762e1557770a345423ef05d9de0047ac9141438f5942dd",
+      "expanded_prompt_sha256": "ade0c663e0ee11d50e289d15a13c4de99a0737aaaad2f9dbe18862dc40676845",
+      "menu_sha256": "3c4f8d32fda7b98c2d63c942be6923fcf81e79353b36cfe733b45290a60cd1da",
+      "model": "qwen2.5:14b",
+      "ollama_options": {
+        "temperature": 0.0,
+        "num_ctx": 8192,
+        "top_p": 0.9
+      },
+      "elapsed_ms": 25575,
+      "score": {
+        "id": "two-speaker-tr-v1-observed-asr",
+        "error": false,
+        "decision": {
+          "true_positive": 2,
+          "false_positive": 1,
+          "false_negative": 2,
+          "precision": 0.6666666666666666,
+          "recall": 0.5,
+          "f1": 0.5714285714285715
+        },
+        "action": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action_with_metadata": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "metadata": {
+          "owner": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          },
+          "due_date": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          }
+        },
+        "grounding": {
+          "exact_source_count": 6,
+          "claim_count": 6,
+          "rate": 1.0
+        },
+        "exact_case_match": false
+      }
+    },
+    {
+      "variant": "candidate3",
+      "raw_private_artifact_sha256": "fabfb9389d2c22ab31080019805fd27550558833f3cd029e04ae30f5dff7a36a",
+      "expanded_prompt_sha256": "30eece215622524369b78c13c6b49d1a2b657fbf3a0945cf029271910053e9c4",
+      "menu_sha256": "3c4f8d32fda7b98c2d63c942be6923fcf81e79353b36cfe733b45290a60cd1da",
+      "model": "qwen2.5:14b",
+      "ollama_options": {
+        "temperature": 0.0,
+        "num_ctx": 8192,
+        "top_p": 0.9
+      },
+      "elapsed_ms": 32010,
+      "score": {
+        "id": "two-speaker-tr-v1-observed-asr",
+        "error": false,
+        "decision": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 1,
+          "precision": 1.0,
+          "recall": 0.75,
+          "f1": 0.8571428571428571
+        },
+        "action": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action_with_metadata": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "metadata": {
+          "owner": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          },
+          "due_date": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          }
+        },
+        "grounding": {
+          "exact_source_count": 6,
+          "claim_count": 6,
+          "rate": 1.0
+        },
+        "exact_case_match": false
+      }
+    },
+    {
+      "variant": "candidate4",
+      "raw_private_artifact_sha256": "e00062c8a963e35b5f414ce39c69a77a7b185fea50b9922922af6d19f0ba5a31",
+      "expanded_prompt_sha256": "fa0db62291e81dd46130a35e04149fb1dc022c98c51dd29b7c011ffcdd30608c",
+      "menu_sha256": "3c4f8d32fda7b98c2d63c942be6923fcf81e79353b36cfe733b45290a60cd1da",
+      "model": "qwen2.5:14b",
+      "ollama_options": {
+        "temperature": 0.0,
+        "num_ctx": 8192,
+        "top_p": 0.9
+      },
+      "elapsed_ms": 35829,
+      "score": {
+        "id": "two-speaker-tr-v1-observed-asr",
+        "error": false,
+        "decision": {
+          "true_positive": 4,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action_with_metadata": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "metadata": {
+          "owner": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          },
+          "due_date": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          }
+        },
+        "grounding": {
+          "exact_source_count": 7,
+          "claim_count": 7,
+          "rate": 1.0
+        },
+        "exact_case_match": true
+      }
+    },
+    {
+      "variant": "candidate4-repeat2",
+      "raw_private_artifact_sha256": "fac84e4e70c72a0f60f88fe40eea5974a59d595fbc99c383410969168a9c4c66",
+      "expanded_prompt_sha256": "fa0db62291e81dd46130a35e04149fb1dc022c98c51dd29b7c011ffcdd30608c",
+      "menu_sha256": "3c4f8d32fda7b98c2d63c942be6923fcf81e79353b36cfe733b45290a60cd1da",
+      "model": "qwen2.5:14b",
+      "ollama_options": {
+        "temperature": 0.0,
+        "num_ctx": 8192,
+        "top_p": 0.9
+      },
+      "elapsed_ms": 28599,
+      "score": {
+        "id": "two-speaker-tr-v1-observed-asr",
+        "error": false,
+        "decision": {
+          "true_positive": 4,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action_with_metadata": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "metadata": {
+          "owner": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          },
+          "due_date": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          }
+        },
+        "grounding": {
+          "exact_source_count": 7,
+          "claim_count": 7,
+          "rate": 1.0
+        },
+        "exact_case_match": true
+      }
+    },
+    {
+      "variant": "candidate4-repeat3",
+      "raw_private_artifact_sha256": "753b0f620f646c9048c0e544d170d5fbdb580c84577f64a9ad24556a1a5d73fa",
+      "expanded_prompt_sha256": "fa0db62291e81dd46130a35e04149fb1dc022c98c51dd29b7c011ffcdd30608c",
+      "menu_sha256": "3c4f8d32fda7b98c2d63c942be6923fcf81e79353b36cfe733b45290a60cd1da",
+      "model": "qwen2.5:14b",
+      "ollama_options": {
+        "temperature": 0.0,
+        "num_ctx": 8192,
+        "top_p": 0.9
+      },
+      "elapsed_ms": 32396,
+      "score": {
+        "id": "two-speaker-tr-v1-observed-asr",
+        "error": false,
+        "decision": {
+          "true_positive": 4,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "action_with_metadata": {
+          "true_positive": 3,
+          "false_positive": 0,
+          "false_negative": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        },
+        "metadata": {
+          "owner": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          },
+          "due_date": {
+            "exact_match": 3,
+            "evaluated": 3,
+            "accuracy": 1.0
+          }
+        },
+        "grounding": {
+          "exact_source_count": 7,
+          "claim_count": 7,
+          "rate": 1.0
+        },
+        "exact_case_match": true
+      }
+    }
+  ]
+}

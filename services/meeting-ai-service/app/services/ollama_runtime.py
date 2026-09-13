@@ -39,6 +39,8 @@ def generate(settings: Settings, payload: dict[str, Any]) -> httpx.Response:
     The checks share the existing request budget rather than extending its lease.
     """
     deadline = time.monotonic() + settings.request_timeout
+    if settings.ollama_think is not None:
+        payload = {**payload, "think": settings.ollama_think}
 
     def remaining() -> float:
         budget = deadline - time.monotonic()

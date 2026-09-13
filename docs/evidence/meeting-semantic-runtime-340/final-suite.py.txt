@@ -1,0 +1,116 @@
+"""Bounded canonical-source synthetic regression; metadata only."""
+import contextlib
+import hashlib
+import io
+import json
+import sys
+import time
+from pathlib import Path
+
+import httpx
+
+from app.core.config import Settings
+from app.services import analyze
+from app.services.analyze import MeetingAnalysisService
+from app.services.citation import split_sentences
+from app.services.semantic_eval import aggregate_scores, load_corpus, score_case
+from scripts import meeting_semantic_eval as runner
+
+DIGEST = "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643"
+PROMPT = "57f62a473e97abcfd042b842bb7623c969117ce63b32903e661d5f9dcefc7ff6"
+ROOT = Path("tests/fixtures")
+SETS = [
+    ("runtime-asr", "meeting-semantic-runtime-asr-v1.json", "7ddd9d4346e7943df8c8c7e30b6d7af1fa4039403d27466a3f08409950af0097"),
+    ("gold", "meeting-semantic-gold-v1.json", "6d09b0dc359d99d0598189cf78104021a0852b688c71fb22102e89f33aa7c1f0"),
+    ("challenge", "meeting-semantic-challenge-v1.json", "1a8d5afdae6d312e167504886c9931e96c6baa5a24d84dd6e08cacd7b3b7af45"),
+]
+settings = Settings()
+assert settings.backend == "ollama" and settings.ollama_model == "qwen3.8:27b"
+assert settings.ollama_think is False and settings.request_timeout == 60
+assert settings.ollama_expected_digest == DIGEST
+assert hashlib.sha256(analyze._OLLAMA_EXTRACTIVE_PROMPT.encode()).hexdigest() == PROMPT
+source_start = runner.source_fingerprint()
+wire_calls = 0
+transport_post = httpx.post
+
+
+def assert_wire(url, **kwargs):
+    global wire_calls
+    payload = kwargs["json"]
+    assert payload["think"] is False and payload["model"] == settings.ollama_model
+    assert payload["options"] == settings.ollama_options()
+    wire_calls += 1
+    return transport_post(url, **kwargs)
+
+
+httpx.post = assert_wire
+for name, filename, expected_hash in SETS:
+    path = ROOT / filename
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash
+    output = Path(f"/tmp/meeting-semantic-340-final-{name}.json")
+    sys.argv = ["meeting_semantic_eval.py", "--eval-set", str(path), "--output", str(output)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        status = runner.main()
+    report = json.loads(output.read_text())
+    assert report["source_sha256"] == source_start == runner.source_fingerprint()
+    report["canonical_wire_think_false_asserted"] = True
+    report["transport"] = "ssh-rpc-existing-onprem-endpoint"
+    report["transport_timeout_note"] = "RPC transport has 300s socket timeout; canonical digest-pinned service checks its unchanged 60s deadline after every response."
+    report["all_requests_within_60s"] = report["latency_ms"]["max"] <= 60000
+    output.write_text(json.dumps(report, sort_keys=True) + "\n")
+    print(json.dumps({"set": name, "aggregate": report["aggregate"], "latency_ms": report["latency_ms"], "gate": report["project_gate_passed"], "all_requests_within_60s": report["all_requests_within_60s"]}), flush=True)
+    if status or not report["all_requests_within_60s"] or (name == "runtime-asr" and not report["aggregate"]["all_cases_exact"]):
+        raise SystemExit(1)
+
+raw_path = ROOT / "meeting-semantic-runtime-asr-rows-v1.json"
+assert hashlib.sha256(raw_path.read_bytes()).hexdigest() == "7909d41032351191c01e41010a236d082246fe6ef63989c31f5ea0453b7ab19c"
+raw = json.loads(raw_path.read_text())
+assert raw["synthetic"] is True and len(raw["rows"]) == 112
+transcript = "\n".join(raw["rows"])
+transcript_hash = hashlib.sha256(transcript.encode()).hexdigest()
+assert transcript_hash == "b793cffc60d0cc3b56324d0cf82a28459e2d18c158e19476ac653ae175cd01b3"
+case = load_corpus(ROOT / SETS[0][1]).cases[0]
+assert [s.text for s in split_sentences(transcript)] == case.sentences
+before = runner.fingerprint(settings)
+rows = []
+for repeat in range(1, 4):
+    result = None
+    error_type = None
+    started = time.perf_counter()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = MeetingAnalysisService(settings).analyze(transcript)
+    except Exception as exc:
+        error_type = type(exc).__name__
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    row = score_case(case, result)
+    row.update({"repeat": repeat, "elapsed_ms": elapsed_ms, "error_type": error_type})
+    rows.append(row)
+    print(json.dumps({"raw_repeat": repeat, "elapsed_ms": elapsed_ms, "error_type": error_type, "exact": row["exact_case_match"]}), flush=True)
+    if not row["exact_case_match"] or elapsed_ms > 60000:
+        break
+after = runner.fingerprint(settings)
+source_after = runner.source_fingerprint()
+passed = len(rows) == 3 and all(row["exact_case_match"] and row["elapsed_ms"] <= 60000 for row in rows) and before == after and before["model_digest"] == DIGEST and source_start == source_after
+report = {
+    "schema_version": "meeting-semantic-raw-repeat-v1",
+    "evidence_level": "synthetic-source-service-regression-not-user-acceptance",
+    "model": settings.ollama_model,
+    "ollama_options": settings.ollama_options(),
+    "ollama_think": settings.ollama_think,
+    "request_timeout_sec": settings.request_timeout,
+    "effective_prompt_sha256": PROMPT,
+    "fingerprint_before": before,
+    "fingerprint_after": after,
+    "source_sha256": source_start,
+    "source_sha256_after": source_after,
+    "raw_rows_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+    "raw_transcript_sha256": transcript_hash,
+    "canonical_wire_think_false_asserted": True,
+    "wire_calls_total": wire_calls,
+    "cases": rows,
+    "aggregate": aggregate_scores(rows),
+    "raw_repeat_gate_passed": passed,
+}
+Path("/tmp/meeting-semantic-340-final-raw-repeat.json").write_text(json.dumps(report, sort_keys=True) + "\n")
+raise SystemExit(0 if passed else 1)

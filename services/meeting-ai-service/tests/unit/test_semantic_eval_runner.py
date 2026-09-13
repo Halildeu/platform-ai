@@ -76,11 +76,15 @@ def test_fingerprint_network_failure_does_not_invent_digest(
     assert runner.fingerprint(Settings(backend="ollama"))["model_digest"] is None
 
 
+@pytest.mark.parametrize("think", [None, False])
 def test_main_writes_metadata_only_report(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    think: bool | None,
 ) -> None:
     output = tmp_path / "report.json"
-    settings = Settings(backend="ollama")
+    settings = Settings(backend="ollama", ollama_think=think)
     monkeypatch.setattr(runner, "Settings", lambda: settings)
     monkeypatch.setattr(
         runner, "fingerprint", lambda _: {"version": "0.9", "model_digest": "sha256:exact"}
@@ -106,6 +110,8 @@ def test_main_writes_metadata_only_report(
     assert report["model_fingerprint_stable"] is True
     assert report["inputs_stable"] is True
     assert report["ollama_options"]["temperature"] == 0.0
+    assert report["ollama_think"] is think
+    assert report["request_timeout_sec"] == settings.request_timeout == 60
     assert report["effective_prompt_sha256"] != report["legacy_prompt_sha256"]
     assert report["aggregate"]["decision"]["false_negative"] > 0
 

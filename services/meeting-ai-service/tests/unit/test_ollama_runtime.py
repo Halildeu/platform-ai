@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import Mock
 
 import httpx
@@ -117,3 +118,50 @@ def test_missing_default_model_is_not_ready_even_without_pin(
 def test_inventory_unreachable_is_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(httpx, "get", Mock(side_effect=httpx.ConnectError("unavailable")))
     assert OllamaAnalyzer(settings()).model_loaded is False
+
+
+@pytest.mark.parametrize("think", [None, False, True])
+def test_thinking_override_is_optional_top_level_and_does_not_mutate_input(
+    monkeypatch: pytest.MonkeyPatch, think: bool | None
+) -> None:
+    post = Mock(return_value=response({}))
+    monkeypatch.setattr(httpx, "post", post)
+    payload = {"model": "synthetic:latest", "options": {"temperature": 0}}
+    ollama_runtime.generate(Settings(backend="ollama", ollama_think=think), payload)
+    sent = post.call_args.kwargs["json"]
+    assert "think" not in payload
+    assert "think" not in sent["options"]
+    if think is None:
+        assert sent == payload
+        assert "think" not in sent
+    else:
+        assert sent["think"] is think
+
+
+@pytest.mark.parametrize("workflow", ["analysis", "ask"])
+def test_analysis_and_questions_share_explicit_false_wire(
+    monkeypatch: pytest.MonkeyPatch, workflow: str
+) -> None:
+    answer = (
+        json.dumps({"summary_sentences": [], "decision_sentences": [], "action_item_sentences": []})
+        if workflow == "analysis"
+        else "Test ekibi raporu hazırlayacak."
+    )
+    post = Mock(return_value=response({"response": answer}))
+    monkeypatch.setattr(httpx, "post", post)
+    config = Settings(backend="ollama", ollama_think=False)
+    if workflow == "analysis":
+        OllamaAnalyzer(config).analyze("Test ekibi raporu hazırlayacak.")
+    else:
+        answer_question("Test ekibi raporu hazırlayacak.", "Raporu kim hazırlayacak?", config)
+    assert post.call_args.kwargs["json"]["think"] is False
+
+
+def test_legacy_thinking_default_and_environment_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAI_OLLAMA_THINK", raising=False)
+    assert Settings().ollama_think is None
+    monkeypatch.setenv("MAI_OLLAMA_THINK", "false")
+    assert Settings().ollama_think is False
+    monkeypatch.setenv("MAI_OLLAMA_THINK", "unset")
+    with pytest.raises(ValidationError):
+        Settings()
