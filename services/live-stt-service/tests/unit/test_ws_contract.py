@@ -319,7 +319,7 @@ def test_eof_waits_for_published_final_state_transition_without_duplicate(
         for _ in range(3):
             assert_valid(ws.receive_json())
 
-        ws.send_bytes(_speech_frame())
+        ws.send_bytes(_speech_frame() * 2)
         assert final_reached_transport.wait(timeout=1.0)
         pre_eof_events: list[dict[str, Any]] = []
         while True:
@@ -371,7 +371,7 @@ def test_eof_does_not_refinalize_retained_forced_commit_tail(
         for _ in range(3):
             assert_valid(ws.receive_json())
 
-        ws.send_bytes(_speech_frame())
+        ws.send_bytes(_speech_frame() * 2)
         pre_terminal: list[dict[str, Any]] = []
         while True:
             event = ws.receive_json()
@@ -385,7 +385,7 @@ def test_eof_does_not_refinalize_retained_forced_commit_tail(
 
     assert [event["type"] for event in terminal] == ["eof_ack", "drained"]
     assert len([event for event in pre_terminal if event["type"] == "final"]) == 1
-    assert final_calls == [1024]
+    assert final_calls == [2048]
 
 
 def test_blocked_final_transport_closes_bounded_without_drained(
@@ -434,7 +434,7 @@ def test_blocked_final_transport_closes_bounded_without_drained(
         for _ in range(3):
             assert_valid(ws.receive_json())
 
-        ws.send_bytes(_speech_frame())
+        ws.send_bytes(_speech_frame() * 2)
         assert final_reached_transport.wait(timeout=1.0)
         started = time.monotonic()
         ws.send_text('{"type":"eof"}')
@@ -491,7 +491,7 @@ def test_background_final_transport_timeout_closes_before_accepting_eof(
         for _ in range(3):
             assert_valid(ws.receive_json())
 
-        ws.send_bytes(_speech_frame())
+        ws.send_bytes(_speech_frame() * 2)
         assert final_reached_transport.wait(timeout=1.0)
         observed: list[dict[str, Any]] = []
         with pytest.raises(WebSocketDisconnect):
@@ -1533,6 +1533,56 @@ def test_stream_commits_final_on_speech_ending_silence(
     assert final["seq"] == 0
     assert final["reason"] == "silence"
     assert final["text"] == "Merhaba nasılsın."
+
+
+@pytest.mark.parametrize("finish_with_eof", [True, False])
+def test_forced_commit_waits_for_source_audio_budget_despite_delivery_delay(
+    monkeypatch: pytest.MonkeyPatch, finish_with_eof: bool
+) -> None:
+    _patch_fast_stream_timing(monkeypatch, forced_commit_sec=0.1, silence_commit_sec=5.0)
+    final_started = threading.Event()
+    final_sample_counts: list[int] = []
+
+    def fake_transcribe(
+        self: streaming_models.DirectWhisperService,
+        audio: np.ndarray[tuple[int, ...], np.dtype[np.float32]],
+        _vad: bool,
+    ) -> str:
+        if _is_final_service(self):
+            final_sample_counts.append(int(audio.size))
+            final_started.set()
+            return "Source window final."
+        return "Source draft"
+
+    monkeypatch.setattr(streaming_models.DirectWhisperService, "transcribe_array", fake_transcribe)
+
+    with TestClient(app) as client, client.websocket_connect(STREAM_PATH) as ws:
+        for _ in range(3):
+            assert_valid(ws.receive_json())
+
+        ws.send_bytes((np.ones(1599, dtype=np.float32) * 0.05).tobytes())
+        assert not final_started.wait(timeout=0.25)
+        if finish_with_eof:
+            ws.send_text('{"type":"eof"}')
+            assert receive_terminal_ack(ws) == {"type": "eof_ack"}
+        else:
+            ws.send_bytes((np.ones(1, dtype=np.float32) * 0.05).tobytes())
+            assert final_started.wait(timeout=1.0)
+
+        final = ws.receive_json()
+        while final["type"] == "partial":
+            final = ws.receive_json()
+        assert_valid(final)
+        assert final["type"] == "final"
+        assert final["reason"] == ("eof" if finish_with_eof else "forced")
+        assert final["source_start_sample"] == 0
+        assert final["source_end_sample"] == (1599 if finish_with_eof else 1600)
+        if not finish_with_eof:
+            ws.send_text('{"type":"eof"}')
+            assert receive_terminal_ack(ws) == {"type": "eof_ack"}
+        assert ws.receive_json()["type"] == "drained"
+
+    assert final_sample_counts == [1599 if finish_with_eof else 1600]
 
 
 def test_stream_forced_commit_still_emits_final(

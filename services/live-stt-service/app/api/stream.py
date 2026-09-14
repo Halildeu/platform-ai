@@ -756,6 +756,7 @@ async def stream_endpoint(
     transport_disabled = asyncio.Event()
     inference_phase = "idle"
     terminal_deadline: float | None = None
+    forced_commit_samples = math.ceil(settings.forced_commit_sec * SAMPLE_RATE)
     # Preserve every source sample until it is committed. This is a memory
     # safety bound, not a rolling decode window: exceeding it fails closed
     # instead of silently deleting uncommitted meeting audio.
@@ -1219,7 +1220,11 @@ async def stream_endpoint(
                     continue
 
                 buffer_age = now - buffer_start_t
-                if buffer_age >= settings.forced_commit_sec:
+                # Transport delay alone must not split a shorter source window.
+                if (
+                    buffer_age >= settings.forced_commit_sec
+                    and buffer.size >= forced_commit_samples
+                ):
                     commit_reason = "forced"
                 elif (
                     last_speech_t is not None and now - last_speech_t >= settings.silence_commit_sec
