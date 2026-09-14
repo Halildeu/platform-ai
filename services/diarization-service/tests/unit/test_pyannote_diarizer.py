@@ -1,13 +1,14 @@
 """PyannoteDiarizer wiring tests (#48) — fake pipeline, no pyannote install.
 
 The real pipeline is injected via `pipeline_factory`, so these tests verify the
-adapter logic (temp-file handling, annotation -> SpeakerSegment conversion,
+adapter logic (in-memory input lifetime, annotation -> SpeakerSegment conversion,
 anonymous labels, lazy load) without torch/pyannote present.
 """
 
 from __future__ import annotations
 
 import io
+import tempfile
 import wave
 
 import pytest
@@ -35,10 +36,18 @@ class _FakeAnnotation:
 class _FakePipeline:
     def __init__(self, annotation: _FakeAnnotation) -> None:
         self._annotation = annotation
-        self.called_with: str | None = None
+        self.called_with: io.BytesIO | None = None
+        self.audio_bytes: bytes | None = None
+        self.max_speakers: int | None = None
 
-    def __call__(self, audio_path: str) -> _FakeAnnotation:
-        self.called_with = audio_path
+    def __call__(self, audio: io.BytesIO, *, max_speakers: int) -> _FakeAnnotation:
+        assert isinstance(audio, io.BytesIO)
+        assert audio.seekable()
+        assert audio.tell() == 0
+        self.called_with = audio
+        self.audio_bytes = audio.read()
+        audio.seek(0)
+        self.max_speakers = max_speakers
         return self._annotation
 
 
@@ -100,6 +109,46 @@ def test_annotation_converted_to_anonymous_segments() -> None:
     assert resp.duration == pytest.approx(2.5, abs=0.01)
     # KVKK: anonymous labels only — no embedding/voiceprint fields exist.
     assert not hasattr(resp.segments[0], "embedding")
-    # Pipeline received a temp file path, not raw bytes.
+    # The adapter closes its owned RAM stream once inference returns.
     assert pipeline.called_with is not None
-    assert pipeline.called_with.endswith(".wav")
+    assert pipeline.called_with.closed
+    assert pipeline.audio_bytes == _wav_bytes(duration_sec=2.5)
+
+
+@pytest.mark.parametrize("max_speakers", [1, 3, 10, 50])
+def test_configured_speaker_limit_without_temp_file(
+    monkeypatch: pytest.MonkeyPatch, max_speakers: int
+) -> None:
+    def reject_temp_file(*args, **kwargs):
+        pytest.fail("The Python adapter must not spool audio to disk")
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", reject_temp_file)
+    settings = _settings().model_copy(update={"max_speakers": max_speakers})
+    pipeline = _FakePipeline(_FakeAnnotation([]))
+    diarizer = PyannoteDiarizer(settings, pipeline_factory=lambda _s: pipeline)
+
+    diarizer.diarize(_wav_bytes())
+
+    assert pipeline.max_speakers == max_speakers
+    assert pipeline.called_with is not None
+    assert pipeline.called_with.closed
+
+
+def test_ram_stream_closed_and_lock_reusable_after_pipeline_failure() -> None:
+    inputs: list[io.BytesIO] = []
+
+    def pipeline(audio: io.BytesIO, *, max_speakers: int) -> _FakeAnnotation:
+        inputs.append(audio)
+        assert audio.read() == _wav_bytes()
+        if len(inputs) == 1:
+            raise RuntimeError("synthetic inference failure")
+        return _FakeAnnotation([])
+
+    diarizer = PyannoteDiarizer(_settings(), pipeline_factory=lambda _s: pipeline)
+    with pytest.raises(RuntimeError, match="synthetic inference failure"):
+        diarizer.diarize(_wav_bytes())
+    assert inputs[0].closed
+
+    assert diarizer.diarize(_wav_bytes()).segments == []
+    assert len(inputs) == 2
+    assert inputs[1].closed

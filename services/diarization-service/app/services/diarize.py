@@ -13,9 +13,6 @@ No voiceprint/biometric storage in this phase.
 
 from __future__ import annotations
 
-import contextlib
-import os
-import tempfile
 import threading
 import time
 import wave
@@ -144,16 +141,9 @@ class PyannoteDiarizer:
         pipeline = self._ensure_pipeline()
         start = time.perf_counter()
 
-        # pyannote consumes a file path; spool the upload to a temp wav.
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        try:
-            tmp.write(raw_audio)
-            tmp.close()
-            with self._lock:
-                annotation = pipeline(tmp.name)  # type: ignore[operator]
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp.name)
+        # pyannote 3.3.2 accepts seekable IOBase input; keep this adapter in RAM.
+        with BytesIO(raw_audio) as audio, self._lock:
+            annotation = pipeline(audio, max_speakers=s.max_speakers)  # type: ignore[operator]
 
         segments: list[SpeakerSegment] = []
         labels: set[str] = set()

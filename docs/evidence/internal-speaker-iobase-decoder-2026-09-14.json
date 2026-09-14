@@ -1,0 +1,15 @@
+{
+  "status": "real-pinned-pyannote-iobase-decode-verified",
+  "acceptance": false,
+  "fixtureSha256": "702c3a94e34ca09915237e3fabf11a037602514bb93cec13555ecd3ab7fe2676",
+  "pyannoteAudio": "3.3.2",
+  "torchaudio": "2.5.1+cpu",
+  "sampleRate": 16000,
+  "samples": 1227136,
+  "pcmExactlyEqual": true,
+  "streamClosed": true,
+  "modelInference": false,
+  "scope": "real-library-decoder-only-not-http-or-product",
+  "externalNetworkForbidden": true,
+  "probeSourceSha256": "e44de3bc96db0261259ed0fe1c7384202239b76d6c401c9d04fbc615c232c618"
+}
