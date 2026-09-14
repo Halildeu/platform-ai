@@ -1,0 +1,186 @@
+{
+  "protocol": "fixed-cpu-eight-thread-360-second-characterization-v1",
+  "acceptance": false,
+  "entries": [
+    {
+      "stage": "imports-complete",
+      "wallSeconds": 33.14646179997362
+    },
+    {
+      "stage": "model-load-complete",
+      "loadSeconds": 9.194083000009414,
+      "wallSeconds": 42.34054730000207
+    },
+    {
+      "stage": "segmentation",
+      "inferenceSeconds": 0.012631299963686615
+    },
+    {
+      "stage": "speaker_counting",
+      "inferenceSeconds": 8.737858699983917
+    },
+    {
+      "stage": "embeddings",
+      "inferenceSeconds": 9.47989439999219
+    },
+    {
+      "stage": "discrete_diarization",
+      "inferenceSeconds": 112.48939910001354
+    },
+    {
+      "status": "measured-synthetic-cpu-only-not-integrated",
+      "hostSourceObserved": "e386b996cae22f08294a83d840f0e92d4a82cd53",
+      "fixtureSha256": "702c3a94e34ca09915237e3fabf11a037602514bb93cec13555ecd3ab7fe2676",
+      "device": "cpu",
+      "threads": 8,
+      "protocol": "fixed-cpu-eight-thread-360-second-characterization-v1",
+      "acceptance": false,
+      "durationSeconds": 76.696,
+      "loadSeconds": 9.194083000009414,
+      "inferenceSeconds": 112.4996444999706,
+      "wallSeconds": 154.98983479995513,
+      "rtf": 1.4668254472198108,
+      "rssBytes": 635277312,
+      "peakWorkingSetBytes": 2362884096,
+      "speakers": 2,
+      "turns": [
+        {
+          "start": 0.4697187500000001,
+          "end": 5.076593750000001,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 6.40971875,
+          "end": 8.94096875,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 10.30784375,
+          "end": 14.070968750000002,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 15.387218750000002,
+          "end": 18.32346875,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 20.58471875,
+          "end": 22.10346875,
+          "speaker": "SPEAKER_00"
+        },
+        {
+          "start": 23.16659375,
+          "end": 25.54596875,
+          "speaker": "SPEAKER_00"
+        },
+        {
+          "start": 26.60909375,
+          "end": 31.33409375,
+          "speaker": "SPEAKER_00"
+        },
+        {
+          "start": 32.48159375,
+          "end": 36.09284375,
+          "speaker": "SPEAKER_00"
+        },
+        {
+          "start": 38.59034375,
+          "end": 39.822218750000005,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 41.00346875,
+          "end": 43.56846875,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 44.85096875,
+          "end": 46.74096875,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 48.10784375,
+          "end": 50.031593750000006,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 51.28034375,
+          "end": 55.127843750000004,
+          "speaker": "SPEAKER_01"
+        },
+        {
+          "start": 57.321593750000005,
+          "end": 60.78096875000001,
+          "speaker": "SPEAKER_00"
+        },
+        {
+          "start": 61.92846875,
+          "end": 64.05471875,
+          "speaker": "SPEAKER_00"
+        },
+        {
+          "start": 65.20221875,
+          "end": 66.02909375,
+          "speaker": "SPEAKER_00"
+        },
+        {
+          "start": 66.28221875,
+          "end": 70.51784375,
+          "speaker": "SPEAKER_00"
+        },
+        {
+          "start": 71.98596875,
+          "end": 74.70284375,
+          "speaker": "SPEAKER_00"
+        }
+      ],
+      "scores": {
+        "0.25": {
+          "correct": 23.10721875000003,
+          "false alarm": 0.010093749999995794,
+          "total": 24.250000000000036,
+          "confusion": 0,
+          "missed detection": 1.1427812500000063,
+          "diarization error rate": 0.04754123711340208
+        },
+        "0.0": {
+          "correct": 48.44406250000004,
+          "false alarm": 2.450937499999981,
+          "total": 51.450000000000045,
+          "confusion": 0,
+          "missed detection": 3.00593750000001,
+          "diarization error rate": 0.10606171039844482
+        }
+      },
+      "modelRevisions": {
+        "speaker-diarization-3.1": "84fd25912480287da0247647c3d2b4853cb3ee5d",
+        "segmentation-3.0": "e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+        "wespeaker-voxceleb-resnet34-LM": "837717ddb9ff5507820346191109dc79c958d614"
+      },
+      "modelFileSha256": {
+        "speaker-diarization-3.1/config.yaml": "04ad9cd59a93c3a7c754200ecc9e1c4ba87bf1657ef8a4debf7555e711daeeda",
+        "segmentation-3.0/config.yaml": "fa65a47a751602f04cc570135007d76859b69e8f9f1bfdf5878a5145980d4263",
+        "segmentation-3.0/pytorch_model.bin": "da85c29829d4002daedd676e012936488234d9255e65e86dfab9bec6b1729298",
+        "wespeaker-voxceleb-resnet34-LM/config.yaml": "6ff718cff3c5d7a4493537ab7f4780cad7e3d32453f59099b4076aefa07a9974",
+        "wespeaker-voxceleb-resnet34-LM/pytorch_model.bin": "366edf44f4c80889a3eb7a9d7bdf02c4aede3127f7dd15e274dcdb826b143c56"
+      },
+      "packages": {
+        "torch": "2.5.1+cpu",
+        "torchaudio": "2.5.1+cpu",
+        "pyannote.audio": "3.3.2",
+        "pyannote.core": "6.0.1",
+        "pyannote.metrics": "4.1",
+        "huggingface-hub": "0.36.0",
+        "speechbrain": "1.0.2",
+        "matplotlib": "3.10.1"
+      },
+      "waveformZeroVerified": true,
+      "audioBufferZeroVerified": true,
+      "externalNetworkForbidden": true,
+      "rawAudioFileWrites": false,
+      "pocOnlyOfflineCacheResolver": false,
+      "pocOnlyLazyModuleMetadataCount": 0
+    }
+  ]
+}
