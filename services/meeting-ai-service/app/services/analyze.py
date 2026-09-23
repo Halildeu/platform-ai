@@ -374,24 +374,20 @@ class OllamaAnalyzer:
         sentences = split_sentences(transcript)
         menu = selectable_sentences(live_menu(transcript, sentences, cursor) if live else sentences)
         use_selection = bool(menu)
-        if live and not use_selection:
-            # Incomplete/empty speech should not consume a slow model request.
+        if not use_selection:
+            # No claim can pass grounding without selectable evidence. This
+            # applies to final snapshots too: a free-text fallback here could
+            # only invent claims or fail schema validation and poison retries.
             return AnalysisDraft()
-        if use_selection:
-            prompt = (_OLLAMA_LIVE_PROMPT if live else _OLLAMA_EXTRACTIVE_PROMPT).format(
-                max_summary=MAX_SUMMARY_SENTENCES,
-                numbered=number_transcript(menu),
-            )
-        else:
-            # Nothing selectable (very short or filler-only transcript): the
-            # legacy free-text prompt still produces a best-effort answer that
-            # the verifier gates as before.
-            prompt = _OLLAMA_PROMPT.format(transcript=transcript)
+        prompt = (_OLLAMA_LIVE_PROMPT if live else _OLLAMA_EXTRACTIVE_PROMPT).format(
+            max_summary=MAX_SUMMARY_SENTENCES,
+            numbered=number_transcript(menu),
+        )
         payload = {
             "model": self._settings.ollama_model,
             "prompt": prompt,
             "stream": False,
-            "format": selection_schema(len(menu)) if use_selection else "json",
+            "format": selection_schema(len(menu)),
             # Deterministic extraction + no transcript truncation (see config: the
             # 2048-default num_ctx silently cut long meetings; 0.8-default temperature
             # made the eval non-reproducible). One source of truth in Settings.
@@ -412,7 +408,7 @@ class OllamaAnalyzer:
             # Strip markdown code fences if Ollama wraps JSON
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip())
             parsed = json.loads(cleaned)
-            if use_selection and looks_like_selection(parsed):
+            if looks_like_selection(parsed):
                 try:
                     SentenceSelection.model_validate(parsed)
                 except ValidationError as exc:
@@ -435,8 +431,7 @@ class OllamaAnalyzer:
                     ],
                 )
             else:
-                # The model ignored the index contract (or the transcript had no
-                # selectable sentence). Keep the pre-#3444 behaviour rather than
+                # The model ignored the index contract. Keep the pre-#3444 behaviour rather than
                 # failing the analysis; the verifier still gates every claim.
                 data = _require_ollama_schema(parsed)
                 draft = AnalysisDraft(

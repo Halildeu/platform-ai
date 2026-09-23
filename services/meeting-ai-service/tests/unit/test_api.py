@@ -99,7 +99,7 @@ def test_analyze_ollama_down_502(monkeypatch) -> None:  # type: ignore[no-untype
     monkeypatch.setenv("MAI_BACKEND", "ollama")
     monkeypatch.setattr(httpx, "post", _boom)
     with TestClient(app) as client:
-        resp = client.post("/analyze", json={"transcript": "Bir metin."})
+        resp = client.post("/analyze", json={"transcript": "Bütçe görüşüldü."})
     assert resp.status_code == 502
 
 

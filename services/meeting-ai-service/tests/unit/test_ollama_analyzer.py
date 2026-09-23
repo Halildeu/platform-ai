@@ -32,6 +32,32 @@ def _ollama_response(payload: object) -> httpx.Response:
     )
 
 
+@pytest.mark.parametrize("transcript", ["", "   ", "...", "Tamam.", "Evet.", "bir ve ile"])
+def test_no_groundable_evidence_never_calls_model(
+    monkeypatch: pytest.MonkeyPatch, transcript: str
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Ungroundable speech must not consume an LLM request or retry")
+
+    monkeypatch.setattr("app.services.analyze.generate", forbidden)
+    result = MeetingAnalysisService(_settings()).analyze(transcript)
+    assert result.summary == ""
+    assert result.summary_grounding_status == "empty"
+    assert result.decisions == result.action_items == result.citations == []
+    assert result.ungrounded_count == 0
+
+
+@pytest.mark.parametrize("transcript", ["Bütçe onaylandı.", "Ali yazacak."])
+def test_short_meaningful_evidence_still_requires_valid_model_response(
+    monkeypatch: pytest.MonkeyPatch, transcript: str
+) -> None:
+    # Do not treat short length, or a schema error with real evidence, as an
+    # empty successful result. Only the existing grounding predicate decides.
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response({"summary": []}))
+    with pytest.raises(OllamaSchemaInvalidError):
+        OllamaAnalyzer(_settings()).analyze(transcript)
+
+
 def test_ollama_parses_valid_json(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {
         "summary": "Bütçe görüşüldü.",
