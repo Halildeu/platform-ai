@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -14,6 +15,33 @@ from app.main import app
 from app.models.schemas import AnalysisDeliveryHealth, ReadyConsumerHealth
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
 from app.services.ready_event_consumer import ReadyEventConsumerRuntime
+
+
+@pytest.mark.parametrize("path", ["/health", "/ready"])
+@pytest.mark.parametrize("loaded", [False, True])
+def test_health_inventory_runs_off_event_loop_once(
+    monkeypatch: pytest.MonkeyPatch, path: str, loaded: bool
+) -> None:
+    monkeypatch.setenv("MAI_BACKEND", "ollama")
+    calls = []
+
+    def inventory(*args: object, **kwargs: object) -> httpx.Response:
+        # Synchronous network work must not hold up other async API requests.
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        calls.append(True)
+        return httpx.Response(
+            200,
+            json={"models": [{"name": "llama3.1:8b"}] if loaded else []},
+            request=httpx.Request("GET", "http://localhost:11434/api/tags"),
+        )
+
+    monkeypatch.setattr(httpx, "get", inventory)
+    with TestClient(app) as client:
+        result = client.get(path)
+    assert len(calls) == 1
+    assert result.json()["status"] == ("ok" if loaded else "loading")
+    assert result.status_code == (503 if path == "/ready" and not loaded else 200)
 
 
 @pytest.mark.parametrize("think", [None, "false", "true"])
