@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from typing import Any, cast
 
 from fastapi import FastAPI, Request
@@ -23,6 +23,7 @@ from app.services.analysis_application import AnalysisApplicationService
 from app.services.analysis_delivery import AnalysisDeliveryRuntime
 from app.services.analyze import get_service
 from app.services.live_stream_hub import LiveStreamHub
+from app.services.ollama_runtime import create_client as create_ollama_client
 from app.services.ready_event_consumer import ReadyEventConsumerRuntime
 
 logger = logging.getLogger(__name__)
@@ -53,43 +54,51 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    analysis_delivery = AnalysisDeliveryRuntime(settings)
-    analysis_application = AnalysisApplicationService(settings, get_service(settings))
-    ready_consumer = ReadyEventConsumerRuntime(
-        settings,
-        analysis_application,
-        analysis_delivery,
-    )
-    app.state.analysis_delivery = analysis_delivery
-    app.state.analysis_application = analysis_application
-    app.state.ready_consumer = ready_consumer
-    # Faz 24 live-stream SSE relay — a single in-memory hub per process.
-    # /analyze/live publishes; /analyze/live/stream/{meeting_id} subscribes.
-    app.state.live_stream_hub = LiveStreamHub(max_queue_size=settings.live_stream_max_queue)
-    logging.basicConfig(
-        level=settings.log_level,
-        format="%(asctime)s %(levelname)s %(name)s [%(correlation_id)s] %(message)s",
-    )
-    for handler in logging.getLogger().handlers:
-        handler.addFilter(CorrelationIdLogFilter())
-    logger.info(
-        "meeting-ai-service starting",
-        extra={
-            "version": __version__,
-            "backend": settings.backend,
-            "model": settings.effective_model,
-            "redact_pii": settings.redact_pii,
-            "correlation_id": "startup",
-        },
-    )
-    await analysis_delivery.start()
-    await ready_consumer.start()
-    try:
-        yield
-    finally:
-        await ready_consumer.stop()
-        await analysis_delivery.stop()
-        logger.info("meeting-ai-service stopping", extra={"correlation_id": "shutdown"})
+    with ExitStack() as resources:
+        ollama_client = (
+            resources.enter_context(create_ollama_client())
+            if settings.backend == "ollama"
+            else None
+        )
+        analysis_delivery = AnalysisDeliveryRuntime(settings)
+        analysis_application = AnalysisApplicationService(
+            settings, get_service(settings, http_client=ollama_client)
+        )
+        ready_consumer = ReadyEventConsumerRuntime(
+            settings,
+            analysis_application,
+            analysis_delivery,
+        )
+        app.state.analysis_delivery = analysis_delivery
+        app.state.analysis_application = analysis_application
+        app.state.ready_consumer = ready_consumer
+        # Faz 24 live-stream SSE relay — a single in-memory hub per process.
+        # /analyze/live publishes; /analyze/live/stream/{meeting_id} subscribes.
+        app.state.live_stream_hub = LiveStreamHub(max_queue_size=settings.live_stream_max_queue)
+        logging.basicConfig(
+            level=settings.log_level,
+            format="%(asctime)s %(levelname)s %(name)s [%(correlation_id)s] %(message)s",
+        )
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(CorrelationIdLogFilter())
+        logger.info(
+            "meeting-ai-service starting",
+            extra={
+                "version": __version__,
+                "backend": settings.backend,
+                "model": settings.effective_model,
+                "redact_pii": settings.redact_pii,
+                "correlation_id": "startup",
+            },
+        )
+        await analysis_delivery.start()
+        await ready_consumer.start()
+        try:
+            yield
+        finally:
+            await ready_consumer.stop()
+            await analysis_delivery.stop()
+            logger.info("meeting-ai-service stopping", extra={"correlation_id": "shutdown"})
 
 
 app = FastAPI(

@@ -17,6 +17,29 @@ from app.services.ask import answer_question
 DIGEST = "a" * 64
 
 
+@pytest.mark.parametrize("changed", [False, True])
+def test_shared_transport_still_checks_live_identity_before_and_after(
+    changed: bool,
+) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/api/generate":
+            return response({"response": "not accepted until the second check"})
+        return response(inventory("b" * 64 if changed and len(requests) == 3 else DIGEST))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        if changed:
+            with pytest.raises(httpx.RequestError, match="model identity unavailable"):
+                ollama_runtime.generate(settings(), {}, client=client)
+        else:
+            assert ollama_runtime.generate(settings(), {}, client=client).status_code == 200
+        assert not client.is_closed
+    assert requests == ["/api/tags", "/api/generate", "/api/tags"]
+    assert client.is_closed
+
+
 def settings() -> Settings:
     return Settings(backend="ollama", ollama_expected_digest=DIGEST)
 

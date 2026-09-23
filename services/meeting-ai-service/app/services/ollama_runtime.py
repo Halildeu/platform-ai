@@ -10,8 +10,16 @@ import httpx
 from app.core.config import Settings
 
 
-def require_model_identity(settings: Settings, timeout: float = 3.0) -> None:
-    response = httpx.get(f"{settings.ollama_host}/api/tags", timeout=timeout)
+def create_client() -> httpx.Client:
+    """App-owned pool; TLS verification and environment behavior stay enabled."""
+    return httpx.Client(limits=httpx.Limits(keepalive_expiry=60.0))
+
+
+def require_model_identity(
+    settings: Settings, timeout: float = 3.0, *, client: httpx.Client | None = None
+) -> None:
+    get = client.get if client is not None else httpx.get
+    response = get(f"{settings.ollama_host}/api/tags", timeout=timeout)
     response.raise_for_status()
     try:
         models = response.json()["models"]
@@ -32,7 +40,9 @@ def require_model_identity(settings: Settings, timeout: float = 3.0) -> None:
         raise httpx.RequestError("Ollama configured model identity unavailable") from exc
 
 
-def generate(settings: Settings, payload: dict[str, Any]) -> httpx.Response:
+def generate(
+    settings: Settings, payload: dict[str, Any], *, client: httpx.Client | None = None
+) -> httpx.Response:
     """Pinned deployments check the selected tag before and after generation.
 
     This detects ordinary tag replacement; it is not an atomic registry lock.
@@ -49,13 +59,14 @@ def generate(settings: Settings, payload: dict[str, Any]) -> httpx.Response:
         return budget
 
     if settings.ollama_expected_digest:
-        require_model_identity(settings, min(3.0, remaining()))
-    response = httpx.post(
+        require_model_identity(settings, min(3.0, remaining()), client=client)
+    post = client.post if client is not None else httpx.post
+    response = post(
         f"{settings.ollama_host}/api/generate",
         json=payload,
         timeout=remaining(),
     )
     response.raise_for_status()
     if settings.ollama_expected_digest:
-        require_model_identity(settings, min(3.0, remaining()))
+        require_model_identity(settings, min(3.0, remaining()), client=client)
     return response

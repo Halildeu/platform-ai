@@ -25,7 +25,7 @@ def test_health_inventory_runs_off_event_loop_once(
     monkeypatch.setenv("MAI_BACKEND", "ollama")
     calls = []
 
-    def inventory(*args: object, **kwargs: object) -> httpx.Response:
+    def inventory(request: httpx.Request) -> httpx.Response:
         # Synchronous network work must not hold up other async API requests.
         with pytest.raises(RuntimeError, match="no running event loop"):
             asyncio.get_running_loop()
@@ -36,12 +36,14 @@ def test_health_inventory_runs_off_event_loop_once(
             request=httpx.Request("GET", "http://localhost:11434/api/tags"),
         )
 
-    monkeypatch.setattr(httpx, "get", inventory)
+    pool = httpx.Client(transport=httpx.MockTransport(inventory))
+    monkeypatch.setattr("app.main.create_ollama_client", lambda: pool)
     with TestClient(app) as client:
         result = client.get(path)
     assert len(calls) == 1
     assert result.json()["status"] == ("ok" if loaded else "loading")
     assert result.status_code == (503 if path == "/ready" and not loaded else 200)
+    assert pool.is_closed
 
 
 @pytest.mark.parametrize("think", [None, "false", "true"])
@@ -53,21 +55,30 @@ def test_health_and_ready_report_effective_thinking_mode(
         monkeypatch.setenv("MAI_OLLAMA_THINK", think)
     else:
         monkeypatch.delenv("MAI_OLLAMA_THINK", raising=False)
-    monkeypatch.setattr(
-        httpx,
-        "get",
-        lambda *args, **kwargs: httpx.Response(
-            200,
-            json={"models": [{"name": "llama3.1:8b"}]},
-            request=httpx.Request("GET", "http://localhost:11434/api/tags"),
-        ),
+    pool = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"models": [{"name": "llama3.1:8b"}]},
+                request=httpx.Request("GET", "http://localhost:11434/api/tags"),
+            ),
+        )
     )
+    created = []
+
+    def new_client() -> httpx.Client:
+        created.append(pool)
+        return pool
+
+    monkeypatch.setattr("app.main.create_ollama_client", new_client)
     with TestClient(app) as client:
         for path in ("/health", "/ready"):
             result = client.get(path)
             assert result.status_code == 200
             expected = None if think is None else think == "true"
             assert result.json()["ollama_think"] is expected
+    assert created == [pool]
+    assert pool.is_closed
 
 
 def test_analyze_mock_returns_summary() -> None:
@@ -125,7 +136,9 @@ def test_analyze_ollama_down_502(monkeypatch) -> None:  # type: ignore[no-untype
         raise httpx.ConnectError("connection refused")
 
     monkeypatch.setenv("MAI_BACKEND", "ollama")
-    monkeypatch.setattr(httpx, "post", _boom)
+    monkeypatch.setattr(
+        "app.main.create_ollama_client", lambda: httpx.Client(transport=httpx.MockTransport(_boom))
+    )
     with TestClient(app) as client:
         resp = client.post("/analyze", json={"transcript": "Bütçe görüşüldü."})
     assert resp.status_code == 502
