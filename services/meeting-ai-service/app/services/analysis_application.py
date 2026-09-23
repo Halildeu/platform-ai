@@ -11,7 +11,7 @@ from typing import Protocol
 
 from app.api.metrics import mai_analysis_deadline_total, mai_analysis_stage_seconds
 from app.core.config import Settings
-from app.models.schemas import AnalyzeResponse
+from app.models.schemas import AnalyzeResponse, LiveAnalysisCursor
 from app.services.analyze import MeetingAnalysisService
 
 
@@ -36,6 +36,8 @@ class AnalysisCommand:
     analysis_run_id: str | None = None
     generated_at: datetime | None = None
     segments: list[dict[str, object]] | None = field(default=None, repr=False)
+    live: bool = False
+    live_cursor: LiveAnalysisCursor | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,8 @@ class AnalysisApplicationService:
                     self._run_analyzer,
                     command.transcript,
                     command.segments,
+                    command.live,
+                    command.live_cursor,
                 ),
             )
         except BaseException:
@@ -116,12 +120,20 @@ class AnalysisApplicationService:
         return AnalysisExecution(result=result, analysis_run_id=run_id)
 
     def _run_analyzer(
-        self, transcript: str, segments: list[dict[str, object]] | None
+        self,
+        transcript: str,
+        segments: list[dict[str, object]] | None,
+        live: bool = False,
+        cursor: LiveAnalysisCursor | None = None,
     ) -> AnalyzeResponse:
         started_at = time.monotonic()
         outcome = "error"
         try:
-            result = self._analyzer.analyze(transcript, segments)
+            result = (
+                self._analyzer.analyze(transcript, segments, live=True, live_cursor=cursor)
+                if live
+                else self._analyzer.analyze(transcript, segments)
+            )
             outcome = "success"
             return result
         finally:

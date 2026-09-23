@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class LiveAnalysisCursor(BaseModel):
+    """Content-free hint; invalidated by any change to the processed prefix."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    source_length: int = Field(ge=1, le=2_000_000)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    active_indices: list[int] = Field(max_length=23)
 
 
 class TranscriptSegment(BaseModel):
@@ -17,6 +26,7 @@ class AnalyzeRequest(BaseModel):
     """Transcript analysis request."""
 
     transcript: str = Field(description="Meeting transcript text", min_length=1)
+    previous_live_cursor: LiveAnalysisCursor | None = Field(default=None)
     meeting_id: str | None = Field(default=None, max_length=64)
     session_id: str | None = Field(default=None, max_length=64)
     segments: list[TranscriptSegment] | None = Field(
@@ -135,6 +145,7 @@ class AnalyzeResponse(BaseModel):
     backend: str = Field(description="mock / anthropic / openai / ollama")
     model: str = Field(description="Model/pipeline used")
     elapsed_ms: int = Field(description="Analysis wall-clock", ge=0)
+    live_cursor: LiveAnalysisCursor | None = Field(default=None)
     # Faz 24 live analysis (Zeynep 2026-07-20 kapsam kararı):
     # `is_partial=True` means this response came from /analyze/live over a
     # partial transcript captured while the meeting was still in progress and
