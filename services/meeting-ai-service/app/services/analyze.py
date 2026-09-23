@@ -353,8 +353,9 @@ class OllamaAnalyzer:
     """Local Ollama LLM backend (Option B, #54). Intended on-prem; the on-host
     boundary is enforced by a deploy-time NetworkPolicy, not by this code (ADR-0034)."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, client: httpx.Client | None = None) -> None:
         self._settings = settings
+        self._client = client
 
     def analyze(self, transcript: str) -> AnalysisDraft:
         return self._analyze(transcript)
@@ -396,7 +397,7 @@ class OllamaAnalyzer:
         }
         try:
             with mai_ollama_stage_seconds.labels(stage="http").time():
-                resp = generate(self._settings, payload)
+                resp = generate(self._settings, payload, client=self._client)
             envelope = resp.json()
             for stage in ("load", "prompt_eval", "eval"):
                 duration = envelope.get(f"{stage}_duration")
@@ -459,7 +460,7 @@ class OllamaAnalyzer:
     @property
     def model_loaded(self) -> bool:
         try:
-            require_model_identity(self._settings)
+            require_model_identity(self._settings, client=self._client)
             return True
         except httpx.HTTPError:
             return False
@@ -707,9 +708,18 @@ class MeetingAnalysisService:
 _service: MeetingAnalysisService | None = None
 
 
-def get_service(settings: Settings) -> MeetingAnalysisService:
+def get_service(
+    settings: Settings, *, http_client: httpx.Client | None = None
+) -> MeetingAnalysisService:
     """Singleton accessor."""
     global _service
-    if _service is None:
-        _service = MeetingAnalysisService(settings)
+    # A supplied client starts a new application lifespan. Never retain a pool
+    # that a previous lifespan has already closed.
+    if _service is None or http_client is not None:
+        analyzer = (
+            OllamaAnalyzer(settings, client=http_client)
+            if settings.backend == "ollama" and http_client is not None
+            else None
+        )
+        _service = MeetingAnalysisService(settings, analyzer=analyzer)
     return _service

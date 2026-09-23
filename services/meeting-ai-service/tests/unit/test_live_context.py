@@ -173,8 +173,8 @@ def test_live_endpoint_threads_cursor_and_keeps_original_citation_offsets(
     transcript = previous + " " + task
     prompts: list[str] = []
 
-    def post(*_args: object, **kwargs: object) -> httpx.Response:
-        payload = kwargs["json"]
+    def post(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
         assert isinstance(payload, dict)
         prompts.append(payload["prompt"])
         # Three recent context sentences, followed by the new assignment.
@@ -194,7 +194,9 @@ def test_live_endpoint_threads_cursor_and_keeps_original_citation_offsets(
             request=httpx.Request("POST", "http://localhost/api/generate"),
         )
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(
+        "app.main.create_ollama_client", lambda: httpx.Client(transport=httpx.MockTransport(post))
+    )
     with TestClient(app) as client:
         response = client.post(
             "/analyze/live",
