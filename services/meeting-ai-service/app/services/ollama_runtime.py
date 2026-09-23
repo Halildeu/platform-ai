@@ -18,8 +18,10 @@ def create_client() -> httpx.Client:
 def require_model_identity(
     settings: Settings, timeout: float = 3.0, *, client: httpx.Client | None = None
 ) -> None:
-    get = client.get if client is not None else httpx.get
-    response = get(f"{settings.ollama_host}/api/tags", timeout=timeout)
+    url = f"{settings.ollama_host}/api/tags"
+    response = (
+        client.get(url, timeout=timeout) if client is not None else httpx.get(url, timeout=timeout)
+    )
     response.raise_for_status()
     try:
         models = response.json()["models"]
@@ -60,11 +62,11 @@ def generate(
 
     if settings.ollama_expected_digest:
         require_model_identity(settings, min(3.0, remaining()), client=client)
-    post = client.post if client is not None else httpx.post
-    response = post(
-        f"{settings.ollama_host}/api/generate",
-        json=payload,
-        timeout=remaining(),
+    url = f"{settings.ollama_host}/api/generate"
+    response = (
+        client.post(url, json=payload, timeout=remaining())
+        if client is not None
+        else httpx.post(url, json=payload, timeout=remaining())
     )
     response.raise_for_status()
     if settings.ollama_expected_digest:

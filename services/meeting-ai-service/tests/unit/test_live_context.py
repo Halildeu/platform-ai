@@ -101,8 +101,8 @@ def test_live_snapshots_reconsider_cancellation_and_never_copy_an_old_action_bli
         ]
     )
 
-    def post(*_args: object, **kwargs: object) -> httpx.Response:
-        payload = kwargs["json"]
+    def post(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
         assert isinstance(payload, dict)
         prompts.append(payload["prompt"])
         return httpx.Response(
@@ -111,7 +111,9 @@ def test_live_snapshots_reconsider_cancellation_and_never_copy_an_old_action_bli
             request=httpx.Request("POST", "http://localhost/api/generate"),
         )
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(
+        "app.main.create_ollama_client", lambda: httpx.Client(transport=httpx.MockTransport(post))
+    )
     service = MeetingAnalysisService(Settings(backend="ollama"))
     text = "Mehmet bütçe raporunu hazırlayacak."
     first = service.analyze(text, live=True)
