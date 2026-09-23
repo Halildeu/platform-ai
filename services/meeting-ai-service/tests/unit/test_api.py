@@ -334,9 +334,7 @@ def test_analyze_live_marks_is_partial_true_and_threads_version() -> None:
         )
     assert resp.status_code == 200
     body = resp.json()
-    # Live-only metadata differentiators — a live and a final call over the
-    # same content produce byte-identical payloads apart from these two fields
-    # plus the X-Analysis-* response headers below.
+    # Live metadata stays compatible when the incremental model path changes.
     assert body["is_partial"] is True
     assert body["version"] == 42
     # Response headers pin the same signal for downstream consumers that read

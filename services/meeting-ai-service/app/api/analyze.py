@@ -231,16 +231,14 @@ async def analyze_endpoint(
 
 
 # Faz 24 live analysis endpoint (Zeynep 2026-07-20 kapsam kararı):
-# `/analyze/live` reuses the same analyzer pipeline, redaction guard, and
-# durable delivery as `/analyze` — the only differences are:
+# `/analyze/live` uses the same redaction and grounding guards as `/analyze`:
 #   1. The response carries `is_partial=True` so downstream consumers
 #      (meeting-service, desktop panel) know a later delivery will supersede.
 #   2. `version` is derived from `body.segment_seq` (defaults to 0 if the
 #      caller did not thread the recorder's sequence).
-# Error map, redaction, LLM stub behaviour, delivery back-pressure and metrics
-# are identical to `/analyze`; a live run and a final run of the same content
-# produce byte-identical `AnalyzeResponse` payloads apart from the two
-# metadata fields above.
+# Ollama uses a dedicated incremental prompt and an optional content-free
+# cursor. Final analysis always considers the full canonical transcript.
+# Live delivery remains ephemeral; durable acceptance uses transcript.ready.
 #
 # Sentinel: the final `/analyze` call at recording end sets `version` from a
 # distinct sentinel value that always compares greater than any live segment
@@ -305,6 +303,8 @@ async def analyze_live_endpoint(
                 meeting_id=body.meeting_id,
                 session_id=body.session_id,
                 segments=segments,
+                live=True,
+                live_cursor=body.previous_live_cursor,
             ),
             persist=_no_persist,
         )
