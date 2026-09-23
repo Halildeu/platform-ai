@@ -9,6 +9,8 @@ param(
     [string]$Backend = "ollama",
     [string]$OllamaHost = "http://localhost:11434",
     [string]$OllamaModel = "llama3.1:8b",
+    # gitops#3807: bounded wait for the Ollama boot task after a reboot.
+    [ValidateRange(0, 3600)][int]$OllamaReadinessTimeoutSec = 600,
     [ValidateSet("test", "stage", "prod")][string]$AppEnv = "stage",
     [string]$RuntimeConfigPath = "",
     # Full path required: the task runs as SYSTEM, whose PATH does not include
@@ -83,11 +85,14 @@ if ($Backend -eq "mock" -and $AppEnv -in @("stage", "prod")) {
 }
 
 if ($Backend -eq "ollama") {
+    # A non-zero exit is not retried by Task Scheduler (only a failed launch is), so
+    # wait for the Ollama boot task instead of failing on the first probe.
     try {
-        Invoke-RestMethod -Uri "$OllamaHost/api/tags" -TimeoutSec 3 | Out-Null
+        Wait-MeetingAiOllamaReadiness -OllamaHost $OllamaHost `
+            -TimeoutSec $OllamaReadinessTimeoutSec
     } catch {
         Add-Content $log "[startup] Ollama readiness check failed; refusing mock fallback"
-        throw "Ollama readiness check failed. Scheduled Task restart policy will retry."
+        throw "Ollama readiness check failed after the bounded startup wait."
     }
 }
 

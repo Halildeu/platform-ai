@@ -879,6 +879,32 @@ class GpuHostUpdateScriptTests(unittest.TestCase):
         self.assertNotIn("falling back to mock", script)
         self.assertIn("refusing mock fallback", script)
 
+    def test_meeting_ai_launcher_waits_boundedly_for_ollama_boot_task(self) -> None:
+        # gitops#3807: after a reboot a single 3 s probe failed while the Ollama boot
+        # task was still discovering the GPU, and Task Scheduler does not retry a
+        # non-zero exit. The launcher must wait a bounded time and still fail closed.
+        launcher = self._read_script("start-meeting-ai.ps1")
+        runtime = self._read_script("meeting-ai-runtime-env.ps1")
+
+        self.assertIn(
+            "[ValidateRange(0, 3600)][int]$OllamaReadinessTimeoutSec = 600", launcher
+        )
+        self.assertNotIn('Invoke-RestMethod -Uri "$OllamaHost/api/tags" -TimeoutSec 3', launcher)
+        self.assertLess(
+            launcher.index("if ($ValidateConfigurationOnly)"),
+            launcher.index("Wait-MeetingAiOllamaReadiness -OllamaHost $OllamaHost"),
+        )
+        self.assertIn("refusing mock fallback", launcher)
+        self.assertNotIn("Scheduled Task restart policy will retry", launcher)
+
+        wait = runtime.split("function Wait-MeetingAiOllamaReadiness", 1)[1]
+        wait = wait.split("\nfunction ", 1)[0]
+        self.assertIn('"/api/tags"', wait)
+        self.assertIn("[DateTime]::UtcNow.AddSeconds($TimeoutSec)", wait)
+        self.assertIn("bounded startup wait", wait)
+        self.assertNotIn("MAI_BACKEND", wait)
+        self.assertNotIn('"mock"', wait)
+
     def test_meeting_ai_model_override_uses_protected_config(self) -> None:
         runtime = self._read_script("meeting-ai-runtime-env.ps1")
         configure = self._read_script("configure-meeting-ai.ps1")

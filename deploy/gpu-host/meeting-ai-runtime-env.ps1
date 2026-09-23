@@ -1318,3 +1318,34 @@ function Write-MeetingAiConfigAtomic {
         }
     }
 }
+
+function Wait-MeetingAiOllamaReadiness {
+    # gitops#3807: after a reboot the Ollama boot task can still be discovering the
+    # GPU when this task starts (measured ~3-21 s on the TEST GPU host). Task
+    # Scheduler's restart-on-failure only covers a failed launch, not a non-zero exit,
+    # so a single probe turned seconds of dependency start-up into an outage
+    # (2026-09-15). Poll for a bounded time and fail closed; never fall back to mock.
+    param(
+        [Parameter(Mandatory = $true)][string]$OllamaHost,
+        [ValidateRange(0, 3600)][int]$TimeoutSec = 600,
+        [ValidateRange(0, 60)][int]$PollSec = 5,
+        [scriptblock]$Probe = $null
+    )
+
+    if ($null -eq $Probe) {
+        $uri = $OllamaHost.TrimEnd("/") + "/api/tags"
+        $Probe = { Invoke-RestMethod -Uri $uri -TimeoutSec 5 | Out-Null }.GetNewClosure()
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    while ($true) {
+        try {
+            & $Probe
+            return
+        } catch {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Ollama readiness check failed after the bounded startup wait."
+            }
+        }
+        Start-Sleep -Seconds $PollSec
+    }
+}
