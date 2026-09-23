@@ -57,10 +57,14 @@ def main() -> int:
         elapsed = time.monotonic() - started
         source = split_sentences(transcript)
         expected_decisions = {source[i].text for i in decisions}
-        expected_actions = {source[i].text for i in actions}
+        optional = ([3] if version >= 3 else []) + ([4] if version >= 4 else [])
+        permitted_decisions = expected_decisions | {source[i].text for i in optional}
+        owners = {0: ("Ayşe", "cuma günü"), 2: ("Mehmet", None), 5: ("Zeynep", None)}
+        expected_actions = {(source[i].text, *owners[i]) for i in actions}
         quality = (
-            set(result.decisions) == expected_decisions
-            and {item.text for item in result.action_items} == expected_actions
+            expected_decisions <= set(result.decisions) <= permitted_decisions
+            and {(item.text, item.owner, item.due_date) for item in result.action_items}
+            == expected_actions
             and result.ungrounded_count == 0
         )
         rows.append(

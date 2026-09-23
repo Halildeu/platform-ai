@@ -36,7 +36,11 @@ def result_cursor(transcript: str, result: AnalyzeResponse) -> LiveAnalysisCurso
     indices = sorted(
         {
             c.source_index
-            for c in [*result.summary_citations, *result.citations]
+            # A summary can mention a cancelled task historically. Carrying
+            # that source forward after its cancellation leaves recent context
+            # could resurrect the task, so only active decision/action evidence
+            # belongs in the incremental state. Live summaries use recent speech.
+            for c in result.citations
             if c.grounded and c.source_index >= 0
         }
     )

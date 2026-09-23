@@ -9,10 +9,10 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import app
-from app.models.schemas import LiveAnalysisCursor
+from app.models.schemas import AnalyzeResponse, Citation, LiveAnalysisCursor
 from app.services.analyze import MeetingAnalysisService
 from app.services.citation import split_sentences
-from app.services.live_context import live_menu
+from app.services.live_context import live_menu, result_cursor
 
 
 def cursor(text: str, active: list[int]) -> LiveAnalysisCursor:
@@ -54,6 +54,36 @@ def test_expanding_last_sentence_is_always_reconsidered() -> None:
     extended = text + " cuma günü hazırlayacak."
     selected = live_menu(extended, split_sentences(extended), cursor(text, [0]))
     assert selected[-1].text.endswith("cuma günü hazırlayacak.")
+
+
+def test_historical_summary_does_not_resurrect_a_cancelled_task() -> None:
+    text = "Mehmet raporu hazırlayacak. Mehmet için rapor görevi iptal edildi."
+    summary_evidence = Citation(
+        claim="Mehmet raporu hazırlayacak.",
+        source_index=0,
+        similarity=1,
+        grounded=True,
+        status="PASSED",
+    )
+    result = AnalyzeResponse(
+        summary=summary_evidence.claim,
+        summary_citations=[summary_evidence],
+        redacted=True,
+        redaction_count=0,
+        backend="mock",
+        model="mock",
+        elapsed_ms=0,
+    )
+    previous = result_cursor(text, result)
+    assert previous.active_indices == []
+    extended = (
+        text + " " + " ".join(f"Ekip {i} numaralı gündem maddesini görüştü." for i in range(5))
+    )
+    # Once this text has been processed, unrelated later speech must not
+    # reintroduce the old task merely because it appeared in a summary.
+    checkpoint = result_cursor(extended, result)
+    later = extended + " Katılımcılar sunum içeriğini görüştü."
+    assert all(s.index != 0 for s in live_menu(later, split_sentences(later), checkpoint))
 
 
 def test_live_snapshots_reconsider_cancellation_and_never_copy_an_old_action_blindly(

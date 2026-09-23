@@ -10,6 +10,9 @@ reconsiders those active claims, the last three preceding sentences and every ne
 sentence. Cancellation, completion and reassignment must remove superseded work.
 The model must select each claim again; previous output is never blindly copied.
 All citations and owner/date checks still use the full redacted source.
+Historical summary citations are not carried as active claims: a summary may
+mention cancelled work. Live summaries therefore use the active claims and recent
+speech; the complete meeting summary is still produced by final analysis.
 
 Invalid hints, transcript corrections and rolling-window truncation cause a full
 source fallback. The gateway keeps the hint only in its existing meeting-local
@@ -30,8 +33,10 @@ qualified model environment and `PYTHONPATH=.`:
 python scripts/live_incremental_probe.py --max-update-seconds 5
 ```
 
-The probe makes five synthetic live updates and requires exact decision/action
-sets and a per-call five-second model budget, including the first call. Output
+The probe makes five synthetic live updates and requires the expected active task
+sets with grounded owners/dates and the adopted policy decision. Explicit task
+cancellation decisions are optional. A per-call five-second model budget applies,
+including the first call. Output
 contains only metadata. A failure remains a failure; do not loosen the budget to
 claim acceptance. This is a proposed engineering gate, not a measured guarantee.
 It does not measure transport, speech recognition or phone rendering.
