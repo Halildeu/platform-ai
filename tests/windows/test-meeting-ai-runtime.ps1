@@ -1503,6 +1503,28 @@ Clear-MeetingAiManagedProcessEnvironment
         MAI_OLLAMA_MODEL = "library/qwen2.5:14b-instruct-q4_K_M"
         MAI_OLLAMA_EXPECTED_DIGEST = $testDigest
     }
+    # gitops#3807: bounded Ollama readiness wait after a reboot; fail closed, no mock.
+    $script:ollamaProbeCalls = 0
+    Wait-MeetingAiOllamaReadiness -OllamaHost "http://127.0.0.1:9" -TimeoutSec 30 `
+        -PollSec 0 -Probe {
+            $script:ollamaProbeCalls++
+            if ($script:ollamaProbeCalls -lt 3) { throw "dependency not ready" }
+        }
+    Assert-True ($script:ollamaProbeCalls -eq 3) `
+        "Ollama readiness must keep probing until the dependency answers."
+    $script:ollamaProbeCalls = 0
+    Assert-ThrowsLike {
+        Wait-MeetingAiOllamaReadiness -OllamaHost "http://127.0.0.1:9" -TimeoutSec 1 `
+            -PollSec 0 -Probe {
+                $script:ollamaProbeCalls++
+                throw "dependency not ready"
+            }
+    } "bounded startup wait"
+    Assert-True ($script:ollamaProbeCalls -ge 2) `
+        "The bounded Ollama wait must probe more than once before failing closed."
+    Assert-ThrowsLike {
+        Wait-MeetingAiOllamaReadiness -OllamaHost "http://127.0.0.1:9" -TimeoutSec 0 -PollSec 0
+    } "bounded startup wait"
     Write-Host "meeting-ai Windows runtime contract: PASS"
 } finally {
     Clear-MeetingAiManagedProcessEnvironment
