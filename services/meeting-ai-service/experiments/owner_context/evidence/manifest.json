@@ -1,0 +1,209 @@
+{
+  "purpose": "negative synthetic experiment evidence; not acceptance",
+  "files": {
+    "catalog-real-model.json": {
+      "originalSha256": "24697b628e40014febfbd4dd28f628b4430457da1c164d0c35ced03ff7075591",
+      "exportSha256": "7a3a1e2712ab475585455d992b234ad170d498637898a25989298b0662462e0f"
+    },
+    "punctuation-real-model.json": {
+      "originalSha256": "b10affdc2a33905e17a2d91991100c7be986bd0ecd1b79a2895b5cad70b4b9cc",
+      "exportSha256": "42c047f5290014a080ee1acb19575cbffc881cff97892a13e565156e69ed2ff3"
+    },
+    "bert-boundaries.json": {
+      "originalSha256": "ad2486b2512259a128c10a594d882e32763cabf1fd85b7ee17448be9e062574d",
+      "exportSha256": "97258aa219d5526018f98b587a8b4d1a6adc601100b682cc367074f83d47aef7"
+    }
+  },
+  "unitCoverageTotals": {
+    "covered_lines": 330,
+    "num_statements": 342,
+    "percent_covered": 95.81589958158996,
+    "percent_covered_display": "96",
+    "missing_lines": 12,
+    "excluded_lines": 0,
+    "percent_statements_covered": 96.49122807017544,
+    "percent_statements_covered_display": "96",
+    "num_branches": 136,
+    "num_partial_branches": 8,
+    "covered_branches": 128,
+    "missing_branches": 8,
+    "percent_branches_covered": 94.11764705882354,
+    "percent_branches_covered_display": "94"
+  },
+  "postReviewIndependentGoldRegrade": [
+    {
+      "file": "punctuation-real-model.json",
+      "case": "normal",
+      "mode": "manual-upper-bound",
+      "expectedPositions": [
+        189
+      ],
+      "actualPositions": [
+        189
+      ],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "punctuation-real-model.json",
+      "case": "normal",
+      "mode": "classifier",
+      "expectedPositions": [
+        189
+      ],
+      "actualPositions": [
+        189
+      ],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "punctuation-real-model.json",
+      "case": "zeynep-separated",
+      "mode": "classifier",
+      "expectedPositions": [
+        6
+      ],
+      "actualPositions": [
+        6
+      ],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "punctuation-real-model.json",
+      "case": "vocative-first-person",
+      "mode": "classifier",
+      "expectedPositions": [],
+      "actualPositions": [
+        6
+      ],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "normal",
+      "mode": null,
+      "expectedPositions": [
+        189
+      ],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "paused",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "zeynep-separated",
+      "mode": null,
+      "expectedPositions": [
+        6
+      ],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "surname-separated",
+      "mode": null,
+      "expectedPositions": [
+        13
+      ],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "non-name-fragment",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "explicit-other-owner",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "question-after-name",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "long-pause",
+      "mode": null,
+      "expectedPositions": [
+        6
+      ],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "explicit-owner",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "vocative-first-person",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "unrelated-name",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "different-speaker",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "cancelled-task",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "reassigned-task",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    },
+    {
+      "file": "bert-boundaries.json",
+      "case": "standalone-answer",
+      "mode": null,
+      "expectedPositions": [],
+      "actualPositions": [],
+      "sameOutcomeWithIndependentGold": true
+    }
+  ]
+}

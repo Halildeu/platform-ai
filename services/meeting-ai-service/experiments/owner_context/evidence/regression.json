@@ -1,0 +1,15 @@
+{
+  "stage": "regression",
+  "pytestExit": 0,
+  "guardSelfCheck": [
+    "socket.getaddrinfo"
+  ],
+  "blockedIoDuringTests": [],
+  "modelInvoked": false,
+  "deployed": false,
+  "excludedTests": [
+    "tests/unit/test_live_context.py::test_live_endpoint_threads_cursor_and_keeps_original_citation_offsets"
+  ],
+  "exclusionReason": "Windows asyncio socketpair conflicts with strict no-socket guard",
+  "scope": "offline synthetic controlled-response experiment; no live quality claim"
+}
