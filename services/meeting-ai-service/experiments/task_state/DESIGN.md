@@ -1,7 +1,8 @@
 # Task updates: demonstrated boundaries and proposed replacement
 
-Status: **design/evidence only; not integrated or qualified**. No STT, model,
-prompt, API, runtime, mobile APK or production behavior changes in this branch.
+Status: **offline candidate prototype/evidence; not integrated or qualified**.
+No STT, deployed model, production prompt, API, runtime, mobile APK or production
+behavior changes in this branch. The separate experimental prompt is not shipped.
 Source baseline: `732da87e627a6767eab3d28f014b016f7bcea509`. The application code
 matches the earlier punctuation evidence branch `5b110ad`; its failed experiments
 remain on that branch and must not be promoted as fixes.
@@ -115,7 +116,7 @@ No migration, model switch or rollout is authorized by passing the boundary
 tests in this folder. Their result is that the current representation is not
 sufficient for acceptance.
 
-## Executed checks, 28 September
+## Earlier boundary checks, 28 September (before executable prototype)
 
 Four boundary tests plus 31 existing live-context/extractive tests pass on local
 Python 3.12.10 / pytest 8.3.3 / Pydantic 2.9.2 / pydantic-settings 2.5.2 /
@@ -126,8 +127,8 @@ the existing exact-surface fallback was used. No dependency was installed.
 
 Initial Python 3.10.11 ran the four boundary checks, but could not collect the
 existing API tests because that interpreter lacks `datetime.UTC`; the combined
-run above used the already installed supported Python 3.12 interpreter. Model
-inference and phone acceptance were not run; the semantic acceptance remains
+run above used the already installed supported Python 3.12 interpreter. At that
+stage model inference and phone acceptance were not run; semantic acceptance remained
 FAILED/UNQUALIFIED despite these successful limitation/regression checks.
 
 From the service directory, with `PYTHONPATH=.` and Python 3.12:
@@ -137,3 +138,72 @@ python -m pytest experiments/task_state/test_known_limits.py tests/unit/test_liv
 python -m ruff check experiments/task_state/test_known_limits.py
 python -m black --check experiments/task_state/test_known_limits.py
 ```
+
+## Executable candidate and preliminary model failure, 28 September
+
+`prototype.py` now executes source-evidenced operations in an **offline candidate
+ledger only**. Original source ranges and per-unit/quote hashes are retained.
+It applies explicit task patches, keeps cancellations, treats omitted output as
+no change, rejects source-revision drift and commits a validated batch atomically.
+Same-source reassignment and rescheduling can update disjoint fields, including
+across batches; conflicting writes and status changes at that anchor are rejected.
+
+Independent review reproduced three flaws before repair: historical CREATE with
+a different description quote could bypass a tombstone, a word/number fragment
+could become metadata, and same-anchor disjoint changes were rejected. Four new
+tests failed before the fixes and passed afterward. The review channel accepted
+the repaired candidate for isolated research, not product integration.
+
+Current offline validation: **70 tests pass** = 25 candidate reducer + 10 probe
+safety/metric + 4 known-boundary + 31 existing application regression tests.
+Selected branch/line coverage is 89% for the candidate reducer, 72% for the probe,
+82% combined. Strict mypy on the prototype passes. The offline experiment tests
+are included explicitly in service CI; CI never invokes the model probe.
+
+The full eight-to-seven test uses **manually supplied operations**, not inferred
+ones. It verifies retention, Ayşe owning two tasks, Can's tombstone and Zeynep's
+date retained with time 11. It does not establish that a real model can produce
+those operations. Calendar derivation, canonical replay integration, decisions,
+summary, endpoint wiring and phone acceptance remain outside this candidate.
+
+`local-probe-20260928.json` is a **pre-hardening preliminary failure**, bound to
+the initial source hashes in that report, not the current code's acceptance run.
+Six local Ollama calls yielded three 60-second read timeouts, two invalid-quote
+proposals, and one evaluated proposal with a metadata/status mismatch; three
+dependent stages were skipped. The eight-task initial stage timed out, so this
+run says nothing positive about the 8→7 update. The aggregate mismatch does not
+identify which metadata field was wrong; newer probe code reports separate
+field mismatch counts for future runs. No raw response was persisted.
+
+Model was local `llama3.1:8b`, digest
+`46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e`,
+Ollama 0.34.4, unchanged before/after. Read-only `/api/ps` reported `size_vram=0`
+and context 8192: **CPU execution, not TEST GPU performance**. The five-second
+comparison is a local observation, not a TEST acceptance measurement. No model
+was installed, pulled, switched in a service, or sent real meeting data.
+
+The preliminary runner checked model fingerprints but not end-of-run code hashes
+and continued other cases after a timeout. The current harness now fails on code
+drift and stops further inference after a transport timeout, because a client
+timeout does not prove the server's work stopped. Those changes have mocked
+offline tests; no second model run was performed.
+
+Remaining explicit limitations:
+
+- Exact quote/hash checks prove source integrity, not target/owner entailment.
+  Paraphrased duplicate tasks still require qualified semantic reconciliation.
+- Historical new CREATE is rejected to prevent old assignments bypassing a
+  cancellation. A previously missed task therefore requires explicit complete
+  replay/reconciliation; this is not a silent recall-loss solution.
+- Unresolved changes accumulate within a revision; clearing a later-resolved
+  ambiguity also requires replay. The prototype does not implement that workflow.
+- Relative dates remain source phrases (`aynı gün`), never verified calendar
+  dates. Reconnect chronology and revision inputs must come from authoritative
+  canonical source integration, which is not built here.
+- The model's ability to generate complete correct operations, including long
+  context and more than ten tasks, remains unqualified. Next semantic work must
+  compare relation extraction approaches/models under a verified runtime and
+  context budget instead of promoting this failed local experiment.
+
+The missing Saved result requires the separate incomplete-recording lifecycle
+repair described above; these operations cannot create a saved meeting result.
