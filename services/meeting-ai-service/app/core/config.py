@@ -79,7 +79,8 @@ class Settings(BaseSettings):
       MAI_OLLAMA_HOST       http://localhost:11434 (Option B)
       MAI_OLLAMA_MODEL      llama3.1:8b (selectable: e.g. qwen2.5:7b-instruct)
       MAI_OLLAMA_TEMPERATURE 0.0 (deterministic extraction; NOT chat 0.8)
-      MAI_OLLAMA_NUM_CTX    8192 (avoid 2048-default transcript truncation)
+      MAI_OLLAMA_NUM_CTX    8192 (context capacity; does not itself forbid truncation)
+      MAI_OLLAMA_SOURCE_INTEGRITY False (qualified complete-source transport)
       MAI_OLLAMA_TOP_P      0.9
       MAI_OLLAMA_SEED       (unset = random; set int for reproducible eval)
       MAI_OLLAMA_KEEP_ALIVE 5m (unload idle model → free shared GPU VRAM)
@@ -108,8 +109,8 @@ class Settings(BaseSettings):
     # Defaults target DETERMINISTIC STRUCTURED EXTRACTION, not chat:
     #   - temperature 0      → greedy, repeatable (Ollama default 0.8 made the eval
     #                          swing run-to-run: 95.8%→81.2%, ADR-0034 variance note).
-    #   - num_ctx 8192       → meeting transcripts are NOT silently truncated to
-    #                          Ollama's 2048-token default (the real recall killer).
+    #   - num_ctx 8192       → larger context capacity. Forbidding truncation and
+    #                          context shifting requires qualified source-integrity mode.
     #   - seed (optional)    → set for reproducible eval; multi-seed measures variance.
     #   - keep_alive         → unload after idle so the 8 GB GPU is freed for the
     #                          STT/diarization/emotion models that share it.
@@ -119,6 +120,9 @@ class Settings(BaseSettings):
     ollama_seed: int | None = Field(default=None)
     ollama_keep_alive: str = Field(default="5m")
     ollama_think: bool | None = Field(default=None)
+    # Opt-in only after the exact runtime/model transport profile is qualified.
+    # Keep all source context and forbid silent input/output context truncation.
+    ollama_source_integrity: bool = Field(default=False)
 
     # #247 — durable meeting-service analysis-result delivery (default-off).
     ingestion_enabled: bool = Field(default=False)
@@ -248,6 +252,14 @@ class Settings(BaseSettings):
         le=60.0,
     )
 
+    @model_validator(mode="after")
+    def require_source_integrity_pin(self) -> Settings:
+        if self.ollama_source_integrity and (
+            self.backend != "ollama" or not self.ollama_expected_digest
+        ):
+            raise ValueError("Source integrity requires Ollama and an explicit model digest")
+        return self
+
     @property
     def transcript_service_permissions(self) -> list[str]:
         return [p.strip() for p in self.transcript_service_scope.split(",") if p.strip()]
@@ -291,7 +303,9 @@ class Settings(BaseSettings):
     @property
     def effective_prompt_version(self) -> str:
         """Stable producer provenance when no explicit prompt version is configured."""
-        return self.prompt_version or f"{self.backend}-v1"
+        return self.prompt_version or (
+            "ollama-complete-source-v1" if self.ollama_source_integrity else f"{self.backend}-v1"
+        )
 
     def ingestion_encryption_keys(self) -> dict[str, bytes]:
         """Decode the secret AES-256-GCM keyring without exposing it in repr/logs."""
@@ -520,11 +534,7 @@ def get_settings() -> Settings:
         # is therefore opt-in and limited to an explicit dev/test process.
         process_env = os.environ.get("MAI_APP_ENV", "").lower()
         local_dotenv_opt_in = os.environ.get("PLATFORM_AI_LOAD_LOCAL_DOTENV") == "1"
-        env_file = (
-            ".env"
-            if local_dotenv_opt_in and process_env in {"dev", "test"}
-            else None
-        )
+        env_file = ".env" if local_dotenv_opt_in and process_env in {"dev", "test"} else None
         # `_env_file` is a documented BaseSettings runtime parameter, but the
         # generated subclass constructor exposed to mypy omits it.
         _settings = Settings(_env_file=env_file)  # type: ignore[call-arg]

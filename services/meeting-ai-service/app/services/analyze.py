@@ -51,6 +51,7 @@ from app.services.extractive import (
 )
 from app.services.live_context import live_menu, result_cursor
 from app.services.ollama_runtime import generate, require_model_identity
+from app.services.ollama_source_integrity import require_source_runtime
 from app.services.redact import assert_no_residual_pii, redact_pii
 
 
@@ -349,7 +350,7 @@ below is not an example answer and supplies no example sentence numbers:
 
 _OLLAMA_LIVE_PROMPT = """\
 Update a LIVE meeting's decisions and outstanding tasks from these ordered source sentences.
-The menu includes earlier active claims, recent context and new speech. Re-evaluate ALL
+{menu_description} Re-evaluate ALL
 listed claims: omit decisions/tasks later cancelled, replaced, rejected or completed.
 Do not keep an earlier assignment when later speech changes it.
 
@@ -401,8 +402,19 @@ class OllamaAnalyzer:
         # `split_sentences` with `citation.py`; a second splitter would make
         # index *i* mean different text on the two sides.
         sentences = split_sentences(transcript)
-        menu = selectable_sentences(live_menu(transcript, sentences, cursor) if live else sentences)
-        use_selection = bool(menu)
+        complete_source = self._settings.ollama_source_integrity
+        # A previous selection is not a recall oracle: excluded old tasks and
+        # their later cancellations must remain visible together. Include short
+        # context too (e.g. a standalone name or numeric continuation); the normal
+        # verifier still decides which selected claims are safe to publish.
+        menu = (
+            sentences
+            if complete_source
+            else selectable_sentences(
+                live_menu(transcript, sentences, cursor) if live else sentences
+            )
+        )
+        use_selection = bool(selectable_sentences(menu))
         if not use_selection:
             # No claim can pass grounding without selectable evidence. This
             # applies to final snapshots too: a free-text fallback here could
@@ -411,15 +423,19 @@ class OllamaAnalyzer:
         prompt = (_OLLAMA_LIVE_PROMPT if live else _OLLAMA_EXTRACTIVE_PROMPT).format(
             max_summary=MAX_SUMMARY_SENTENCES,
             numbered=number_transcript(menu),
+            menu_description=(
+                "The menu includes all source sentences in their original order."
+                if complete_source
+                else "The menu includes earlier active claims, recent context and new speech."
+            ),
         )
         payload = {
             "model": self._settings.ollama_model,
             "prompt": prompt,
             "stream": False,
             "format": selection_schema(len(menu)),
-            # Deterministic extraction + no transcript truncation (see config: the
-            # 2048-default num_ctx silently cut long meetings; 0.8-default temperature
-            # made the eval non-reproducible). One source of truth in Settings.
+            # A larger num_ctx alone does not prevent truncation. Qualified
+            # source-integrity mode additionally forbids truncation and shifting.
             "options": self._settings.ollama_options(),
             "keep_alive": self._settings.ollama_keep_alive,
         }
@@ -489,6 +505,8 @@ class OllamaAnalyzer:
     def model_loaded(self) -> bool:
         try:
             require_model_identity(self._settings, client=self._client)
+            if self._settings.ollama_source_integrity:
+                require_source_runtime(self._settings, lambda: 3.0, client=self._client)
             return True
         except httpx.HTTPError:
             return False

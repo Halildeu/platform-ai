@@ -8,6 +8,10 @@ from typing import Any
 import httpx
 
 from app.core.config import Settings
+from app.services.ollama_source_integrity import (
+    require_complete_generation,
+    require_source_runtime,
+)
 
 
 def create_client() -> httpx.Client:
@@ -62,6 +66,11 @@ def generate(
 
     if settings.ollama_expected_digest:
         require_model_identity(settings, min(3.0, remaining()), client=client)
+    if settings.ollama_source_integrity:
+        require_source_runtime(settings, remaining, client=client)
+        if payload.get("model") != settings.ollama_model or payload.get("stream") is not False:
+            raise httpx.RequestError("Ollama source integrity request invalid")
+        payload = {**payload, "truncate": False, "shift": False}
     url = f"{settings.ollama_host}/api/generate"
     response = (
         client.post(url, json=payload, timeout=remaining())
@@ -69,6 +78,11 @@ def generate(
         else httpx.post(url, json=payload, timeout=remaining())
     )
     response.raise_for_status()
+    if settings.ollama_source_integrity:
+        require_complete_generation(settings, response)
+        require_source_runtime(settings, remaining, client=client)
     if settings.ollama_expected_digest:
         require_model_identity(settings, min(3.0, remaining()), client=client)
+    if settings.ollama_source_integrity:
+        remaining()
     return response
