@@ -365,6 +365,47 @@ def test_ready_event_preserves_only_grounded_due_phrase_in_encrypted_outbox(
         assert message.payload["rejected_claims"][0]["kind"] == "action_due_date"
 
 
+def test_incomplete_snapshot_is_analyzed_without_making_model_closure_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = "Bütçe onaylandı."
+    monkeypatch.setattr(sys.modules[__name__], "RAW_TRANSCRIPT", source)
+
+    class IncompleteTranscriptClient(FakeTranscriptClient):
+        async def fetch(self, event):  # type: ignore[no-untyped-def]
+            snapshot = await super().fetch(event)
+            return CanonicalTranscriptSnapshot.model_validate(
+                {
+                    **snapshot.model_dump(),
+                    "recording_outcome": "INCOMPLETE",
+                    "recording_incomplete_reason": "CLOSURE_UNCONFIRMED",
+                }
+            )
+
+    class DraftAnalyzer:
+        model_loaded = True
+
+        def analyze(self, transcript: str) -> AnalysisDraft:
+            assert transcript == source
+            return AnalysisDraft(summary=source)
+
+    async def scenario():  # type: ignore[no-untyped-def]
+        runtime, delivery, redis, _ = _runtime(
+            tmp_path, analyzer=DraftAnalyzer(), transcript_client=IncompleteTranscriptClient()
+        )
+        await runtime.process_message("1-0", _fields())
+        assert len(redis.acked) == 1
+        assert delivery.store is not None
+        return delivery.store.claim_next(owner="assertion", lease_sec=10.0)
+
+    message = asyncio.run(scenario())
+    assert message is not None
+    assert message.payload["summary"] == source
+    assert message.payload["transcript_session_id"] == SESSION
+    # Meeting-service receives closure authority from the separate signed capability.
+    assert not any("recording" in key or "capability" in key for key in message.payload)
+
+
 def test_upgrade_replay_outboxes_with_stored_analysis_run_id(tmp_path: Path) -> None:
     async def scenario():  # type: ignore[no-untyped-def]
         runtime, delivery, _, _ = _runtime(tmp_path)
