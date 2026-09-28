@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import httpx
@@ -30,13 +30,14 @@ from app.models.schemas import (
     RejectedClaim,
 )
 from app.services.citation import Citation as GroundedCitation
-from app.services.citation import Sentence as GroundedSentence
 from app.services.citation import (
+    CitationStatus,
     due_date_supported_by_source,
     ground_claim,
     owner_supported_by_source,
     split_sentences,
 )
+from app.services.citation import Sentence as GroundedSentence
 from app.services.extractive import (
     MAX_DECISION_SENTENCES,
     MAX_SUMMARY_SENTENCES,
@@ -106,7 +107,34 @@ _ACTION_CUES = (
     "todo",
     "to-do",
 )
-_SUMMARY_GROUNDING_THRESHOLD = 0.65
+_ANALYSIS_GROUNDING_THRESHOLD = 0.65
+# A numeric continuation has no standalone task/policy subject. Keep it in the
+# model input: it can be evidence for a later contextual update. Only reject its
+# publication as a complete analysis claim. General Ask/citation stays unchanged.
+_NUMERIC_CONTINUATION = re.compile(
+    r"(?:saat\s+)?\d+(?:[.:,]\d+)?\s+"
+    r"(?:olacak|olsun|olabilir|olmasın|olmayacak|değil)\s*[.!?…]*",
+    re.IGNORECASE,
+)
+
+
+def _ground_analysis_claim(claim: str, sentences: list[GroundedSentence]) -> GroundedCitation:
+    verdict = ground_claim(claim, sentences, threshold=_ANALYSIS_GROUNDING_THRESHOLD)
+    if verdict.grounded and _NUMERIC_CONTINUATION.fullmatch(claim.strip()):
+        return replace(
+            verdict,
+            grounded=False,
+            status=CitationStatus.LOW_CONFIDENCE,
+            reason="context_dependent_numeric_fragment",
+            source_index=-1,
+            source_text="",
+            start_sec=None,
+            source_char_start=-1,
+            source_char_end=-1,
+            source_hash="",
+            quote_hash="",
+        )
+    return verdict
 
 
 def _sentences(text: str) -> list[str]:
@@ -581,7 +609,7 @@ def _ground_summary(
     citations: list[Citation] = []
     rejected: list[RejectedClaim] = []
     for claim in claims:
-        verdict = ground_claim(claim, sentences, threshold=_SUMMARY_GROUNDING_THRESHOLD)
+        verdict = _ground_analysis_claim(claim, sentences)
         if verdict.grounded:
             kept.append(claim)
             citations.append(_to_schema_citation(verdict))
@@ -652,7 +680,7 @@ class MeetingAnalysisService:
         for decision in draft.decisions:
             if not decision.strip():
                 continue
-            verdict = ground_claim(decision, sentences)
+            verdict = _ground_analysis_claim(decision, sentences)
             if verdict.grounded:
                 kept_decisions.append(decision)
                 citations.append(_to_schema_citation(verdict))
@@ -662,7 +690,7 @@ class MeetingAnalysisService:
         for action in draft.action_items:
             if not action.text.strip():
                 continue
-            verdict = ground_claim(action.text, sentences)
+            verdict = _ground_analysis_claim(action.text, sentences)
             if verdict.grounded:
                 grounded_action, metadata_rejections = _with_grounded_action_metadata(
                     action, verdict
