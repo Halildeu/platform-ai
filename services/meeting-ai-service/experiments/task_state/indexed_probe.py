@@ -27,6 +27,7 @@ from experiments.task_state.prototype import CandidateLedger, InvalidProposalErr
 MODELS = {
     "llama3.1:8b": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e",
     "qwen2.5:3b-instruct": "357c53fb659c5076de1d65ccb0b397446227b71a42be9d1603d46168015c9e4b",
+    "qwen3.5:4b": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
 }
 OPTIONS = {"num_ctx": 8192, "temperature": 0.0, "top_p": 0.9, "num_predict": 2048, "seed": 42}
 HERE = Path(__file__).resolve().parent
@@ -57,15 +58,26 @@ def code_hashes() -> dict:
     }
 
 
-def generate(client: httpx.Client, model: str, prompt: str) -> dict:
+def generate(
+    client: httpx.Client,
+    model: str,
+    prompt: str,
+    *,
+    schema: dict | None = None,
+    options: dict | None = None,
+    deadline_seconds: int = 180,
+    think: bool | None = None,
+) -> dict:
     payload = {
         "model": model,
         "prompt": prompt,
-        "format": IndexedProposal.model_json_schema(),
+        "format": schema if schema is not None else IndexedProposal.model_json_schema(),
         "stream": True,
-        "options": OPTIONS,
+        "options": options if options is not None else OPTIONS,
         "keep_alive": "2m",
     }
+    if think is not None:
+        payload["think"] = think
     encoded = json.dumps(payload, ensure_ascii=False).encode()
     if len(encoded) > 32000:
         raise InvalidProposalError("probe_context_budget")
@@ -77,7 +89,7 @@ def generate(client: httpx.Client, model: str, prompt: str) -> dict:
     ) as response:
         response.raise_for_status()
         for line in response.iter_lines():
-            if time.monotonic() - started > 180:
+            if time.monotonic() - started > deadline_seconds:
                 raise InvalidProposalError("generation_deadline_unobserved")
             total_bytes += len(line.encode())
             if total_bytes > 524288:
@@ -91,6 +103,8 @@ def generate(client: httpx.Client, model: str, prompt: str) -> dict:
             if chunk.get("done") is True:
                 if chunk.get("done_reason") == "length":
                     raise InvalidProposalError("generation_incomplete")
+                if chunk.get("done_reason") != "stop":
+                    raise InvalidProposalError("generation_stop_unverified")
                 chunk["response"] = "".join(accumulated)
                 return chunk
     raise InvalidProposalError("generation_end_unobserved")

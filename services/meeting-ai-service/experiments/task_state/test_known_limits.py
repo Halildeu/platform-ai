@@ -24,7 +24,9 @@ def test_a_grounded_quote_does_not_prove_a_complete_action_or_decision() -> None
     assert materialize_action_items(
         [{"sentence": 1, "owner": None, "due_date": "11 olacak"}], source
     ) == [("11 olacak.", None, "11 olacak")]
-    # Copying a source is allowed even though it identifies no task or decision.
+    # Quotation/materialization still succeeds, but the final analysis-specific
+    # completeness guard now withholds it. See test_analysis_fragment_guard.py.
+    # This alone does not attach the new time to its existing task.
     assert not owner_supported_by_source("Zeynep", source[0].text)
 
 

@@ -44,6 +44,7 @@ def test_stream_waits_for_done_and_materializes_response_without_logging(capsys)
     [
         ([], "generation_end_unobserved"),
         ([{"model": MODEL, "done": True, "done_reason": "length"}], "generation_incomplete"),
+        ([{"model": MODEL, "done": True}], "generation_stop_unverified"),
         ([{"model": "other", "done": True}], "response_model_mismatch"),
         ([{"model": MODEL, "response": "x" * 524289}], "model_output_budget"),
     ],

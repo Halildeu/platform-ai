@@ -1,11 +1,14 @@
 # Task updates: demonstrated boundaries and proposed replacement
 
-Status: **offline candidate prototype/evidence; not integrated or qualified**.
-No STT, deployed model, production prompt, API, runtime, mobile APK or production
-behavior changes in this branch. The separate experimental prompt is not shipped.
+Status: **offline task-state candidate; not integrated or qualified**.
+A separate, narrow application change now withholds standalone numeric copular
+fragments such as `11 olacak.` from analysis publication. It neither resolves a
+task reference nor updates the previous deadline. The source, model input, general
+citation/Ask behavior and task-state integration remain unchanged. No deployed
+model, STT, mobile APK or server changes were made for this local repair.
 Source baseline: `732da87e627a6767eab3d28f014b016f7bcea509`. The application code
-matches the earlier punctuation evidence branch `5b110ad`; its failed experiments
-remain on that branch and must not be promoted as fixes.
+previously matched the punctuation evidence branch `5b110ad`; those failed
+experiments must not be promoted as fixes.
 
 ## Three different evidence sets
 
@@ -20,13 +23,16 @@ six meaningful tasks plus `11 olacak.`; the year is 2020 instead of the referenc
 whether the source was already misrecognized. The phone technical report ends
 near capture startup; there is no complete stop/reconnect trace.
 
-`test_known_limits.py` independently reproduces four properties of current code
+`test_known_limits.py` independently reproduces four representation properties
 without an LLM or phone. A passing test confirms a LIMITATION, not correct meeting
 analysis. Model = NONE. It demonstrates selection-dependent source exclusion
-during append-only updates, acceptance of a source-grounded orphan, impossibility of the
+during append-only updates, quotation grounding of an orphan, impossibility of the
 correct cross-sentence deadline update, and the ten-action output ceiling.
 Prefix changes or an invalid cursor can restore the full menu; exclusion is not
 irreversible across every possible request.
+The final analysis-specific completeness guard now withholds a numeric orphan
+even when its quotation passes. That narrower repair is tested separately in
+`tests/unit/test_analysis_fragment_guard.py`; the raw source is retained as context.
 
 ## Why another punctuation patch is insufficient
 
@@ -249,3 +255,114 @@ production prompt, service model, recording path or APK changes in this delta.
 Relation extraction, chronology across reconnect, normalized dates, decisions,
 summary and real-device acceptance remain unqualified. A qualified relation
 extractor/model and an observed evaluation runtime are required before integration.
+
+## Local publication repair and alternative evaluation, 28 September
+
+The application-specific grounding guard withholds standalone numeric continuations
+from actions, decisions and summary. `11 olacak.` remains in original source and
+model context, but is rejected with `context_dependent_numeric_fragment` instead
+of appearing as a complete task. Generic citation/Ask, offsets and existing API
+contracts remain unchanged. This does **not** resolve the target, update a deadline,
+prevent omitted tasks or repair recording finalization. There is no server rollout.
+
+The separate compact candidate maps short JSON fields into the unchanged indexed
+evidence/reducer pipeline. Its generated JSON schema enforces operation-specific
+shapes, including required work for creates and date/time for rescheduling. Exact
+spans and valid shapes still do not establish correct task relationships.
+
+Three bounded local runs are preserved as failed evidence:
+
+| Report | First reference case result | Local CPU seconds |
+| --- | --- | ---: |
+| `local-qwen-compact-20260928.json` | Qwen2.5:3B output-length limit; no relation evaluation | 94.766 |
+| `local-qwen35-compact-20260928.json` | Qwen3.5:4B completed, but violated create contract | 63.125 |
+| `local-qwen35-compact-shaped-20260928.json` | Operation-shaped schema; no observed completion by deadline | 120.063 |
+
+The last run is the single reviewed retry after fixing the generated schema.
+Its prompt, frozen expected results and reducer were unchanged. Every run stopped
+at its first failure; no later case or partial candidate state was accepted. A
+client deadline does not prove server-side generation stopped. No further call
+was queued. Each report identifies its historical code hashes; only the last
+report describes the final adapter. None qualifies extraction accuracy or speed.
+
+Qwen3.5:4B was downloaded from the official Ollama registry for this CPU-only
+synthetic experiment. Manifest/model digest is
+`2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd`.
+The existing local Ollama 0.34.4 and deployed defaults were unchanged. Context was
+8192, output cap 1024, temperature 0, seed 42, `think=false`, `num_gpu=0`.
+This is not TEST GPU performance and no real meeting content went to external
+inference. Model/code fingerprints stayed stable within the runs.
+
+Final offline verification: **626 unit and experiment tests pass** on Python
+3.12.10 using `-X utf8`; analysis module coverage 97%, compact decoder 100%,
+compact probe 75% (combined scoped branch/line coverage 92%). Ruff, Black and
+strict mypy for the changed application module and adapter pass. The 27 new
+publication regressions cover live/final output, indexed and legacy model paths,
+valid neighboring claims, source fidelity and rejection reasons. Nine negative
+operation-shape tests failed before the schema repair and now pass. Model replies
+in these unit tests are controlled fixtures, not semantic acceptance evidence.
+
+On Windows, three pre-existing hash-frozen JSON fixtures needed exact Git HEAD
+bytes instead of autocrlf-expanded bytes, and UTF-8 decoding. Their content and
+expected hashes were not changed. The initial five baseline failures reproduced
+with the original application code and disappeared after this QA correction.
+One existing Starlette multipart deprecation warning remains.
+
+Independent final review accepted this narrow application change and isolated
+experiment only, and reran 68 focused tests successfully. It verified the five
+generated schema variants and final report/code hashes. This does not qualify
+task recall, the real-model 8-to-7 transition, live source coverage or the phone.
+The newly loaded experimental model was unloaded afterward; runtime confirmed
+`done_reason=unload`. Its downloaded files are retained, and no default changed.
+
+## Sequential extraction and bounded local transport, 28 September
+
+The isolated `stepped.py` candidate processes one new canonical source unit with
+at most two preceding context units and prior task state. Code owns positions
+and task aliases; proposals must quote exactly within an explicitly selected
+scope. Operation-specific schemas require the fields needed for each operation.
+When no preceding unit exists, context_fields must be empty. This concrete schema
+defect was reproduced before repair; strict evidence matching was not relaxed.
+
+The probe now embeds the output schema in the prompt as well as the structured
+format. It records only hashes and bounded diagnostic metadata, never raw model
+replies. Quote diagnostics distinguish missing, ambiguous, boundary-only and
+wrong-scope evidence without accepting or automatically repairing it.
+
+`bounded_inference.py` is loopback-only experimental transport. An asynchronous
+deadline includes connection and the complete streamed response. Request and
+response size caps apply even to a stream without line breaks. Only a matching
+model with an observed successful terminal event can return a result; external
+cancellation propagates. None of this establishes that server work stopped.
+
+Preserved real-model runs are all **failed/unqualified**:
+
+| Report | Observed result |
+| --- | --- |
+| local-qwen35-stepped-20260928.json | Two explicit tasks both returned no_event |
+| local-llama-stepped-smoke-20260928.json | Missing task, then invalid quotation; detailed cause not recorded |
+| local-llama-stepped-schema-20260928.json | First proposal rejected for quotation scope |
+| local-llama-quote-diagnostic-20260928.json | Identical first response hash; exact current quotes selected nonexistent previous scope |
+| local-llama-stepped-scope-20260928.json | First task accepted after schema repair; second call hit a 30-second read timeout |
+| local-llama-stepped-bounded-20260928.json | Completed both calls, but only one of two tasks matched; second returned no_event |
+
+The final run used pinned local Llama3.1:8B, CPU-only, context8192, output384,
+temperature0, seed42 and top_p0.9. The calls took 33.250 and 55.781 seconds; code
+and model hashes remained stable. No later case ran. Historical reports retain
+their own code hashes and are not reclassified as qualification of later code.
+The smoke inputs and frozen expected states were unchanged. No experiment is
+imported by the application, and no model/default/runtime/phone change follows.
+
+Sequential pending corrections remain a separate unresolved design issue:
+`10 değil.` may require the next unit before a defensible update exists. Current
+unresolved markers accumulate and the runner stops. Bounded replay from an
+accepted checkpoint and explicit pending resolution must be designed before
+integration; it would not itself repair the independently observed missed task.
+
+Final offline verification: 674 unit/experiment tests pass in 17.70 seconds.
+Scoped branch/line coverage is analyze97%, stepped89%, stepped_probe85%,
+quote_diagnostics100%, bounded_inference80%, combined91%. Ruff/Black and scoped
+strict mypy pass. Independent review reran 18 transport/probe tests and accepted
+the experimental transport only. Successful controlled tests do not establish
+semantic accuracy; all real-model qualification and phone acceptance flags remain
+false. Historical TEST uses a different model; its current identity is unverified.

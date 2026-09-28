@@ -1,0 +1,78 @@
+{
+  "schema": "sequential-task-events-local-v1",
+  "utc": "2026-09-28T13:23:27.769934+00:00",
+  "synthetic": true,
+  "target": "local-loopback-not-TEST",
+  "model": "llama3.1:8b",
+  "suite": "all",
+  "options": {
+    "num_ctx": 8192,
+    "num_predict": 384,
+    "temperature": 0.0,
+    "seed": 42,
+    "top_p": 0.9,
+    "num_gpu": 0,
+    "presence_penalty": 0.0
+  },
+  "think": null,
+  "source_hashes": {
+    "stepped.py": "24297d9e5f0bd0bad1148e60af7dee098feef36af7d8855eefab092e4ee69aea",
+    "stepped_probe.py": "e1c0aa87b4a301afc12cad75401ef02db26efab5985df3067d64a8360752a7ec",
+    "prototype.py": "3688268ee12d4f6724ba2d8f6f9b2518e213377549eedd6663fc3124d95701b8",
+    "indexed.py": "6f27dca3a0ce02005042749b4f3cb11d452f6179d30e6447156862a988723973",
+    "indexed_probe.py": "083a2b4a1f26bfcd848a0a4c09052f68723278a8e87796de9f91d7803a6ab2b1",
+    "compact_probe.py": "ac7be762716a1485b552c3bbaf940190851f0b6452ff825ae13473452238b947",
+    "probe.py": "1e34e36e570f39b06d22849ed91e07a5f2e229586cff9049486db1570b1e21f0",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "rows": [
+    {
+      "case": "general-smoke",
+      "source_sha256": "48c8ab28c84f4c39517545ec6832bd010ad8e37e4df36ba0000bd98b773a77a6",
+      "steps": [
+        {
+          "focus": 1,
+          "prompt_sha256": "5ec8c5dbe53a1a68bef84358282416ae997b34dc852607dadbd07601cf9a0f2c",
+          "response_sha256": "aae848e5f0626f50b00f843579ba94a9e0adf9fddbe1e85e420261019f6c7a08",
+          "seconds": 32.969,
+          "prompt_tokens": 723,
+          "output_tokens": 59,
+          "done_reason": "stop",
+          "status": "events",
+          "events": 1
+        }
+      ],
+      "status": "error",
+      "error_class": "ReadTimeout"
+    }
+  ],
+  "semantic_qualification": false,
+  "phone_acceptance": false,
+  "calendar_normalization": false,
+  "server_context_coverage_verified": false,
+  "fingerprint_before": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "stopped_after_failure": true,
+  "fingerprint_after": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "source_hashes_after": {
+    "stepped.py": "24297d9e5f0bd0bad1148e60af7dee098feef36af7d8855eefab092e4ee69aea",
+    "stepped_probe.py": "e1c0aa87b4a301afc12cad75401ef02db26efab5985df3067d64a8360752a7ec",
+    "prototype.py": "3688268ee12d4f6724ba2d8f6f9b2518e213377549eedd6663fc3124d95701b8",
+    "indexed.py": "6f27dca3a0ce02005042749b4f3cb11d452f6179d30e6447156862a988723973",
+    "indexed_probe.py": "083a2b4a1f26bfcd848a0a4c09052f68723278a8e87796de9f91d7803a6ab2b1",
+    "compact_probe.py": "ac7be762716a1485b552c3bbaf940190851f0b6452ff825ae13473452238b947",
+    "probe.py": "1e34e36e570f39b06d22849ed91e07a5f2e229586cff9049486db1570b1e21f0",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "code_stable": true,
+  "fingerprint_stable": true,
+  "local_relation_cases_passed": false,
+  "elapsed_seconds": 63.281
+}
