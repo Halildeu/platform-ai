@@ -207,3 +207,45 @@ Remaining explicit limitations:
 
 The missing Saved result requires the separate incomplete-recording lifecycle
 repair described above; these operations cannot create a saved meeting result.
+
+## Indexed evidence candidate, 28 September
+
+`indexed.py` reduces the model's copying burden: it selects exact numbered token
+ranges and request-local numeric task aliases. The decoder slices the original
+characters, validates word boundaries and the selected occurrence, and binds the
+proposal to both the source and prior ledger hashes. It rejects forward targets,
+duplicate creates and out-of-order operations before the atomic ledger update.
+An exact span is still not proof of a correct owner or task relation.
+
+`indexed_probe.py --mode incremental` retains the previous candidate state and
+skips dependent stages after a failed relation. `--mode replay` independently
+rebuilds each stage from the complete provided source. Replay returns a fresh
+candidate; it never replaces stored state or treats omitted output as cancellation.
+Canonical replay, reconciliation and approval of a candidate are not implemented.
+Only synthetic local-loopback inputs and already-installed pinned models are used.
+
+`local-qwen-indexed-20260928.json` is an unchanged **failed preliminary incremental
+experiment**, bound to the code hashes inside it. With local Qwen 2.5 3B Instruct,
+the first eight-task stage reached 180.047 seconds without an observed generation
+completion. No task relation was evaluated and no further inference was queued.
+Model digest `357c53fb659c5076de1d65ccb0b397446227b71a42be9d1603d46168015c9e4b`
+and Ollama 0.34.4 were stable. Reported VRAM usage was zero; this is not TEST GPU
+latency or evidence of the model's semantic accuracy. A client deadline does not
+prove that server-side generation stopped.
+
+That experiment predates removal of a specific time-correction example from the
+prompt and introduction of explicit incremental/replay modes. It is **not a
+qualification run of the final source**. Replay recovery is proven only with
+manually supplied or mocked proposals; there was no second real-model run.
+
+Final offline verification: **109 tests pass**, including 29 indexed-evidence
+and 10 indexed-probe tests plus the earlier 70 checks. Scoped branch/line coverage:
+indexed decoder 97%, indexed probe 80%, reducer 89%, combined 88%. Ruff and Black
+pass. Strict mypy passes on the reducer and decoder using explicit package bases
+and silent imported-module checking. Independent final review accepted research
+scope only and rechecked the final ten probe tests. No application source,
+production prompt, service model, recording path or APK changes in this delta.
+
+Relation extraction, chronology across reconnect, normalized dates, decisions,
+summary and real-device acceptance remain unqualified. A qualified relation
+extractor/model and an observed evaluation runtime are required before integration.

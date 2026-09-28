@@ -30,6 +30,7 @@ class Quote(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     source: int = Field(ge=1)
     text: str = Field(min_length=1, max_length=1000)
+    offset: int | None = Field(default=None, ge=0, le=16000)
 
 
 class Operation(BaseModel):
@@ -106,9 +107,13 @@ def evidence(source: Source, quote: Quote) -> Evidence:
     if quote.source > len(source.units):
         raise InvalidProposalError("quote_source_bounds")
     unit = source.units[quote.source - 1]
-    offset = unit.text.find(quote.text)
-    if offset < 0 or unit.text.find(quote.text, offset + 1) >= 0:
-        raise InvalidProposalError("quote_missing_or_ambiguous")
+    offset = quote.offset
+    if offset is None:
+        offset = unit.text.find(quote.text)
+        if offset < 0 or unit.text.find(quote.text, offset + 1) >= 0:
+            raise InvalidProposalError("quote_missing_or_ambiguous")
+    elif unit.text[offset : offset + len(quote.text)] != quote.text:
+        raise InvalidProposalError("quote_offset_mismatch")
     end_offset = offset + len(quote.text)
     if (offset > 0 and quote.text[0].isalnum() and unit.text[offset - 1].isalnum()) or (
         end_offset < len(unit.text) and quote.text[-1].isalnum() and unit.text[end_offset].isalnum()
@@ -127,6 +132,24 @@ def evidence(source: Source, quote: Quote) -> Evidence:
         end,
         digest(unit.text),
         digest(quote.text),
+    )
+
+
+def task_identity(description: Evidence) -> str:
+    return (
+        "t-"
+        + digest(
+            json.dumps(
+                [
+                    description.session,
+                    description.revision,
+                    description.start,
+                    description.end,
+                    description.quote_sha256,
+                ],
+                ensure_ascii=False,
+            )
+        )[:20]
     )
 
 
@@ -194,21 +217,7 @@ class CandidateLedger:
             if op.target is not None or backed["description"] is None:
                 raise InvalidProposalError("create_contract")
             desc = backed["description"]
-            task_id = (
-                "t-"
-                + digest(
-                    json.dumps(
-                        [
-                            desc.session,
-                            desc.revision,
-                            desc.start,
-                            desc.end,
-                            desc.quote_sha256,
-                        ],
-                        ensure_ascii=False,
-                    )
-                )[:20]
-            )
+            task_id = task_identity(desc)
             if task_id in self.tasks:
                 raise InvalidProposalError("conflicting_create")
             if self.source and op.anchor <= len(self.source.units):
