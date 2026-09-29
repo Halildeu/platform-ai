@@ -30,6 +30,7 @@ from enum import Enum
 
 __all__ = [
     "AppendOutcome",
+    "SessionAudio",
     "SessionAudioStore",
     "StoreStats",
 ]
@@ -67,12 +68,30 @@ class StoreStats:
     finished_total: int
 
 
+@dataclass(frozen=True)
+class SessionAudio:
+    """Whole-session audio plus the window time map (#3746 AI-D3).
+
+    ``windows`` maps each appended window_seq to its [start_ms, end_ms) range
+    on the session timeline, derived from byte offsets (32 bytes/ms for PCM16
+    mono 16 kHz). Appends made without a window_seq (AI-D2 callers) simply do
+    not appear in the map.
+    """
+
+    pcm16: bytes
+    windows: tuple[tuple[int, int, int], ...]  # (window_seq, start_ms, end_ms)
+
+
+_BYTES_PER_MS = 32  # PCM16 mono 16 kHz
+
+
 @dataclass
 class _Session:
     chunks: list[bytes]
     total_bytes: int
     last_touched: float
     cancelled: bool
+    windows: list[tuple[int, int, int]]
 
 
 class SessionAudioStore:
@@ -109,12 +128,16 @@ class SessionAudioStore:
 
     # ── writes ───────────────────────────────────────────────────────────
 
-    def append(self, key: str, pcm16_bytes: bytes) -> AppendOutcome:
+    def append(
+        self, key: str, pcm16_bytes: bytes, *, window_seq: int | None = None
+    ) -> AppendOutcome:
         """Add one window of PCM16 bytes to ``key``'s session.
 
         Empty payloads only refresh the idle clock. A cap overflow cancels the
         whole session *now* (audio freed under the lock) and every later
         append reports the same cancellation — the caller needs no state.
+        A ``window_seq`` records this append's [start_ms, end_ms) range on the
+        session timeline for the attribution batch (duplicates rejected).
         """
         if not key or len(key) > _MAX_KEY_LENGTH:
             raise ValueError("session key must be 1..128 characters")
@@ -124,7 +147,9 @@ class SessionAudioStore:
             if session is None:
                 if len(self._sessions) >= self._max_sessions:
                     return AppendOutcome.REJECTED_SESSIONS
-                session = _Session(chunks=[], total_bytes=0, last_touched=now, cancelled=False)
+                session = _Session(
+                    chunks=[], total_bytes=0, last_touched=now, cancelled=False, windows=[]
+                )
                 self._sessions[key] = session
             session.last_touched = now
             if session.cancelled:
@@ -135,14 +160,22 @@ class SessionAudioStore:
                 # Fail closed: drop everything, remember only the tombstone.
                 session.chunks = []
                 session.total_bytes = 0
+                session.windows = []
                 session.cancelled = True
                 self._cancelled_cap_total += 1
                 return AppendOutcome.CANCELLED_CAP
+            if window_seq is not None:
+                if window_seq < 0 or any(seq == window_seq for seq, _, _ in session.windows):
+                    raise ValueError("window_seq must be non-negative and unique per session")
+                start_ms = session.total_bytes // _BYTES_PER_MS
+                end_ms = (session.total_bytes + len(pcm16_bytes)) // _BYTES_PER_MS
+                if end_ms > start_ms:
+                    session.windows.append((window_seq, start_ms, end_ms))
             session.chunks.append(pcm16_bytes)
             session.total_bytes += len(pcm16_bytes)
             return AppendOutcome.ACCEPTED
 
-    def finish(self, key: str) -> bytes | None:
+    def finish(self, key: str) -> SessionAudio | None:
         """Hand the whole session's audio out exactly once and forget it.
 
         Returns ``None`` for unknown, cancelled or empty sessions — the
@@ -157,7 +190,7 @@ class SessionAudioStore:
             self._finished_total += 1
             payload = b"".join(session.chunks)
             session.chunks = []
-            return payload
+            return SessionAudio(pcm16=payload, windows=tuple(session.windows))
 
     def cancel(self, key: str) -> None:
         """Drop a session's audio immediately (erasure, disconnect, abort)."""

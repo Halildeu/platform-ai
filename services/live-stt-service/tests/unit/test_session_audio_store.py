@@ -14,6 +14,7 @@ import pytest
 from app.core.config import Settings
 from app.services.session_audio_store import (
     AppendOutcome,
+    SessionAudio,
     SessionAudioStore,
     StoreStats,
 )
@@ -53,7 +54,7 @@ def test_append_then_finish_returns_concatenated_audio_once() -> None:
     store, _ = make_store()
     assert store.append("s1", b"aa") is AppendOutcome.ACCEPTED
     assert store.append("s1", b"bb") is AppendOutcome.ACCEPTED
-    assert store.finish("s1") == b"aabb"
+    assert store.finish("s1") == SessionAudio(pcm16=b"aabb", windows=())
     # Exactly once: the session is gone afterwards.
     assert store.finish("s1") is None
 
@@ -72,7 +73,7 @@ def test_cap_overflow_cancels_whole_session_and_stays_cancelled() -> None:
     assert stats.finished_total == 0
     # The tombstone was consumed by finish; the key is reusable afterwards.
     assert store.append("s1", b"z") is AppendOutcome.ACCEPTED
-    assert store.finish("s1") == b"z"
+    assert store.finish("s1").pcm16 == b"z"
 
 
 def test_single_oversized_append_cancels() -> None:
@@ -90,7 +91,7 @@ def test_max_sessions_rejects_new_keys_only() -> None:
     assert store.append("s1", b"a") is AppendOutcome.ACCEPTED
     assert store.finish("s3") is None
     # Freeing a slot admits the previously rejected key.
-    assert store.finish("s2") == b"b"
+    assert store.finish("s2").pcm16 == b"b"
     assert store.append("s3", b"c") is AppendOutcome.ACCEPTED
 
 
@@ -102,7 +103,7 @@ def test_ttl_sweep_drops_only_idle_sessions() -> None:
     clock.advance(30.0)  # idle at 75s > TTL, busy at 30s < TTL
     assert store.sweep() == 1
     assert store.finish("idle") is None
-    assert store.finish("busy") == b"b"
+    assert store.finish("busy").pcm16 == b"b"
     assert store.stats().swept_total == 1
 
 
@@ -113,7 +114,7 @@ def test_empty_append_touches_idle_clock_without_storing() -> None:
     assert store.append("s1", b"") is AppendOutcome.ACCEPTED
     clock.advance(45.0)  # 90s since data, 45s since touch
     assert store.sweep() == 0
-    assert store.finish("s1") == b"a"
+    assert store.finish("s1").pcm16 == b"a"
 
 
 def test_cancel_and_clear_drop_audio() -> None:
@@ -152,3 +153,30 @@ def test_settings_defaults_are_off_and_bounded() -> None:
     assert settings.session_audio_cap_bytes == 230_400_000
     assert settings.session_audio_idle_ttl_sec == 900.0
     assert settings.session_audio_max_sessions == 4
+
+
+def test_window_map_tracks_time_ranges() -> None:
+    store, _ = make_store()
+    ms40 = b"x" * (40 * 32)  # 40 ms of PCM16 @ 16 kHz
+    assert store.append("s1", ms40, window_seq=0) is AppendOutcome.ACCEPTED
+    assert store.append("s1", b"y" * (25 * 32), window_seq=2) is AppendOutcome.ACCEPTED
+    audio = store.finish("s1")
+    assert audio is not None
+    assert audio.windows == ((0, 0, 40), (2, 40, 65))
+    assert len(audio.pcm16) == 65 * 32
+
+
+def test_window_seq_must_be_unique_and_non_negative() -> None:
+    store, _ = make_store()
+    store.append("s1", b"x" * 32, window_seq=0)
+    with pytest.raises(ValueError):
+        store.append("s1", b"x" * 32, window_seq=0)
+    with pytest.raises(ValueError):
+        store.append("s1", b"x" * 32, window_seq=-1)
+
+
+def test_cap_overflow_clears_window_map_too() -> None:
+    store, _ = make_store(cap_bytes=SECOND)
+    store.append("s1", b"x" * (SECOND - 1), window_seq=0)
+    assert store.append("s1", b"xx", window_seq=1) is AppendOutcome.CANCELLED_CAP
+    assert store.finish("s1") is None
