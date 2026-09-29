@@ -115,7 +115,15 @@ request path** the gateway already owns:
 ### D5 — Delivery: new session-level attribution event + pre-finalize apply
 The worker publishes `directSttSessionAttribution.v1` to the existing Redis
 plane (metadata only: identity envelope + `SpeakerAttribution` v2 payload —
-spans and times, no audio, no text). transcript-service gains a consumer
+spans and times, no audio, no text). Contract detail pinned by the backend
+parser (`SpeakerAttribution.parseTurns`): turns are validated **per window**
+against that window's own text and duration — turns must cover the window
+text end-to-end (only whitespace between/around spans), `textEnd <=
+text.length`, `endMs <= windowDurationMs`, no surrogate splits, and the
+encoded form is exactly `{"scope":"<uuid>","turns":[...]}`. The session
+event therefore groups turns **per window** (`windows[]: {windowSeq,
+transportEpoch, scope, turns[]}`); the consumer parses each group against
+the stored segment's `text_draft`/duration. transcript-service gains a consumer
 (clone of the direct-STT consumer pattern, default-off) that **applies**
 attribution to the session's DRAFT segment rows (`speaker_attribution` +
 scalar `speaker_id` only for single-speaker windows), through the existing
