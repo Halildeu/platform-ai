@@ -54,10 +54,26 @@ class _FakeWhisperModel:
 
 @pytest.fixture(autouse=True)
 def _mock_faster_whisper(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    """Mock the faster_whisper module so import does not trigger model download."""
+    """Mock the faster_whisper module so import does not trigger model download.
+
+    ``faster_whisper.vad`` is stubbed too: app.main imports it transitively
+    (health -> streaming_models), so without it every client-fixture test
+    errors at setup on hosts where faster-whisper is not installed.
+    """
     fake_module = types.ModuleType("faster_whisper")
     fake_module.WhisperModel = _FakeWhisperModel  # type: ignore[attr-defined]
+    fake_vad = types.ModuleType("faster_whisper.vad")
+
+    class _FakeVadOptions:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    fake_vad.VadOptions = _FakeVadOptions  # type: ignore[attr-defined]
+    fake_vad.collect_chunks = lambda *a, **k: []  # type: ignore[attr-defined]
+    fake_vad.get_speech_timestamps = lambda *a, **k: []  # type: ignore[attr-defined]
+    fake_module.vad = fake_vad  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+    monkeypatch.setitem(sys.modules, "faster_whisper.vad", fake_vad)
     yield
 
 

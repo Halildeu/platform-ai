@@ -80,6 +80,9 @@ class SessionAudio:
 
     pcm16: bytes
     windows: tuple[tuple[int, int, int], ...]  # (window_seq, start_ms, end_ms)
+    # start/end_ms live on the CONCATENATION timeline: windows are joined in
+    # window_seq order at finish (forwards may arrive out of order), and a
+    # dropped window is simply a gap in the map, never a time shift.
 
 
 _BYTES_PER_MS = 32  # PCM16 mono 16 kHz
@@ -87,11 +90,16 @@ _BYTES_PER_MS = 32  # PCM16 mono 16 kHz
 
 @dataclass
 class _Session:
-    chunks: list[bytes]
+    # window_seq -> pcm bytes; joined in seq order at finish so out-of-order
+    # arrival cannot scramble the audio timeline. Seq-less appends (legacy
+    # AI-D2 callers) get increasing negative seqs starting far below zero:
+    # arrival order is preserved among themselves, they sort before any real
+    # window, and the map excludes them (seq < 0).
+    chunks: dict[int, bytes]
+    next_anonymous_seq: int
     total_bytes: int
     last_touched: float
     cancelled: bool
-    windows: list[tuple[int, int, int]]
 
 
 class SessionAudioStore:
@@ -136,8 +144,11 @@ class SessionAudioStore:
         Empty payloads only refresh the idle clock. A cap overflow cancels the
         whole session *now* (audio freed under the lock) and every later
         append reports the same cancellation — the caller needs no state.
-        A ``window_seq`` records this append's [start_ms, end_ms) range on the
-        session timeline for the attribution batch (duplicates rejected).
+        ``window_seq`` orders this window on the session timeline (forwards
+        may arrive out of order; finish joins in seq order). A duplicate seq
+        with identical bytes is an idempotent no-op (retried forward); a
+        duplicate with different bytes cancels the session — conflicting
+        audio must never mint labels.
         """
         if not key or len(key) > _MAX_KEY_LENGTH:
             raise ValueError("session key must be 1..128 characters")
@@ -148,7 +159,11 @@ class SessionAudioStore:
                 if len(self._sessions) >= self._max_sessions:
                     return AppendOutcome.REJECTED_SESSIONS
                 session = _Session(
-                    chunks=[], total_bytes=0, last_touched=now, cancelled=False, windows=[]
+                    chunks={},
+                    next_anonymous_seq=-(2**32),
+                    total_bytes=0,
+                    last_touched=now,
+                    cancelled=False,
                 )
                 self._sessions[key] = session
             session.last_touched = now
@@ -156,22 +171,27 @@ class SessionAudioStore:
                 return AppendOutcome.CANCELLED_CAP
             if not pcm16_bytes:
                 return AppendOutcome.ACCEPTED
-            if session.total_bytes + len(pcm16_bytes) > self._cap_bytes:
-                # Fail closed: drop everything, remember only the tombstone.
-                session.chunks = []
+            if window_seq is not None and window_seq < 0:
+                raise ValueError("window_seq must be non-negative")
+            if window_seq is not None and window_seq in session.chunks:
+                if session.chunks[window_seq] == pcm16_bytes:
+                    return AppendOutcome.ACCEPTED  # idempotent retry
+                session.chunks = {}
                 session.total_bytes = 0
-                session.windows = []
                 session.cancelled = True
                 self._cancelled_cap_total += 1
                 return AppendOutcome.CANCELLED_CAP
-            if window_seq is not None:
-                if window_seq < 0 or any(seq == window_seq for seq, _, _ in session.windows):
-                    raise ValueError("window_seq must be non-negative and unique per session")
-                start_ms = session.total_bytes // _BYTES_PER_MS
-                end_ms = (session.total_bytes + len(pcm16_bytes)) // _BYTES_PER_MS
-                if end_ms > start_ms:
-                    session.windows.append((window_seq, start_ms, end_ms))
-            session.chunks.append(pcm16_bytes)
+            if session.total_bytes + len(pcm16_bytes) > self._cap_bytes:
+                # Fail closed: drop everything, remember only the tombstone.
+                session.chunks = {}
+                session.total_bytes = 0
+                session.cancelled = True
+                self._cancelled_cap_total += 1
+                return AppendOutcome.CANCELLED_CAP
+            if window_seq is None:
+                window_seq = session.next_anonymous_seq
+                session.next_anonymous_seq += 1
+            session.chunks[window_seq] = pcm16_bytes
             session.total_bytes += len(pcm16_bytes)
             return AppendOutcome.ACCEPTED
 
@@ -188,9 +208,18 @@ class SessionAudioStore:
             if session is None or session.cancelled or session.total_bytes == 0:
                 return None
             self._finished_total += 1
-            payload = b"".join(session.chunks)
-            session.chunks = []
-            return SessionAudio(pcm16=payload, windows=tuple(session.windows))
+            ordered = sorted(session.chunks.items())
+            payload = b"".join(chunk for _seq, chunk in ordered)
+            windows: list[tuple[int, int, int]] = []
+            offset = 0
+            for seq, chunk in ordered:
+                start_ms = offset // _BYTES_PER_MS
+                end_ms = (offset + len(chunk)) // _BYTES_PER_MS
+                if seq >= 0 and end_ms > start_ms:
+                    windows.append((seq, start_ms, end_ms))
+                offset += len(chunk)
+            session.chunks = {}
+            return SessionAudio(pcm16=payload, windows=tuple(windows))
 
     def cancel(self, key: str) -> None:
         """Drop a session's audio immediately (erasure, disconnect, abort)."""

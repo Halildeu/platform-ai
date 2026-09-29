@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import wave
 from io import BytesIO
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
@@ -135,6 +136,56 @@ def _sanitize_error(exc: BaseException, correlation_id: str = "") -> str:
     return type(exc).__name__
 
 
+
+
+def _maybe_store_session_window(
+    request: Request,
+    raw: bytes,
+    session_id: str | None,
+    window_seq: int | None,
+    correlation_id: str,
+) -> None:
+    """#3746 AI-D3: feed the transient session audio store, fail-open for STT.
+
+    The gateway wraps each PCM16 window as WAV before the multipart POST, so
+    the frames are extracted here (RAM-only) and appended under the existing
+    ``session_id`` query identity with the gateway-supplied ``window_seq``
+    (forwards may complete out of order; the store joins in seq order at
+    finish). Every failure only skips attribution for this window — the
+    transcription path is never affected, and no audio detail is logged.
+    """
+    store = getattr(request.app.state, "session_audio_store", None)
+    if store is None or not session_id or window_seq is None:
+        return
+    try:
+        with wave.open(BytesIO(raw), "rb") as reader:
+            if (
+                reader.getnchannels() != 1
+                or reader.getsampwidth() != 2
+                or reader.getframerate() != 16_000
+            ):
+                logger.warning(
+                    "session window skipped: unsupported wav shape",
+                    extra=_log_extra(correlation_id),
+                )
+                return
+            pcm16 = reader.readframes(reader.getnframes())
+        outcome = store.append(session_id, pcm16, window_seq=window_seq)
+        logger.info(
+            "session window stored",
+            extra=_log_extra(
+                correlation_id,
+                outcome=outcome.value,
+                window_seq=window_seq,
+                pcm_bytes=len(pcm16),
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail the transcription path
+        logger.warning(
+            "session window store failed",
+            extra=_log_extra(correlation_id, err_class=type(exc).__name__),
+        )
+
 @router.post(
     "/transcribe",
     response_model=TranscribeResponse,
@@ -163,6 +214,11 @@ async def transcribe_endpoint(
         default=None,
         max_length=10,
         description="ISO 639-1 language override (e.g. tr, en, de)",
+    ),
+    window_seq: int | None = Query(
+        default=None,
+        ge=0,
+        description="Gateway window sequence (#3746 session attribution)",
     ),
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> TranscribeResponse:
@@ -208,6 +264,10 @@ async def transcribe_endpoint(
 
     service: TranscribeService = get_service(settings)
     corr_id: str = _correlation_id_from_request(request)
+
+    # #3746: transient session store feed — no-op unless the store is enabled
+    # AND the gateway supplied session_id + window_seq; never fails STT.
+    _maybe_store_session_window(request, raw, session_id, window_seq, corr_id)
 
     # Build metadata dict for structured logs (PII-safe: no raw tokens/paths)
     log_meta = {

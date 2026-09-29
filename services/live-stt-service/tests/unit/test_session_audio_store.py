@@ -166,13 +166,37 @@ def test_window_map_tracks_time_ranges() -> None:
     assert len(audio.pcm16) == 65 * 32
 
 
-def test_window_seq_must_be_unique_and_non_negative() -> None:
+def test_duplicate_window_seq_is_idempotent_for_identical_bytes() -> None:
+    store, _ = make_store()
+    assert store.append("s1", b"x" * 32, window_seq=0) is AppendOutcome.ACCEPTED
+    # A retried forward re-delivers the same window: no-op, audio unchanged.
+    assert store.append("s1", b"x" * 32, window_seq=0) is AppendOutcome.ACCEPTED
+    audio = store.finish("s1")
+    assert audio is not None and len(audio.pcm16) == 32
+    assert audio.windows == ((0, 0, 1),)
+
+
+def test_duplicate_window_seq_with_different_bytes_cancels() -> None:
     store, _ = make_store()
     store.append("s1", b"x" * 32, window_seq=0)
-    with pytest.raises(ValueError):
-        store.append("s1", b"x" * 32, window_seq=0)
+    assert store.append("s1", b"y" * 32, window_seq=0) is AppendOutcome.CANCELLED_CAP
+    assert store.finish("s1") is None
+
+
+def test_negative_window_seq_rejected() -> None:
+    store, _ = make_store()
     with pytest.raises(ValueError):
         store.append("s1", b"x" * 32, window_seq=-1)
+
+
+def test_out_of_order_windows_join_in_seq_order() -> None:
+    store, _ = make_store()
+    store.append("s1", b"B" * 32, window_seq=1)
+    store.append("s1", b"A" * 32, window_seq=0)
+    audio = store.finish("s1")
+    assert audio is not None
+    assert audio.pcm16 == b"A" * 32 + b"B" * 32
+    assert audio.windows == ((0, 0, 1), (1, 1, 2))
 
 
 def test_cap_overflow_clears_window_map_too() -> None:
