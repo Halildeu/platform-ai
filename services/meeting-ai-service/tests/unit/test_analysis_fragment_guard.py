@@ -93,6 +93,41 @@ def test_source_and_general_citation_short_answers_are_not_rewritten() -> None:
     assert ground_claim("11 olacak.", sentences).grounded
 
 
+def test_wrong_year_in_live_analysis_is_withheld_instead_of_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model must not publish 2020 when the cited source says 2026."""
+
+    wrong_year = "Sunumu 28 Eylül 2020 günü saat 14'te çevrimiçi yapmaya karar verdik."
+
+    def post(*args: object, **kwargs: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "response": json.dumps(
+                    {
+                        "summary": wrong_year,
+                        "decisions": [wrong_year],
+                        "action_items": [],
+                    }
+                )
+            },
+            request=httpx.Request("POST", "http://localhost/api/generate"),
+        )
+
+    monkeypatch.setattr(httpx, "post", post)
+    source = "Sunumu 28 Eylül 2026 günü saat 14'te çevrimiçi yapmaya karar verdik."
+    result = MeetingAnalysisService(Settings(backend="ollama")).analyze(source, live=True)
+
+    assert result.summary == ""
+    assert result.decisions == []
+    assert result.action_items == []
+    assert any(
+        claim.reason == "number/quantity in claim not found in source"
+        for claim in result.rejected_claims
+    )
+
+
 def test_model_keeps_change_context_but_cannot_publish_orphan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
