@@ -219,6 +219,23 @@ class Settings(BaseSettings):
     )
     session_audio_idle_ttl_sec: float = Field(default=900.0, ge=30.0, le=7200.0)
     session_audio_max_sessions: int = Field(default=4, ge=1, le=64)
+    # ── #3746 AI-D3: post-session attribution batch (default OFF) ────────────
+    # Enables POST /session/{key}/finish + the supervised pyannote batch +
+    # the directSttSessionAttribution.v1 Redis publish. Requires the session
+    # audio store; production additionally requires a pinned model revision
+    # and an HF token (validator below).
+    session_attribution_enabled: bool = Field(default=False)
+    diar_model_name: str = Field(default="pyannote/speaker-diarization-3.1")
+    diar_model_revision: str = Field(default="unversioned", min_length=1, max_length=128)
+    diar_hf_token: str = Field(default="")
+    diar_max_speakers: int = Field(default=10, ge=1, le=50)
+    diar_required_free_vram_mb: int = Field(default=3000, ge=0, le=24000)
+    diar_hard_timeout_sec: float = Field(default=900.0, ge=1.0, le=3600.0)
+    diar_vram_retry_attempts: int = Field(default=3, ge=0, le=20)
+    diar_vram_retry_backoff_sec: float = Field(default=30.0, ge=0.0, le=600.0)
+    diar_dominance_threshold: float = Field(default=0.7, gt=0.0, le=1.0)
+    diar_min_speech_ms: int = Field(default=250, ge=0, le=10_000)
+    attribution_stream: str = Field(default="stt:session:attribution")
 
     @model_validator(mode="after")
     def validate_stream_tuning(self) -> Self:
@@ -264,6 +281,20 @@ class Settings(BaseSettings):
                     )
                 if path is None:
                     raise ValueError(f"{label}_path is required in staging/production")
+        if self.session_attribution_enabled and not self.session_audio_store_enabled:
+            raise ValueError(
+                "session_attribution_enabled requires session_audio_store_enabled"
+            )
+        if self.session_attribution_enabled and self.environment in {"staging", "production"}:
+            if not re.fullmatch(r"[0-9a-f]{40}", self.diar_model_revision):
+                raise ValueError(
+                    "diar_model_revision must be a lowercase 40-hex immutable revision "
+                    "when attribution is enabled in staging/production"
+                )
+            if not self.diar_hf_token:
+                raise ValueError(
+                    "diar_hf_token is required when attribution is enabled in staging/production"
+                )
         if self.environment == "production" and not self.stream_preload_models:
             raise ValueError("stream_preload_models must be enabled in production")
         if self.environment == "production" and not re.fullmatch(

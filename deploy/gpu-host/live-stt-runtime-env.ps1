@@ -45,6 +45,18 @@ function Get-LiveSttRuntimeConfigSchema {
         "STT_SESSION_AUDIO_CAP_BYTES" = @{ Target = "STT_SESSION_AUDIO_CAP_BYTES"; Kind = "integer"; Min = 1000000; Max = 2000000000 }
         "STT_SESSION_AUDIO_IDLE_TTL_SEC" = @{ Target = "STT_SESSION_AUDIO_IDLE_TTL_SEC"; Kind = "integer"; Min = 30; Max = 7200 }
         "STT_SESSION_AUDIO_MAX_SESSIONS" = @{ Target = "STT_SESSION_AUDIO_MAX_SESSIONS"; Kind = "integer"; Min = 1; Max = 64 }
+        # 3746 AI-D3: post-session attribution batch (default off in source).
+        "STT_SESSION_ATTRIBUTION_ENABLED" = @{ Target = "STT_SESSION_ATTRIBUTION_ENABLED"; Kind = "boolean" }
+        "STT_DIAR_MODEL_REVISION" = @{ Target = "STT_DIAR_MODEL_REVISION"; Kind = "name" }
+        "STT_DIAR_HF_TOKEN_DPAPI" = @{ Target = "STT_DIAR_HF_TOKEN"; Kind = "dpapi-secret" }
+        "STT_DIAR_MAX_SPEAKERS" = @{ Target = "STT_DIAR_MAX_SPEAKERS"; Kind = "integer"; Min = 1; Max = 50 }
+        "STT_DIAR_REQUIRED_FREE_VRAM_MB" = @{ Target = "STT_DIAR_REQUIRED_FREE_VRAM_MB"; Kind = "integer"; Min = 0; Max = 24000 }
+        "STT_DIAR_HARD_TIMEOUT_SEC" = @{ Target = "STT_DIAR_HARD_TIMEOUT_SEC"; Kind = "integer"; Min = 1; Max = 3600 }
+        "STT_DIAR_VRAM_RETRY_ATTEMPTS" = @{ Target = "STT_DIAR_VRAM_RETRY_ATTEMPTS"; Kind = "integer"; Min = 0; Max = 20 }
+        "STT_DIAR_VRAM_RETRY_BACKOFF_SEC" = @{ Target = "STT_DIAR_VRAM_RETRY_BACKOFF_SEC"; Kind = "integer"; Min = 0; Max = 600 }
+        "STT_DIAR_DOMINANCE_THRESHOLD" = @{ Target = "STT_DIAR_DOMINANCE_THRESHOLD"; Kind = "decimal"; Min = 0.000001; Max = 0.999999 }
+        "STT_DIAR_MIN_SPEECH_MS" = @{ Target = "STT_DIAR_MIN_SPEECH_MS"; Kind = "integer"; Min = 0; Max = 10000 }
+        "STT_ATTRIBUTION_STREAM" = @{ Target = "STT_ATTRIBUTION_STREAM"; Kind = "name" }
     }
 }
 
@@ -223,6 +235,28 @@ function ConvertFrom-LiveSttRuntimeValue {
                 return $decoded
             } catch {
                 throw "$Key is not a valid DPAPI LocalMachine Redis URL."
+            }
+        }
+        "dpapi-secret" {
+            # Generic DPAPI LocalMachine secret (3746 AI-D3: HF token). Same
+            # entropy and decrypt path as redis-secret, without the URL shape
+            # check; the decrypted value stays in Process scope only.
+            try {
+                $ciphertext = [Convert]::FromBase64String($Value)
+                $plaintext = [Security.Cryptography.ProtectedData]::Unprotect(
+                    $ciphertext,
+                    $script:LiveSttDpapiEntropy,
+                    [Security.Cryptography.DataProtectionScope]::LocalMachine
+                )
+                $decoded = [Text.Encoding]::UTF8.GetString($plaintext)
+                [Array]::Clear($plaintext, 0, $plaintext.Length)
+                if ([string]::IsNullOrWhiteSpace($decoded) -or $decoded.Length -gt 512 -or
+                    $decoded -match '[ -]') {
+                    throw "invalid"
+                }
+                return $decoded
+            } catch {
+                throw "$Key is not a valid DPAPI LocalMachine secret."
             }
         }
         default { throw "$Key has an unsupported schema kind." }

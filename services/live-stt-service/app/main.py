@@ -273,22 +273,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             },
         )
     # #3746 AI-D2: bounded transient session audio store — opt-in only. The
-    # janitor runs as a daemon thread (chunk-consumer precedent) and only ever
-    # drops idle sessions; audio stays RAM-only per ADR-0036.
-    session_audio_store = None
+    # store itself is created at app setup (the finish router needs it before
+    # startup); the lifespan owns only the janitor daemon thread
+    # (chunk-consumer precedent), which only ever drops idle sessions; audio
+    # stays RAM-only per ADR-0036.
+    session_audio_store = getattr(app.state, "session_audio_store", None)
     session_audio_janitor_stop = None
     session_audio_janitor_thread = None
-    if settings.session_audio_store_enabled:
+    if session_audio_store is not None:
         import threading
 
-        from app.services.session_audio_store import SessionAudioStore
-
-        session_audio_store = SessionAudioStore(
-            cap_bytes=settings.session_audio_cap_bytes,
-            idle_ttl_sec=settings.session_audio_idle_ttl_sec,
-            max_sessions=settings.session_audio_max_sessions,
-        )
-        app.state.session_audio_store = session_audio_store
         session_audio_janitor_stop = threading.Event()
 
         def _session_audio_janitor() -> None:
@@ -310,6 +304,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "correlation_id": "startup",
                 "cap_bytes": settings.session_audio_cap_bytes,
                 "max_sessions": settings.session_audio_max_sessions,
+                "attribution": settings.session_attribution_enabled,
             },
         )
     yield
@@ -374,3 +369,30 @@ app.include_router(health.router, tags=["health"])
 app.include_router(metrics.router, tags=["metrics"])
 app.include_router(transcribe.router, tags=["transcribe"])
 app.include_router(stream.router, tags=["stream"])
+
+# #3746 AI-D2/D3: transient session audio store + post-session attribution.
+# Both default off; the finish surface only exists when attribution is on.
+_settings = get_settings()
+if _settings.session_audio_store_enabled:
+    from app.services.session_audio_store import SessionAudioStore
+
+    app.state.session_audio_store = SessionAudioStore(
+        cap_bytes=_settings.session_audio_cap_bytes,
+        idle_ttl_sec=_settings.session_audio_idle_ttl_sec,
+        max_sessions=_settings.session_audio_max_sessions,
+    )
+    if _settings.session_attribution_enabled:
+        from app.api.session_finish import build_finish_router
+        from app.services.attribution_publisher import RedisAttributionPublisher
+        from app.services.chunk_consumer import build_redis_client
+
+        app.include_router(
+            build_finish_router(
+                settings=_settings,
+                store=app.state.session_audio_store,
+                publisher=RedisAttributionPublisher(
+                    build_redis_client(_settings), _settings.attribution_stream
+                ),
+            ),
+            tags=["session-attribution"],
+        )
