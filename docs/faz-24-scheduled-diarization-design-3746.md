@@ -87,11 +87,16 @@ already reach live-stt, keyed by an opaque session key supplied by the caller
 
 ### D3 — Alignment: segment-granularity, session-stable labels
 Internal STT has no word timings, so turns are aligned at window/segment
-granularity: pyannote's time-ranged anonymous turns are intersected with the
-persisted segment `[start,end)` ranges; UTF-16 `textStart/textEnd` derive from
-window text boundaries (no intra-word splits). A window with multiple speakers
-keeps scalar `speaker_id=null` and a multi-entry `turns` list — exactly the
-existing contract semantics. The whole session is clustered in **one** batch,
+granularity: pyannote's time-ranged anonymous turns are intersected with each
+window's time range on the session timeline. The producer emits **one
+dominant-or-UU assignment per window** (dominance = fraction of the window's
+speech time held by one cluster; below the threshold the window is `UU`). It
+cannot emit UTF-16 spans at all — live-stt never sees window text — so the
+consumer derives the single SpeakerAttribution v2 turn (`textStart=0`,
+`textEnd=len(text_draft)`) from the stored window text it owns. Multi-speaker
+windows therefore surface as `UU` (scalar `speaker_id` stays null); finer
+intra-window splits need word timings and are a v2 concern.
+The whole session is clustered in **one** batch,
 so labels are structurally session-stable; per-window independent clustering
 is not performed and is not claimed as continuity. Overlap regions keep
 overlapping acoustic spans; low-confidence/unmatched regions emit `UU`.
@@ -115,15 +120,16 @@ request path** the gateway already owns:
 ### D5 — Delivery: new session-level attribution event + pre-finalize apply
 The worker publishes `directSttSessionAttribution.v1` to the existing Redis
 plane (metadata only: identity envelope + `SpeakerAttribution` v2 payload —
-spans and times, no audio, no text). Contract detail pinned by the backend
-parser (`SpeakerAttribution.parseTurns`): turns are validated **per window**
-against that window's own text and duration — turns must cover the window
-text end-to-end (only whitespace between/around spans), `textEnd <=
-text.length`, `endMs <= windowDurationMs`, no surrogate splits, and the
-encoded form is exactly `{"scope":"<uuid>","turns":[...]}`. The session
-event therefore groups turns **per window** (`windows[]: {windowSeq,
-transportEpoch, scope, turns[]}`); the consumer parses each group against
-the stored segment's `text_draft`/duration. transcript-service gains a consumer
+per-window speaker assignments and acoustic times — no audio, no text, no
+UTF-16 offsets; schema `docs/contracts/direct-stt-session-attribution.v1.schema.json`).
+The backend parser (`SpeakerAttribution.parseTurns`) validates turns against
+each window's own text and duration (full coverage, whitespace-only gaps,
+`endMs <= windowDurationMs`, no surrogate splits; encoded form exactly
+`{"scope":"<uuid>","turns":[...]}`) — and the producer cannot satisfy the
+text-side rules because it never sees window text. The event therefore
+carries `windows[]: {windowSeq, speaker, startMs, endMs, dominanceRatio}`,
+and the consumer builds + validates the v2 attribution from the stored
+segment's `text_draft`/duration. transcript-service gains a consumer
 (clone of the direct-STT consumer pattern, default-off) that **applies**
 attribution to the session's DRAFT segment rows (`speaker_attribution` +
 scalar `speaker_id` only for single-speaker windows), through the existing
