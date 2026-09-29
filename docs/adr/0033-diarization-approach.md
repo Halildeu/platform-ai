@@ -5,14 +5,18 @@
 - Decision evidence updated: 2026-07-03 (revision-resolved re-measurement, #235)
 - Accepted: 2026-07-16 (owner re-review and source acceptance)
 - Issue: `#161 [Faz24 T-B] STT quality evidence - Turkish WER + diarization`
-- Amended by: ADR-0035 (voiceprint remains legal-gated)
+- Amended by: ADR-0035 (voiceprint remains legal-gated) ·
+  [Scheduled post-processing integration design (#3746)](../faz-24-scheduled-diarization-design-3746.md)
 
 ## Context
 
 Faz 24 needs measured Turkish speaker diarization, not a model choice based on
 reputation. The decision must also respect two product constraints:
 
-1. The GPU host is an RTX 4070 with 8 GB VRAM. Diarization must not compete
+1. The GPU host is an RTX 4070 with 12 GB VRAM (the "8 GB" in the original
+   text was a factual error — see `docs/issue-40-hardware-decision-final.md`;
+   the runtime capacity gate reads actual free VRAM, so behavior never
+   depended on this figure). Diarization must not compete
    continuously with live STT, final STT, and Ollama.
 2. Diarization output is anonymous `SPEAKER_xx` by default. Automatic identity
    or voiceprint processing remains outside this decision and subject to the

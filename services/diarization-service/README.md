@@ -15,7 +15,7 @@ the live-stt discipline.
 | `DIA_BACKEND` | Behaviour |
 |---|---|
 | `mock` (default) | Deterministic speaker turns — no model/token, runnable + unit-tested |
-| `pyannote` | Real `pyannote.audio` pipeline — **stub** (returns 501); wiring needs torch + a Hugging Face token (follow-up) |
+| `pyannote` | Real `pyannote.audio` 3.3.2 pipeline (PR #348: in-RAM `BytesIO` input, `max_speakers` honored, single-flight); needs `requirements-pyannote.txt` (torch) + `DIA_HF_TOKEN` |
 
 ## API
 
