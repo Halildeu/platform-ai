@@ -40,6 +40,11 @@ function Get-LiveSttRuntimeConfigSchema {
         "STT_CHUNK_CLAIM_IDLE_MS" = @{ Target = "STT_CHUNK_CLAIM_IDLE_MS"; Kind = "integer"; Min = 1000; Max = 3600000 }
         "STT_CHUNK_CLAIM_EVERY_LOOPS" = @{ Target = "STT_CHUNK_CLAIM_EVERY_LOOPS"; Kind = "integer"; Min = 1; Max = 10000 }
         "STT_CHUNK_TRIM_MAXLEN" = @{ Target = "STT_CHUNK_TRIM_MAXLEN"; Kind = "integer"; Min = 100; Max = 1000000 }
+        # 3746 AI-D2: bounded transient session audio store (default off in source).
+        "STT_SESSION_AUDIO_STORE_ENABLED" = @{ Target = "STT_SESSION_AUDIO_STORE_ENABLED"; Kind = "boolean" }
+        "STT_SESSION_AUDIO_CAP_BYTES" = @{ Target = "STT_SESSION_AUDIO_CAP_BYTES"; Kind = "integer"; Min = 1000000; Max = 2000000000 }
+        "STT_SESSION_AUDIO_IDLE_TTL_SEC" = @{ Target = "STT_SESSION_AUDIO_IDLE_TTL_SEC"; Kind = "integer"; Min = 30; Max = 7200 }
+        "STT_SESSION_AUDIO_MAX_SESSIONS" = @{ Target = "STT_SESSION_AUDIO_MAX_SESSIONS"; Kind = "integer"; Min = 1; Max = 64 }
     }
 }
 

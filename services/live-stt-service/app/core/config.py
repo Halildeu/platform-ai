@@ -50,6 +50,10 @@ class Settings(BaseSettings):
       STT_STREAM_LIVE_VAD_FILTER  False (default; production profile enables it)
       STT_STREAM_FINAL_VAD_FILTER False (default; production profile enables it)
       STT_STREAM_TRANSPORT_TIMEOUT_SEC 2.0 (default; per-WebSocket-write cap)
+      STT_SESSION_AUDIO_STORE_ENABLED False (default; #3746 AI-D2 transient store)
+      STT_SESSION_AUDIO_CAP_BYTES     230400000 (default; 120 min PCM16 mono 16k)
+      STT_SESSION_AUDIO_IDLE_TTL_SEC  900 (default; janitor drops idle sessions)
+      STT_SESSION_AUDIO_MAX_SESSIONS  4 (default; concurrent session bound)
     """
 
     model_config = SettingsConfigDict(
@@ -203,6 +207,18 @@ class Settings(BaseSettings):
     chunk_claim_idle_ms: int = Field(default=60_000, ge=1000, le=3_600_000)
     chunk_claim_every_loops: int = Field(default=30, ge=1, le=10_000)
     chunk_trim_maxlen: int = Field(default=10_000, ge=100, le=1_000_000)
+    # ── #3746 AI-D2: bounded transient session audio store ───────────────────
+    # RAM-only whole-session PCM16 accumulation for the ADR-0033 scheduled
+    # post-processing diarization batch. Default OFF: no request path touches
+    # the store until AI-D3/BE-D4 wire frames + the finish signal. ADR-0036:
+    # audio never reaches disk/logs/metrics; cap overflow cancels the session
+    # (whole-session audio or nothing — no partial labels).
+    session_audio_store_enabled: bool = Field(default=False)
+    session_audio_cap_bytes: int = Field(
+        default=230_400_000, ge=1_000_000, le=2_000_000_000
+    )
+    session_audio_idle_ttl_sec: float = Field(default=900.0, ge=30.0, le=7200.0)
+    session_audio_max_sessions: int = Field(default=4, ge=1, le=64)
 
     @model_validator(mode="after")
     def validate_stream_tuning(self) -> Self:
