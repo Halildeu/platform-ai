@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform-ai.internal/contracts/live-stt-session-finish.v1.schema.json",
+  "title": "liveSttSessionFinish.v1",
+  "description": "Gateway -> live-stt finish handshake (#3746 AI-D3/BE-D4, design D4). Sent once when the gateway closes a session; carries the identity envelope for the post-session diarization batch and the expected sample total for the whole-session integrity check (mismatch => cancel, no attribution). Contains no audio and no transcript text. The session key is the same opaque value the gateway sent on each /transcribe window POST (X-Stt-Session-Key).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "tenantId",
+    "meetingId",
+    "sourceSessionId",
+    "transportEpoch",
+    "expectedSampleCount"
+  ],
+  "properties": {
+    "schema": { "const": "liveSttSessionFinish.v1" },
+    "tenantId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "meetingId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sourceSessionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "transportEpoch": { "type": "integer", "minimum": 0 },
+    "expectedSampleCount": {
+      "type": "integer",
+      "minimum": 16000,
+      "maximum": 2000000000,
+      "description": "PCM16 mono 16 kHz samples the gateway forwarded for this session; live-stt cancels the batch when its store holds a different total."
+    }
+  }
+}
