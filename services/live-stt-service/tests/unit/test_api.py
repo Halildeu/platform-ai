@@ -471,3 +471,65 @@ def test_transcribe_language_iso639_required_field(client) -> None:  # type: ign
     )
     assert r3.status_code == 400
     assert "ISO 639-1" in r3.json()["detail"]
+
+
+# ── #3746 AI-D3: /transcribe -> transient session store feed ────────────────
+
+
+def _store_for_app():  # type: ignore[no-untyped-def]
+    from app.main import app
+    from app.services.session_audio_store import SessionAudioStore
+
+    store = SessionAudioStore(cap_bytes=10 * 32_000, idle_ttl_sec=60, max_sessions=2)
+    app.state.session_audio_store = store
+    return app, store
+
+
+def _wav_16k_mono(pcm16: bytes) -> bytes:
+    from app.services.session_attribution import pcm16_to_wav_bytes
+
+    return pcm16_to_wav_bytes(pcm16)
+
+
+def test_transcribe_feeds_session_store(client) -> None:  # type: ignore[no-untyped-def]
+    app, store = _store_for_app()
+    try:
+        pcm = b"\x01\x02" * 16_000  # 1 s
+        r = client.post(
+            "/transcribe?session_id=SES-X&window_seq=3",
+            files={"audio": ("chunk.wav", _wav_16k_mono(pcm), "audio/wav")},
+        )
+        assert r.status_code == 200, r.text
+        audio = store.finish("SES-X")
+        assert audio is not None
+        assert audio.pcm16 == pcm
+        assert audio.windows == ((3, 0, 1000),)
+    finally:
+        del app.state.session_audio_store
+
+
+def test_transcribe_without_window_seq_skips_store(client) -> None:  # type: ignore[no-untyped-def]
+    app, store = _store_for_app()
+    try:
+        r = client.post(
+            "/transcribe?session_id=SES-X",
+            files={"audio": ("chunk.wav", _wav_16k_mono(b"\x01\x02" * 1600), "audio/wav")},
+        )
+        assert r.status_code == 200
+        assert store.finish("SES-X") is None
+    finally:
+        del app.state.session_audio_store
+
+
+def test_transcribe_bad_wav_shape_skips_store_but_transcribes(client) -> None:  # type: ignore[no-untyped-def]
+    app, store = _store_for_app()
+    try:
+        # Not a parseable WAV at all — the store feed must fail open.
+        r = client.post(
+            "/transcribe?session_id=SES-X&window_seq=0",
+            files={"audio": ("clip.wav", b"FAKE_AUDIO_BYTES" * 100, "audio/wav")},
+        )
+        assert r.status_code == 200
+        assert store.finish("SES-X") is None
+    finally:
+        del app.state.session_audio_store

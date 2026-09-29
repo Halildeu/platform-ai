@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform-ai.internal/contracts/direct-stt-session-attribution.v1.schema.json",
+  "title": "directSttSessionAttribution.v1",
+  "description": "Post-session diarization attribution event (#3746 AI-D3, design docs/faz-24-scheduled-diarization-design-3746.md D5). Metadata only: per-window speaker assignments and acoustic times — never audio, never transcript text, never UTF-16 offsets. The producer (live-stt batch worker) knows window TIME ranges but not window text, so it emits one dominant-or-UU assignment per window; the consumer (transcript-service, BE-D4) derives the SpeakerAttribution v2 turn — textStart=0, textEnd=len(text_draft) — from the stored window text it owns, then validates via SpeakerAttribution.parse against that window's own text and duration. Breaking changes require a version bump + consumer sign-off.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "tenantId",
+    "meetingId",
+    "sourceSessionId",
+    "transportEpoch",
+    "model",
+    "modelRevision",
+    "audioSampleCount",
+    "generatedAt",
+    "windows"
+  ],
+  "properties": {
+    "schema": { "const": "directSttSessionAttribution.v1" },
+    "tenantId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "meetingId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sourceSessionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "transportEpoch": { "type": "integer", "minimum": 0 },
+    "model": { "const": "pyannote/speaker-diarization-3.1" },
+    "modelRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "The resolved model revision actually backing this run (ADR-0033 pin rule; never a floating name in staging/production)."
+    },
+    "audioSampleCount": {
+      "type": "integer",
+      "minimum": 16000,
+      "maximum": 2000000000,
+      "description": "PCM16 mono 16 kHz samples the batch actually processed; the finish handshake cross-checks this against the gateway's expected total."
+    },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "windows": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "description": "One entry per source window that received a dominance decision. Windows the session-batch could not attribute confidently carry speaker=UU; windows may be absent entirely when the batch cancelled (then no event is published at all).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["windowSeq", "speaker", "startMs", "endMs", "dominanceRatio"],
+        "properties": {
+          "windowSeq": { "type": "integer", "minimum": 0 },
+          "speaker": {
+            "type": "string",
+            "pattern": "^(S[1-9][0-9]{0,2}|SPEAKER_[0-9]{2,3}|UU)$",
+            "description": "Session-stable anonymous label from the single whole-session clustering pass, or UU when no speaker dominates the window."
+          },
+          "startMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Window start inside the session audio timeline."
+          },
+          "endMs": { "type": "integer", "minimum": 1 },
+          "dominanceRatio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Fraction of the window's speech time held by the emitted speaker (UU rows carry the best ratio that still failed the threshold). Threshold is producer config, not contract."
+          }
+        }
+      }
+    }
+  }
+}
