@@ -272,11 +272,57 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "partitions": settings.chunk_partition_count,
             },
         )
+    # #3746 AI-D2: bounded transient session audio store — opt-in only. The
+    # janitor runs as a daemon thread (chunk-consumer precedent) and only ever
+    # drops idle sessions; audio stays RAM-only per ADR-0036.
+    session_audio_store = None
+    session_audio_janitor_stop = None
+    session_audio_janitor_thread = None
+    if settings.session_audio_store_enabled:
+        import threading
+
+        from app.services.session_audio_store import SessionAudioStore
+
+        session_audio_store = SessionAudioStore(
+            cap_bytes=settings.session_audio_cap_bytes,
+            idle_ttl_sec=settings.session_audio_idle_ttl_sec,
+            max_sessions=settings.session_audio_max_sessions,
+        )
+        app.state.session_audio_store = session_audio_store
+        session_audio_janitor_stop = threading.Event()
+
+        def _session_audio_janitor() -> None:
+            while not session_audio_janitor_stop.wait(30.0):
+                swept = session_audio_store.sweep()
+                if swept:
+                    logger.info(
+                        "session audio store swept idle sessions",
+                        extra={"correlation_id": "janitor", "swept": swept},
+                    )
+
+        session_audio_janitor_thread = threading.Thread(
+            target=_session_audio_janitor, name="session-audio-janitor", daemon=True
+        )
+        session_audio_janitor_thread.start()
+        logger.info(
+            "session audio store enabled",
+            extra={
+                "correlation_id": "startup",
+                "cap_bytes": settings.session_audio_cap_bytes,
+                "max_sessions": settings.session_audio_max_sessions,
+            },
+        )
     yield
     # Stop preload progression first. Consumer shutdown can take five seconds;
     # without this signal the preload thread could begin the second GPU model
     # while the service is already leaving its lifespan.
     preload_state.request_stop()
+    if session_audio_janitor_stop is not None:
+        session_audio_janitor_stop.set()
+    if session_audio_janitor_thread is not None:
+        session_audio_janitor_thread.join(timeout=5)
+    if session_audio_store is not None:
+        session_audio_store.clear()
     if consumer is not None and consumer_thread is not None:
         consumer.stop()
         consumer_thread.join(timeout=5)
