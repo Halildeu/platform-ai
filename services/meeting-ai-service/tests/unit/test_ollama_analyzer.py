@@ -196,6 +196,7 @@ def test_ollama_prompt_requires_extractive_summary_and_independent_actions(
     assert "summary_sentences" in prompt
     assert "decision_sentences" in prompt
     assert "action_item_sentences" in prompt
+    assert "action_state_events" in prompt
     # The independent decision/action intent of the original test survives.
     assert "HER İKİ listeye de yaz" in prompt
     # The transcript is present as a numbered menu, not as a raw blob.
@@ -214,6 +215,7 @@ def test_selection_prompt_has_no_fabricated_example_indices_or_assignments(
         "summary_sentences": [],
         "decision_sentences": [],
         "action_item_sentences": [],
+        "action_state_events": [],
     }
     assert "NOT a current decision" in prompt
     assert "Proposals" in prompt
@@ -231,6 +233,69 @@ def test_empty_semantic_selection_does_not_invent_decisions_from_grounded_report
     assert result.summary == transcript
     assert result.decisions == []
     assert result.action_items == []
+
+
+def test_action_state_events_reconcile_owner_deadline_and_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transcript = (
+        "Zeynep sunum dosyasını yarın saat 10'a kadar tamamlayacak. "
+        "Elif Demir ürün görsellerini hazırlayacak. "
+        "Can Kaya sunum bağlantısını kontrol edecek. "
+        "Zeynep'in sunum dosyasını teslim edeceği yeni saat yarın saat 11. "
+        "Ürün görsellerini hazırlama görevini Elif Demir'den alıp Ayşe Yılmaz'a veriyoruz. "
+        "Can Kaya'nın sunum bağlantısını kontrol etme görevini iptal ediyoruz."
+    )
+    payload = {
+        "summary_sentences": [4, 5, 6],
+        "decision_sentences": [4, 5, 6],
+        "action_item_sentences": [
+            {"sentence": 1, "owner": "Zeynep", "due_date": "yarın saat 10'a kadar"},
+            {"sentence": 2, "owner": "Elif Demir", "due_date": None},
+            {"sentence": 3, "owner": "Can Kaya", "due_date": None},
+        ],
+        "action_state_events": [
+            {
+                "sentence": 4,
+                "target_sentence": 1,
+                "operation": "replace",
+                "owner": "Zeynep",
+                "due_date": "yarın saat 11",
+            },
+            {
+                "sentence": 5,
+                "target_sentence": 2,
+                "operation": "replace",
+                "owner": "Ayşe Yılmaz",
+                "due_date": None,
+            },
+            {
+                "sentence": 6,
+                "target_sentence": 3,
+                "operation": "cancel",
+                "owner": None,
+                "due_date": None,
+            },
+        ],
+    }
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
+
+    result = MeetingAnalysisService(_settings()).analyze(transcript)
+
+    assert [(item.text, item.owner, item.due_date) for item in result.action_items] == [
+        (
+            "Zeynep'in sunum dosyasını teslim edeceği yeni saat yarın saat 11.",
+            "Zeynep",
+            "yarın saat 11",
+        ),
+        (
+            "Ürün görsellerini hazırlama görevini Elif Demir'den alıp Ayşe Yılmaz'a veriyoruz.",
+            "Ayşe Yılmaz",
+            None,
+        ),
+    ]
+    assert all("10'a kadar" not in item.text for item in result.action_items)
+    assert all("Can Kaya" not in item.text for item in result.action_items)
 
 
 @pytest.mark.parametrize("owner", ["ben", "Ben", "biz", "BEN", "we", "null"])

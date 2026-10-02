@@ -303,6 +303,10 @@ jobs:
         timeout-minutes: 15
         run: python -m pytest tests/unit -q
 
+      - name: Offline task-state experiment integrity (no inference)
+        if: matrix.service == 'meeting-ai-service'
+        run: python -m pytest experiments/task_state -q
+
   gpu-host-windows-contract:
     runs-on: windows-latest
     steps:

@@ -19,9 +19,11 @@ from app.services.extractive import (
     MAX_SUMMARY_SENTENCES,
     looks_like_selection,
     materialize_action_items,
+    materialize_action_state,
     materialize_selection,
     number_transcript,
     selectable_sentences,
+    selection_schema,
 )
 
 TRANSCRIPT = (
@@ -112,6 +114,72 @@ class TestActionItems:
 
     def test_non_dict_items_are_skipped(self) -> None:
         assert materialize_action_items(["cuma", 3, None], _menu()) == []
+
+
+class TestActionState:
+    def test_replacement_uses_exact_later_evidence_and_cancellation_removes_task(self) -> None:
+        transcript = (
+            "Zeynep sunum dosyasını yarın saat 10'a kadar tamamlayacak. "
+            "Elif Demir ürün görsellerini hazırlayacak. "
+            "Can Kaya sunum bağlantısını kontrol edecek. "
+            "Zeynep'in sunum dosyasını teslim edeceği yeni saat yarın saat 11. "
+            "Ürün görsellerini hazırlama görevini Elif Demir'den alıp Ayşe Yılmaz'a veriyoruz. "
+            "Can Kaya'nın sunum bağlantısını kontrol etme görevini iptal ediyoruz."
+        )
+        menu = selectable_sentences(split_sentences(transcript))
+        items = [
+            {"sentence": 1, "owner": "Zeynep", "due_date": "yarın saat 10'a kadar"},
+            {"sentence": 2, "owner": "Elif Demir", "due_date": None},
+            {"sentence": 3, "owner": "Can Kaya", "due_date": None},
+        ]
+        events = [
+            {
+                "sentence": 4,
+                "target_sentence": 1,
+                "operation": "replace",
+                "owner": "Zeynep",
+                "due_date": "yarın saat 11",
+            },
+            {
+                "sentence": 5,
+                "target_sentence": 2,
+                "operation": "replace",
+                "owner": "Ayşe Yılmaz",
+                "due_date": None,
+            },
+            {
+                "sentence": 6,
+                "target_sentence": 3,
+                "operation": "cancel",
+                "owner": None,
+                "due_date": None,
+            },
+        ]
+
+        result = materialize_action_state(items, events, menu)
+
+        assert result == [
+            (menu[3].text, "Zeynep", "yarın saat 11"),
+            (menu[4].text, "Ayşe Yılmaz", None),
+        ]
+        assert all(
+            ground_claim(text, split_sentences(transcript)).grounded for text, _, _ in result
+        )
+
+    def test_invalid_or_backwards_events_fail_closed(self) -> None:
+        menu = _menu()
+        items = [{"sentence": 3, "owner": "birinci ekip", "due_date": None}]
+        events = [
+            {"sentence": 1, "target_sentence": 3, "operation": "cancel"},
+            {"sentence": 99, "target_sentence": 3, "operation": "cancel"},
+            {"sentence": 4, "target_sentence": 3, "operation": "invent"},
+        ]
+        assert materialize_action_state(items, events, menu) == [
+            (menu[2].text, "birinci ekip", None)
+        ]
+
+    def test_generation_schema_requires_explicit_event_list(self) -> None:
+        assert "action_state_events" in selection_schema(len(_menu()))["required"]
 
 
 class TestMenuConstruction:
