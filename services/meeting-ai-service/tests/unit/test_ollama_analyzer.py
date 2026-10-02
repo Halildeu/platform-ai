@@ -283,7 +283,11 @@ def test_action_state_events_reconcile_owner_deadline_and_cancellation(
     result = MeetingAnalysisService(_settings()).analyze(transcript)
 
     assert [(item.text, item.owner, item.due_date) for item in result.action_items] == [
-        ("Zeynep'in sunum dosyasını teslim edeceği yeni saat yarın saat 11.", "Zeynep", "yarın saat 11"),
+        (
+            "Zeynep'in sunum dosyasını teslim edeceği yeni saat yarın saat 11.",
+            "Zeynep",
+            "yarın saat 11",
+        ),
         (
             "Ürün görsellerini hazırlama görevini Elif Demir'den alıp Ayşe Yılmaz'a veriyoruz.",
             "Ayşe Yılmaz",

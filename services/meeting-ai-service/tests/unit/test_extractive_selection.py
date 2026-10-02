@@ -162,7 +162,9 @@ class TestActionState:
             (menu[3].text, "Zeynep", "yarın saat 11"),
             (menu[4].text, "Ayşe Yılmaz", None),
         ]
-        assert all(ground_claim(text, split_sentences(transcript)).grounded for text, _, _ in result)
+        assert all(
+            ground_claim(text, split_sentences(transcript)).grounded for text, _, _ in result
+        )
 
     def test_invalid_or_backwards_events_fail_closed(self) -> None:
         menu = _menu()
