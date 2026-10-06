@@ -117,6 +117,54 @@ class TestActionItems:
 
 
 class TestActionState:
+    def test_repeated_changes_keep_all_prior_references_on_the_latest_task(self) -> None:
+        transcript = (
+            "Zeynep sunum dosyasını yarın saat 10'a kadar tamamlayacak. "
+            "Zeynep sunum dosyasını yarın saat 11'e kadar tamamlayacak. "
+            "Zeynep sunum dosyasını yarın saat 12'ye kadar tamamlayacak. "
+            "Zeynep sunum dosyasını yarın saat 13'e kadar tamamlayacak. "
+            "Mehmet bütçe tablosunu kontrol edecek."
+        )
+        menu = selectable_sentences(split_sentences(transcript))
+        items = [{"sentence": 1, "owner": "Zeynep"}, {"sentence": 5, "owner": "Mehmet"}]
+        # A later correction can refer to the original or any earlier revision.
+        for last_target in (1, 2, 3):
+            events = [
+                {"sentence": 2, "target_sentence": 1, "operation": "replace"},
+                {"sentence": 3, "target_sentence": 2, "operation": "replace"},
+                {
+                    "sentence": 4,
+                    "target_sentence": last_target,
+                    "operation": "replace",
+                    "owner": "Zeynep",
+                    "due_date": "yarın saat 13'e kadar",
+                },
+            ]
+            assert materialize_action_state(items, list(reversed(events)), menu) == [
+                (menu[3].text, "Zeynep", "yarın saat 13'e kadar"),
+                (menu[4].text, "Mehmet", None),
+            ]
+
+    def test_cancellation_reaches_latest_revision_through_any_prior_reference(self) -> None:
+        transcript = (
+            "Elif Demir ürün görsellerini hazırlayacak. "
+            "Ürün görsellerini hazırlama görevini Ayşe Yılmaz'a veriyoruz. "
+            "Ürün görsellerini hazırlama görevini Deniz Arslan'a veriyoruz. "
+            "Ürün görsellerini hazırlama görevini iptal ediyoruz. "
+            "Mehmet bütçe tablosunu kontrol edecek."
+        )
+        menu = selectable_sentences(split_sentences(transcript))
+        items = [{"sentence": 1, "owner": "Elif Demir"}, {"sentence": 5, "owner": "Mehmet"}]
+        for target in (1, 2, 3):
+            events = [
+                {"sentence": 2, "target_sentence": 1, "operation": "replace"},
+                {"sentence": 3, "target_sentence": 2, "operation": "replace"},
+                {"sentence": 4, "target_sentence": target, "operation": "cancel"},
+            ]
+            assert materialize_action_state(items, events, menu) == [
+                (menu[4].text, "Mehmet", None),
+            ]
+
     def test_replacement_uses_exact_later_evidence_and_cancellation_removes_task(self) -> None:
         transcript = (
             "Zeynep sunum dosyasını yarın saat 10'a kadar tamamlayacak. "

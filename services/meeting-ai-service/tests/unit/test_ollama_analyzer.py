@@ -298,6 +298,94 @@ def test_action_state_events_reconcile_owner_deadline_and_cancellation(
     assert all("Can Kaya" not in item.text for item in result.action_items)
 
 
+def test_eight_tasks_keep_seven_current_assignments_after_chained_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentences = [
+        "Zeynep sunum dosyasını yarın saat 10'a kadar tamamlayacak.",
+        "Elif Demir ürün görsellerini hazırlayacak.",
+        "Can Kaya sunum bağlantısını kontrol edecek.",
+        "Mehmet bütçe tablosunu kontrol edecek.",
+        "Ayşe Yılmaz müşteri listesini güncelleyecek.",
+        "Sevil Karakaş toplantı raporunu yazacak.",
+        "Halil Koçoğlu teklif dosyasını inceleyecek.",
+        "Deniz Arslan toplantı davetini gönderecek.",
+        "Zeynep sunum dosyasını yarın saat 11'e kadar tamamlayacak.",
+        "Zeynep sunum dosyasını yarın saat 12'ye kadar tamamlayacak.",
+        "Zeynep sunum dosyasını yarın saat 13'e kadar tamamlayacak.",
+        "Ürün görsellerini hazırlama görevini Elif Demir'den alıp Ayşe Yılmaz'a veriyoruz.",
+        "Can Kaya'nın sunum bağlantısını kontrol etme görevini iptal ediyoruz.",
+    ]
+    owners = [
+        "Zeynep",
+        "Elif Demir",
+        "Can Kaya",
+        "Mehmet",
+        "Ayşe Yılmaz",
+        "Sevil Karakaş",
+        "Halil Koçoğlu",
+        "Deniz Arslan",
+    ]
+    payload = {
+        "summary_sentences": [11, 12, 13],
+        "decision_sentences": [11, 12, 13],
+        "action_item_sentences": [
+            {
+                "sentence": i + 1,
+                "owner": owner,
+                "due_date": "yarın saat 10'a kadar" if i == 0 else None,
+            }
+            for i, owner in enumerate(owners)
+        ],
+        "action_state_events": [
+            {
+                "sentence": 9,
+                "target_sentence": 1,
+                "operation": "replace",
+                "owner": "Zeynep",
+                "due_date": "yarın saat 11'e kadar",
+            },
+            {
+                "sentence": 10,
+                "target_sentence": 9,
+                "operation": "replace",
+                "owner": "Zeynep",
+                "due_date": "yarın saat 12'ye kadar",
+            },
+            {
+                "sentence": 11,
+                "target_sentence": 1,
+                "operation": "replace",
+                "owner": "Zeynep",
+                "due_date": "yarın saat 13'e kadar",
+            },
+            {
+                "sentence": 12,
+                "target_sentence": 2,
+                "operation": "replace",
+                "owner": "Ayşe Yılmaz",
+                "due_date": None,
+            },
+            {
+                "sentence": 13,
+                "target_sentence": 3,
+                "operation": "cancel",
+                "owner": None,
+                "due_date": None,
+            },
+        ],
+    }
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _ollama_response(payload))
+    result = MeetingAnalysisService(_settings()).analyze(" ".join(sentences))
+    assert [(item.text, item.owner, item.due_date) for item in result.action_items] == [
+        *[(sentences[i], owners[i], None) for i in range(3, 8)],
+        (sentences[10], "Zeynep", "yarın saat 13'e kadar"),
+        (sentences[11], "Ayşe Yılmaz", None),
+    ]
+    assert result.decisions == sentences[10:13]
+    assert "10'a kadar" not in result.summary
+
+
 @pytest.mark.parametrize("owner", ["ben", "Ben", "biz", "BEN", "we", "null"])
 def test_grounded_pronoun_is_not_an_identified_assignee(
     monkeypatch: pytest.MonkeyPatch, owner: str

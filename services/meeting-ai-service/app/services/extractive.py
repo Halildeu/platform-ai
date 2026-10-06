@@ -268,8 +268,13 @@ def materialize_action_state(
             continue
         active.pop(current_index, None)
         operation = event["operation"]
+        # Every historical reference belongs to the same task. Updating only
+        # the event's direct target strands older references after two edits.
+        next_index = -1 if operation == "cancel" else source_index
+        for reference, resolved in current.items():
+            if resolved == current_index:
+                current[reference] = next_index
         if operation == "cancel":
-            current[target_index] = -1
             continue
         owner = event.get("owner")
         due_date = event.get("due_date")
@@ -278,9 +283,7 @@ def materialize_action_state(
             owner if isinstance(owner, str) and owner.strip() else None,
             due_date if isinstance(due_date, str) and due_date.strip() else None,
         )
-        # Allow a later event to point at either the original assignment or the
-        # immediately preceding replacement sentence.
-        current[target_index] = source_index
+        # Future events can name this revision as well as any earlier one.
         current[source_index] = source_index
 
     return [active[index] for index in sorted(active)][:MAX_ACTION_ITEMS]
