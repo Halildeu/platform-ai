@@ -1,0 +1,112 @@
+{
+  "schema": "coarse-task-classifier-local-v1",
+  "utc": "2026-09-28T14:13:06.418443+00:00",
+  "synthetic": true,
+  "target": "local-loopback-not-TEST",
+  "model": "qwen3.5:4b",
+  "options": {
+    "num_ctx": 8192,
+    "num_predict": 64,
+    "num_gpu": 0,
+    "temperature": 0.0,
+    "seed": 42,
+    "top_p": 0.9
+  },
+  "think": false,
+  "source_hashes": {
+    "classifier_probe.py": "6eee83cf96e11805c8b452bf36dbab59e27aaeae0cc5f7fbffcd79e8a44e1d99",
+    "classifier_cases.json": "7fabb05be7b141f5a9338f1e19a516546d66bfc0e8754c053850a28c4f8fd3db",
+    "bounded_inference.py": "dea5ad55110523402a6f88e378190c7f0e3463c19749124b32679847032efb5d"
+  },
+  "rows": [
+    {
+      "case": "simple_task_one",
+      "source_sha256": "1b2f2ead83ca7948d3c0d2f98cb0f1bd4b80dde20e2789074dfb58bc60bb742d",
+      "prompt_sha256": "81173a77abc68ba066d34c501bcb31669fdbf62ff7ae0b31461041f6a6ead14f",
+      "result": "task_event",
+      "expected": "task_event",
+      "passed": true,
+      "seconds": 10.547,
+      "response_sha256": "5287d3373589cc4e21d2892b5d36d1946e9aae4a51fe7804e6c0cab6a354a2af",
+      "prompt_tokens": 210,
+      "output_tokens": 13
+    },
+    {
+      "case": "simple_task_two",
+      "source_sha256": "5c3533d22ac7187e68caa98aff08f5e52e6f249049936395ef4d7e9c1da4b890",
+      "prompt_sha256": "01b62f306007348e35edf0a601ae02865c11c5e55a1dfa2662c3573d0b62912f",
+      "result": "task_event",
+      "expected": "task_event",
+      "passed": true,
+      "seconds": 4.484,
+      "response_sha256": "5287d3373589cc4e21d2892b5d36d1946e9aae4a51fe7804e6c0cab6a354a2af",
+      "prompt_tokens": 211,
+      "output_tokens": 13
+    },
+    {
+      "case": "first_person",
+      "source_sha256": "9d47e0796c3b3b9130b00c491ba5fa209235901936f82446d51ef888b5b1ca14",
+      "prompt_sha256": "ecc273b7d882398b148afe88ed0e27a83ce636270dbeadabc28bc1cfac826871",
+      "result": "task_event",
+      "expected": "task_event",
+      "passed": true,
+      "seconds": 4.547,
+      "response_sha256": "5287d3373589cc4e21d2892b5d36d1946e9aae4a51fe7804e6c0cab6a354a2af",
+      "prompt_tokens": 216,
+      "output_tokens": 13
+    },
+    {
+      "case": "two_tasks",
+      "source_sha256": "ee82fcaa5d7a803e8b34d77366b6ee5ee4f65629d6fcca47ddc418755a56946f",
+      "prompt_sha256": "4a451c730904934d330a6d45c2c2024da34d9b52bb1a4570f9bd8b929052cec5",
+      "result": "task_event",
+      "expected": "task_event",
+      "passed": true,
+      "seconds": 4.656,
+      "response_sha256": "5287d3373589cc4e21d2892b5d36d1946e9aae4a51fe7804e6c0cab6a354a2af",
+      "prompt_tokens": 219,
+      "output_tokens": 13
+    },
+    {
+      "case": "policy",
+      "source_sha256": "dd101da7fc8fa1779fe28429c0459da0f882b25f86f5a150307b728828f20e8e",
+      "prompt_sha256": "33d52766930311feda9ac9801f6a9a9d63ceb8e094b8d0660dc4de31f4cb1981",
+      "result": "none",
+      "expected": "none",
+      "passed": true,
+      "seconds": 3.86,
+      "response_sha256": "2ff9cdff091aef6faf5f29ea2e9d90021c8046bb62ad5a5591d615403ad52203",
+      "prompt_tokens": 219,
+      "output_tokens": 6
+    },
+    {
+      "case": "question",
+      "source_sha256": "ebbcfa156c9092e34e445cb66387f991572a0a5bd29c27d56a9e024ff0613191",
+      "prompt_sha256": "1d28276a0496e2ee10c52420fa9d95bb8eb895b231940e452cdded1f2928246e",
+      "result": "task_event",
+      "expected": "none",
+      "passed": false,
+      "seconds": 4.578,
+      "response_sha256": "5287d3373589cc4e21d2892b5d36d1946e9aae4a51fe7804e6c0cab6a354a2af",
+      "prompt_tokens": 210,
+      "output_tokens": 13
+    }
+  ],
+  "semantic_qualification": false,
+  "phone_acceptance": false,
+  "fingerprint_before": {
+    "version": "0.34.4",
+    "model": "qwen3.5:4b",
+    "digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd"
+  },
+  "stopped_after_failure": true,
+  "fingerprint_after": {
+    "version": "0.34.4",
+    "model": "qwen3.5:4b",
+    "digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd"
+  },
+  "code_stable": true,
+  "fingerprint_stable": true,
+  "classifier_cases_passed": false,
+  "elapsed_seconds": 32.938
+}

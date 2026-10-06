@@ -1,0 +1,88 @@
+{
+  "schema": "sequential-task-events-local-v1",
+  "utc": "2026-09-28T13:08:05.503995+00:00",
+  "synthetic": true,
+  "target": "local-loopback-not-TEST",
+  "model": "llama3.1:8b",
+  "suite": "smoke",
+  "options": {
+    "num_ctx": 8192,
+    "num_predict": 384,
+    "temperature": 0.0,
+    "seed": 42,
+    "top_p": 0.9,
+    "num_gpu": 0,
+    "presence_penalty": 0.0
+  },
+  "think": null,
+  "source_hashes": {
+    "stepped.py": "37494b5c885686784afa8c4321d8b492a4008b37c32cc4888a367932fa6099f4",
+    "stepped_probe.py": "270222234424d4abed6b3e3f91a69299b4c805e52e7ea4b367bac74b0ccd4251",
+    "prototype.py": "3688268ee12d4f6724ba2d8f6f9b2518e213377549eedd6663fc3124d95701b8",
+    "indexed.py": "6f27dca3a0ce02005042749b4f3cb11d452f6179d30e6447156862a988723973",
+    "indexed_probe.py": "083a2b4a1f26bfcd848a0a4c09052f68723278a8e87796de9f91d7803a6ab2b1",
+    "compact_probe.py": "ac7be762716a1485b552c3bbaf940190851f0b6452ff825ae13473452238b947",
+    "probe.py": "1e34e36e570f39b06d22849ed91e07a5f2e229586cff9049486db1570b1e21f0",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "rows": [
+    {
+      "case": "general-smoke",
+      "source_sha256": "48c8ab28c84f4c39517545ec6832bd010ad8e37e4df36ba0000bd98b773a77a6",
+      "steps": [
+        {
+          "focus": 1,
+          "prompt_sha256": "7add0faea2f9ca824c81b639e2528ad53dea3e94ee1a2382b7b425a942058a2a",
+          "response_sha256": "bcff21a6083bc6078e29cd5bfff659fa9d0f833a56647ea3a7b6dc52356ab16b",
+          "seconds": 21.656,
+          "prompt_tokens": 472,
+          "output_tokens": 14,
+          "done_reason": "stop",
+          "status": "no_event",
+          "events": 0
+        },
+        {
+          "focus": 2,
+          "prompt_sha256": "551491758652d3721128380dfced898b14a1908556fa52be21f469df3a8f6746",
+          "response_sha256": "1b7cc9e9b055b34c7d11786e1cf1a1ff9618f7ba0ad7c17c82c08710e77215ed",
+          "seconds": 15.688,
+          "prompt_tokens": 482,
+          "output_tokens": 78,
+          "done_reason": "stop"
+        }
+      ],
+      "status": "error",
+      "error_class": "InvalidProposalError",
+      "reason_code": "visible_quote_missing_or_ambiguous"
+    }
+  ],
+  "semantic_qualification": false,
+  "phone_acceptance": false,
+  "calendar_normalization": false,
+  "server_context_coverage_verified": false,
+  "fingerprint_before": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "stopped_after_failure": true,
+  "fingerprint_after": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "source_hashes_after": {
+    "stepped.py": "37494b5c885686784afa8c4321d8b492a4008b37c32cc4888a367932fa6099f4",
+    "stepped_probe.py": "270222234424d4abed6b3e3f91a69299b4c805e52e7ea4b367bac74b0ccd4251",
+    "prototype.py": "3688268ee12d4f6724ba2d8f6f9b2518e213377549eedd6663fc3124d95701b8",
+    "indexed.py": "6f27dca3a0ce02005042749b4f3cb11d452f6179d30e6447156862a988723973",
+    "indexed_probe.py": "083a2b4a1f26bfcd848a0a4c09052f68723278a8e87796de9f91d7803a6ab2b1",
+    "compact_probe.py": "ac7be762716a1485b552c3bbaf940190851f0b6452ff825ae13473452238b947",
+    "probe.py": "1e34e36e570f39b06d22849ed91e07a5f2e229586cff9049486db1570b1e21f0",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "code_stable": true,
+  "fingerprint_stable": true,
+  "local_relation_cases_passed": false,
+  "elapsed_seconds": 37.594
+}
