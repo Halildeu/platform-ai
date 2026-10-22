@@ -31,6 +31,9 @@ jobs:
       - name: GPU host update script unit tests
         run: python3 -m unittest discover -s tests/unit -p "test_gpu_host_update_script.py"
 
+      - name: GPU host service watchdog contract (gitops#3888)
+        run: python3 -m unittest discover -s tests/unit -p "test_gpu_host_service_watchdog.py"
+
       - name: GPU host update script PowerShell parse
         shell: pwsh
         run: |
@@ -38,6 +41,8 @@ jobs:
             "deploy/gpu-host/update.ps1",
             "deploy/gpu-host/preserve-untracked.ps1",
             "deploy/gpu-host/drift-guard.ps1",
+            "deploy/gpu-host/service-watchdog.ps1",
+            "deploy/gpu-host/register-service-watchdog.ps1",
             "deploy/gpu-host/deployment-state.ps1",
             "deploy/gpu-host/live-stt-runtime-contract.ps1",
             "deploy/gpu-host/start-live-stt.ps1",
