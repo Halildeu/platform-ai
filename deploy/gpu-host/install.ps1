@@ -267,6 +267,11 @@ try {
     throw "$installFailure Bootstrap rolled back to no installed tasks and released ports."
 }
 
+# gitops#3888: Task Scheduler never retries a launcher that exits non-zero or a
+# service that dies later; the watchdog restarts down services (deploy-mutex and
+# fence aware). Registered only after acceptance so a failed install leaves none.
+& (Join-Path $PSScriptRoot "register-service-watchdog.ps1") -RepoRoot $RepoRoot
+
 Write-Host ""
 Write-Host "Initial exact-commit runtime acceptance succeeded."
 Write-Host "  ready + runtime_commit: http://127.0.0.1:8200/ready"
