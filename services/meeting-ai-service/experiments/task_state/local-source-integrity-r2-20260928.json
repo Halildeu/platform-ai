@@ -1,0 +1,72 @@
+{
+  "utc": "2026-09-28T14:20:19.527991+00:00",
+  "schema": "local-source-integrity-v1",
+  "synthetic": true,
+  "semantic_qualification": false,
+  "phone_acceptance": false,
+  "code_sha256": "ce1c5f325a780a9b3c8c4bdc6c592ea5ac3dead558e33404f225342ea5e6410f",
+  "rows": [
+    {
+      "case": "warm_shift_on",
+      "payload_sha256": "d364dc70b160e9aaae8b9d4f2201b8450254470fb8899c11fbac851d615b131c",
+      "status": 200,
+      "done": true,
+      "done_reason": "stop",
+      "prompt_tokens": 19,
+      "output_tokens": 7,
+      "body_sha256": "0c9d6805a225d0588842410da9ff2f7f41825f0ae22ebe5948409e1bbdf84be4",
+      "passed": true,
+      "cpu_runtime_verified": true
+    },
+    {
+      "case": "full_source",
+      "payload_sha256": "d659e733aea2e04eb46e56b7641745ee0d59c253dcc27030d809e176a52a5933",
+      "status": 200,
+      "done": true,
+      "done_reason": "stop",
+      "prompt_tokens": 19,
+      "output_tokens": 7,
+      "body_sha256": "d82f5473b25f7a0fe07ca915014d5b8adf924018518aa6458e8ea6c919182e66",
+      "passed": true,
+      "cpu_runtime_verified": true
+    },
+    {
+      "case": "input_overflow",
+      "payload_sha256": "8ddbda446216bd6c6d0b1d0cc1fdd29c94b94a2e789a7ae20ee243b45e9f2c59",
+      "status": 400,
+      "done": null,
+      "done_reason": null,
+      "prompt_tokens": null,
+      "output_tokens": null,
+      "body_sha256": "f743302f262333540c29accf5982c3a9d889abdd1c4ec395e0d06024d1c270c9",
+      "passed": true,
+      "cpu_runtime_verified": true
+    },
+    {
+      "case": "output_limit",
+      "payload_sha256": "4ee4f26304a4410d11a3cb8f4abcd60e754e322b9b3f25385b9d1e0dccf0d497",
+      "status": 200,
+      "done": true,
+      "done_reason": "length",
+      "prompt_tokens": 19,
+      "output_tokens": 1,
+      "body_sha256": "051aa2895d6db79e337cf4ce84f5d263531f49912da43d61d73c8c71dc195130",
+      "passed": true,
+      "cpu_runtime_verified": true
+    }
+  ],
+  "fingerprint_before": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "format": "gguf",
+  "architecture": "llama",
+  "fingerprint_after": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "passed": true,
+  "elapsed_seconds": 14.281
+}

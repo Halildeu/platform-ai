@@ -1,0 +1,143 @@
+{
+  "schema": "synthetic-task-classifier-cases-v1",
+  "cases": [
+    {
+      "id": "simple_task_one",
+      "context": [],
+      "text": "Aylin raporu hazırlayacak.",
+      "expected": "task_event"
+    },
+    {
+      "id": "simple_task_two",
+      "context": [],
+      "text": "Kerem bütçeyi kontrol edecek.",
+      "expected": "task_event"
+    },
+    {
+      "id": "first_person",
+      "context": [
+        "Mehmet."
+      ],
+      "text": "Bütçe tablosunu ben kontrol edeceğim.",
+      "expected": "task_event"
+    },
+    {
+      "id": "two_tasks",
+      "context": [],
+      "text": "Ece raporu hazırlayacak ve Deniz bütçeyi kontrol edecek.",
+      "expected": "task_event"
+    },
+    {
+      "id": "policy",
+      "context": [],
+      "text": "Henüz bitmeyen özellikleri müşteriye tamamlanmış gibi göstermeyeceğiz.",
+      "expected": "none"
+    },
+    {
+      "id": "question",
+      "context": [],
+      "text": "Rapor görevini iptal edelim mi?",
+      "expected": "none"
+    },
+    {
+      "id": "refusal",
+      "context": [
+        "Rapor görevini iptal edelim mi?"
+      ],
+      "text": "Hayır, iptal etmiyoruz.",
+      "expected": "none"
+    },
+    {
+      "id": "historical",
+      "context": [],
+      "text": "Geçen yılki tutanakta 'Derya raporu hazırlayacak' yazıyordu.",
+      "expected": "none"
+    },
+    {
+      "id": "conditional_policy",
+      "context": [],
+      "text": "Talep artarsa yeni işe alımı değerlendirmeye karar verdik.",
+      "expected": "none"
+    },
+    {
+      "id": "meeting_schedule",
+      "context": [],
+      "text": "Sunumu 28 Eylül 2026 günü saat 14'te çevrimiçi yapmaya karar verdik.",
+      "expected": "none"
+    },
+    {
+      "id": "reassignment",
+      "context": [
+        "Elif Demir ürün görsellerini hazırlayacak."
+      ],
+      "text": "Ürün görsellerini hazırlama görevini Elif Demir'den alıp Ayşe Yılmaz'a veriyoruz.",
+      "expected": "task_event"
+    },
+    {
+      "id": "cancel",
+      "context": [
+        "Can Kaya sunum bağlantısını kontrol edecek."
+      ],
+      "text": "Can Kaya'nın sunum bağlantısını kontrol etme görevini iptal ediyoruz.",
+      "expected": "task_event"
+    },
+    {
+      "id": "two_changes",
+      "context": [
+        "Deniz raporu hazırlayacak."
+      ],
+      "text": "Raporu artık Ayşe hazırlayacak ve teslim saati 11 olacak.",
+      "expected": "task_event"
+    },
+    {
+      "id": "split_pending",
+      "context": [
+        "Zeynep sunum dosyasını saat 10'a kadar tamamlayacak."
+      ],
+      "text": "Zeynep'in sunum dosyasını teslim saati 10 değil.",
+      "expected": "ambiguous"
+    },
+    {
+      "id": "split_resolved",
+      "context": [
+        "Zeynep'in sunum dosyasını teslim saati 10 değil."
+      ],
+      "text": "11 olacak.",
+      "expected": "task_event"
+    },
+    {
+      "id": "isolated_time",
+      "context": [],
+      "text": "11 olacak.",
+      "expected": "ambiguous"
+    },
+    {
+      "id": "unchanged",
+      "context": [],
+      "text": "Diğer görevler aynı kalıyor.",
+      "expected": "none"
+    },
+    {
+      "id": "completed",
+      "context": [
+        "Aylin raporu hazırlayacak."
+      ],
+      "text": "Aylin raporu tamamladı.",
+      "expected": "task_event"
+    },
+    {
+      "id": "reopen",
+      "context": [
+        "Aylin'in rapor görevi iptal edilmişti."
+      ],
+      "text": "Aylin'in rapor görevini yeniden açıyoruz.",
+      "expected": "task_event"
+    },
+    {
+      "id": "unsupported_change",
+      "context": [],
+      "text": "Onun işi değişti.",
+      "expected": "ambiguous"
+    }
+  ]
+}

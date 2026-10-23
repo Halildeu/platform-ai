@@ -1,0 +1,17 @@
+{
+  "schema": "task-state-boundary-evidence-v1",
+  "baseline": "732da87e627a6767eab3d28f014b016f7bcea509",
+  "model": "NONE",
+  "runtimeChanged": false,
+  "semanticAcceptance": "unqualified",
+  "boundaryTests": 4,
+  "regressionTests": 31,
+  "sourceHashes": {
+    "app/services/extractive.py": "87143afca8ab3cee97219e4e88ccb95ee7aa7727bf8138f92b772ccb06046c24",
+    "app/services/live_context.py": "447249e85b5b3a85ac246fc6da3e01d153517ace82d7dcf83abe02e274623b78",
+    "app/services/citation.py": "e19f0692fb580e1c916f60c69709a30904e19468a8232e06b560260a8399d2bb",
+    "app/services/analyze.py": "9a0a8dbe95e283d91c96850e0372d855bd347e4c195f20a6fdd8a3810ffcd384",
+    "experiments/task_state/reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005",
+    "experiments/task_state/test_known_limits.py": "353445ef38f69eb729e8cf98e7a6d728a6e3e7b780a6c103a4fd8721e6fe9748"
+  }
+}

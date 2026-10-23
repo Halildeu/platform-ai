@@ -1,0 +1,36 @@
+{
+  "utc": "2026-09-28T14:15:31.656681+00:00",
+  "schema": "local-source-integrity-v1",
+  "synthetic": true,
+  "semantic_qualification": false,
+  "phone_acceptance": false,
+  "code_sha256": "da3337c3ddec283ec37b7ac283e7284d8c1d0fddef94898c55f9bcb6cf6a24af",
+  "rows": [
+    {
+      "case": "warm_shift_on",
+      "payload_sha256": "d364dc70b160e9aaae8b9d4f2201b8450254470fb8899c11fbac851d615b131c",
+      "status": 200,
+      "done": true,
+      "done_reason": "stop",
+      "prompt_tokens": 19,
+      "output_tokens": 7,
+      "body_sha256": "4e6a416d0621f5ee8db89470f8c2e98d3dd9b51c283a7b9199428044f7b98115",
+      "passed": false,
+      "error_class": "InvalidProposalError"
+    }
+  ],
+  "fingerprint_before": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "format": "gguf",
+  "architecture": "llama",
+  "fingerprint_after": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "passed": false,
+  "elapsed_seconds": 10.609
+}

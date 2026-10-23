@@ -1,0 +1,73 @@
+{
+  "schema": "compact-task-events-local-v1",
+  "utc": "2026-09-28T12:18:25.532610+00:00",
+  "synthetic": true,
+  "target": "local-loopback-not-TEST",
+  "semantic_qualification": false,
+  "phone_acceptance": false,
+  "calendar_normalization": false,
+  "server_context_coverage_verified": false,
+  "model": "qwen2.5:3b-instruct",
+  "options": {
+    "num_ctx": 8192,
+    "temperature": 0.0,
+    "top_p": 0.9,
+    "num_predict": 768,
+    "seed": 42
+  },
+  "source_hashes": {
+    "compact.py": "922d9c27abaada10463ac0f5aa63f57530c6d9c4514895f32f3216e6c30f8680",
+    "compact_probe.py": "1f417a1eb1fbceaac17aaa2f6d4e664f70a5e15ebf930f3f2c26b724e7577f4f",
+    "indexed.py": "6f27dca3a0ce02005042749b4f3cb11d452f6179d30e6447156862a988723973",
+    "indexed_probe.py": "634f43d196b907c0f693642b884a8708109b874e97e32be68898997e220aa3ef",
+    "prototype.py": "3688268ee12d4f6724ba2d8f6f9b2518e213377549eedd6663fc3124d95701b8",
+    "probe.py": "1e34e36e570f39b06d22849ed91e07a5f2e229586cff9049486db1570b1e21f0",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "rows": [
+    {
+      "case": "reference-initial",
+      "source_sha256": "082417ebd1f327786cd8c27ecc87056cff9e3a213d4a9e611bec009241154b7c",
+      "prompt_sha256": "eb382b01656783ec00742998ad4efdcb52507236416515d4a5381e11c0506ca6",
+      "source_chars": 665,
+      "prompt_chars": 2925,
+      "status": "error",
+      "error_class": "InvalidProposalError",
+      "reason_code": "generation_incomplete",
+      "elapsed_seconds": 94.766,
+      "within_five_second_target": false
+    }
+  ],
+  "fingerprint_before": {
+    "version": "0.34.4",
+    "model": "qwen2.5:3b-instruct",
+    "digest": "357c53fb659c5076de1d65ccb0b397446227b71a42be9d1603d46168015c9e4b"
+  },
+  "stopped_after_failure": true,
+  "fingerprint_after": {
+    "version": "0.34.4",
+    "model": "qwen2.5:3b-instruct",
+    "digest": "357c53fb659c5076de1d65ccb0b397446227b71a42be9d1603d46168015c9e4b"
+  },
+  "runtime_models_after": [
+    {
+      "name": "qwen2.5:3b-instruct",
+      "digest": "357c53fb659c5076de1d65ccb0b397446227b71a42be9d1603d46168015c9e4b",
+      "size_vram": 0,
+      "context_length": 8192
+    }
+  ],
+  "source_hashes_after": {
+    "compact.py": "922d9c27abaada10463ac0f5aa63f57530c6d9c4514895f32f3216e6c30f8680",
+    "compact_probe.py": "1f417a1eb1fbceaac17aaa2f6d4e664f70a5e15ebf930f3f2c26b724e7577f4f",
+    "indexed.py": "6f27dca3a0ce02005042749b4f3cb11d452f6179d30e6447156862a988723973",
+    "indexed_probe.py": "634f43d196b907c0f693642b884a8708109b874e97e32be68898997e220aa3ef",
+    "prototype.py": "3688268ee12d4f6724ba2d8f6f9b2518e213377549eedd6663fc3124d95701b8",
+    "probe.py": "1e34e36e570f39b06d22849ed91e07a5f2e229586cff9049486db1570b1e21f0",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "code_stable": true,
+  "fingerprint_stable": true,
+  "local_relation_cases_passed": false,
+  "candidate_gate_passed": false
+}

@@ -1,0 +1,129 @@
+{
+  "schema": "candidate-task-events-probe-v1",
+  "synthetic": true,
+  "utc": "2026-09-28T05:37:14.573765+00:00",
+  "model": "llama3.1:8b",
+  "expected_digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e",
+  "options": {
+    "num_ctx": 8192,
+    "temperature": 0.0,
+    "top_p": 0.9,
+    "num_predict": 4096
+  },
+  "target": "local-loopback-experiment-not-TEST",
+  "semantic_qualification": false,
+  "phone_acceptance": false,
+  "calendar_normalization": false,
+  "server_context_coverage_verified": false,
+  "source_hashes": {
+    "prototype.py": "642d393132291ee9ac18d9bd854e876b12c9084a4bfae59a74baccce71725076",
+    "probe.py": "99fe474163101bb6d347227b2ad9dfc8d66df3f80716ae76f89ed95b7ede983b",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "rows": [
+    {
+      "case": "reference-initial",
+      "source_sha256": "082417ebd1f327786cd8c27ecc87056cff9e3a213d4a9e611bec009241154b7c",
+      "prompt_sha256": "769ae900d0595bc3464a9886ab509a04644ec9e9ff34c2b3ff3f4591a9ae14f2",
+      "source_chars": 665,
+      "status": "error",
+      "error_class": "ReadTimeout",
+      "elapsed_seconds": 60.016,
+      "within_five_second_target": false
+    },
+    {
+      "case": "reference-change-split",
+      "status": "dependency_failed"
+    },
+    {
+      "case": "reference-unchanged",
+      "status": "dependency_failed"
+    },
+    {
+      "case": "address-first-person",
+      "source_sha256": "c7c334b158a6a29775b539b45442c5463dc788d3dc7d58ec726e8f19318cb73e",
+      "prompt_sha256": "f871a4d7f97059a255c252d210bf19fe7585450c6c8557da1e2d5ee0088a7cfe",
+      "source_chars": 45,
+      "expected_tasks_including_tombstones": 1,
+      "candidate_tasks": 1,
+      "matched_tasks": 0,
+      "missing_or_ambiguous_work": 0,
+      "unexpected_tasks": 0,
+      "metadata_or_status_errors": 1,
+      "unresolved_units": 0,
+      "candidate_relation_pass": false,
+      "status": "evaluated",
+      "event_count": 1,
+      "operations": {
+        "create": 1,
+        "reassign": 0,
+        "reschedule": 0,
+        "cancel": 0,
+        "complete": 0,
+        "reopen": 0
+      },
+      "prompt_tokens": 445,
+      "output_tokens": 157,
+      "elapsed_seconds": 44.234,
+      "within_five_second_target": false
+    },
+    {
+      "case": "refused-cancel-initial",
+      "source_sha256": "e0d69d1cff4903e7d9a99d44177985980083c171101a44a3a258be1f039e3e1e",
+      "prompt_sha256": "8e0a2b81a8975d25128edb1e99240d5449d3c8a7f5b969bf4387710d348941fe",
+      "source_chars": 26,
+      "status": "error",
+      "error_class": "InvalidProposalError",
+      "reason_code": "quote_missing_or_ambiguous",
+      "elapsed_seconds": 31.547,
+      "within_five_second_target": false
+    },
+    {
+      "case": "refused-cancel-change",
+      "status": "dependency_failed"
+    },
+    {
+      "case": "same-owner-distinct-work",
+      "source_sha256": "77656d8b1d0a50b0ff359dc51529293eb7bef262087024e1d41e3070666b4469",
+      "prompt_sha256": "3db52e9bc0b8a61455b7069adfa2ce6f9ea7c6e33c603f1821c1ac47c5dbfcbe",
+      "source_chars": 52,
+      "status": "error",
+      "error_class": "ReadTimeout",
+      "elapsed_seconds": 60.0,
+      "within_five_second_target": false
+    },
+    {
+      "case": "historical-not-current",
+      "source_sha256": "2c4b847ade7be232937028ddceac36bc7d6315fb2e260580e6a640cb1a576087",
+      "prompt_sha256": "c5338164a6f85fe75c66255b96c574849a5be9cfd5a0ea2a92cb2f35ddeb2f7d",
+      "source_chars": 87,
+      "status": "error",
+      "error_class": "InvalidProposalError",
+      "reason_code": "quote_missing_or_ambiguous",
+      "elapsed_seconds": 54.563,
+      "within_five_second_target": false
+    },
+    {
+      "case": "twelve-tasks",
+      "source_sha256": "89a6647d1cee790992242d80e36684a039af9c6e9f1ddcd244f44a0166e19832",
+      "prompt_sha256": "320800c5542223eca55a2d2000bce0be36fc031581a592e9edf3887254e241e8",
+      "source_chars": 325,
+      "status": "error",
+      "error_class": "ReadTimeout",
+      "elapsed_seconds": 60.015,
+      "within_five_second_target": false
+    }
+  ],
+  "fingerprint_before": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "fingerprint_after": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "fingerprint_stable": true,
+  "candidate_gate_passed": false
+}

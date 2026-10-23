@@ -45,7 +45,7 @@ An empty selection is a legitimate answer ("bu toplantıda karar yok").
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -66,12 +66,27 @@ class SelectedAction(BaseModel):
     due_date: str | None
 
 
+class SelectedActionStateEvent(BaseModel):
+    """A grounded change to an earlier task, expressed only with source indices."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sentence: int = Field(ge=1)
+    target_sentence: int = Field(ge=1)
+    operation: Literal["replace", "cancel"]
+    owner: str | None
+    due_date: str | None
+
+
 class SentenceSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     summary_sentences: list[Annotated[int, Field(ge=1)]] = Field(max_length=MAX_SUMMARY_SENTENCES)
     decision_sentences: list[Annotated[int, Field(ge=1)]] = Field(max_length=MAX_DECISION_SENTENCES)
     action_item_sentences: list[SelectedAction] = Field(max_length=MAX_ACTION_ITEMS)
+    action_state_events: list[SelectedActionStateEvent] = Field(
+        default_factory=list, max_length=MAX_ACTION_ITEMS
+    )
 
 
 def selection_schema(sentence_count: int) -> dict[str, Any]:
@@ -80,6 +95,15 @@ def selection_schema(sentence_count: int) -> dict[str, Any]:
     for field in ("summary_sentences", "decision_sentences"):
         schema["properties"][field]["items"]["maximum"] = sentence_count
     schema["$defs"]["SelectedAction"]["properties"]["sentence"]["maximum"] = sentence_count
+    event = schema["$defs"]["SelectedActionStateEvent"]["properties"]
+    event["sentence"]["maximum"] = sentence_count
+    event["target_sentence"]["maximum"] = sentence_count
+    # The Python parser accepts pre-state-engine responses for safe rollout,
+    # while the Ollama constrained-generation contract always asks new
+    # responses to make the event list explicit (including an empty list).
+    required = schema.setdefault("required", [])
+    if "action_state_events" not in required:
+        required.append("action_state_events")
     return schema
 
 
@@ -170,6 +194,101 @@ def materialize_action_items(
     return out
 
 
+def materialize_action_state(
+    raw_items: object, raw_events: object, sentences: list[Sentence]
+) -> list[tuple[str, str | None, str | None]]:
+    """Apply grounded replacement/cancellation events to selected task sentences.
+
+    Both the task and every mutation remain source-index selections.  The
+    service never invents a merged sentence: a replacement is displayed with
+    the exact later source sentence, while cancellation removes the targeted
+    task.  Invalid, backwards or dangling events fail closed.
+    """
+    if not isinstance(raw_items, list):
+        raw_items = []
+    if not isinstance(raw_events, list):
+        raw_events = []
+
+    active: dict[int, tuple[str, str | None, str | None]] = {}
+    current: dict[int, int] = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("sentence")
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        zero_based = index - 1
+        if zero_based < 0 or zero_based >= len(sentences) or zero_based in active:
+            continue
+        owner = item.get("owner")
+        due_date = item.get("due_date")
+        active[zero_based] = (
+            sentences[zero_based].text.strip(),
+            owner if isinstance(owner, str) and owner.strip() else None,
+            due_date if isinstance(due_date, str) and due_date.strip() else None,
+        )
+        current[zero_based] = zero_based
+
+    valid_events: list[tuple[int, dict[str, object]]] = []
+    seen_event_sources: set[int] = set()
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        index = event.get("sentence")
+        target = event.get("target_sentence")
+        operation = event.get("operation")
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or isinstance(target, bool)
+            or not isinstance(target, int)
+            or operation not in {"replace", "cancel"}
+        ):
+            continue
+        source_index, target_index = index - 1, target - 1
+        if (
+            source_index < 0
+            or source_index >= len(sentences)
+            or target_index < 0
+            or target_index >= len(sentences)
+            or source_index <= target_index
+            or source_index in seen_event_sources
+        ):
+            continue
+        seen_event_sources.add(source_index)
+        valid_events.append((source_index, event))
+
+    for source_index, event in sorted(valid_events, key=lambda value: value[0]):
+        target_index = int(event["target_sentence"]) - 1
+        current_index = current.get(target_index)
+        # The relation is model-selected. Only let it mutate a task that was
+        # independently selected as an assignment (or a prior valid
+        # replacement); a dangling target must never delete arbitrary work.
+        if current_index is None or current_index < 0 or current_index not in active:
+            continue
+        active.pop(current_index, None)
+        operation = event["operation"]
+        # Every historical reference belongs to the same task. Updating only
+        # the event's direct target strands older references after two edits.
+        next_index = -1 if operation == "cancel" else source_index
+        for reference, resolved in current.items():
+            if resolved == current_index:
+                current[reference] = next_index
+        if operation == "cancel":
+            continue
+        owner = event.get("owner")
+        due_date = event.get("due_date")
+        active[source_index] = (
+            sentences[source_index].text.strip(),
+            owner if isinstance(owner, str) and owner.strip() else None,
+            due_date if isinstance(due_date, str) and due_date.strip() else None,
+        )
+        # Future events can name this revision as well as any earlier one.
+        current[source_index] = source_index
+
+    return [active[index] for index in sorted(active)][:MAX_ACTION_ITEMS]
+
+
 def looks_like_selection(data: object) -> bool:
     """Whether the model answered in the index contract at all.
 
@@ -179,5 +298,11 @@ def looks_like_selection(data: object) -> bool:
     if not isinstance(data, dict):
         return False
     return any(
-        key in data for key in ("summary_sentences", "decision_sentences", "action_item_sentences")
+        key in data
+        for key in (
+            "summary_sentences",
+            "decision_sentences",
+            "action_item_sentences",
+            "action_state_events",
+        )
     )

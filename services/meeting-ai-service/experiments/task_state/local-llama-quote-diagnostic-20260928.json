@@ -1,0 +1,25 @@
+{
+  "synthetic": true,
+  "diagnostic_only": true,
+  "applied": false,
+  "prompt_sha256": "3a9de40b75955e0b53ba5d374a12a3a30ae2404aafa5b5c66f4a15e85e52292f",
+  "diagnostics": [
+    {
+      "event_index": 0,
+      "field": "work",
+      "scope": "previous",
+      "reason": "wrong_scope"
+    },
+    {
+      "event_index": 0,
+      "field": "owner",
+      "scope": "previous",
+      "reason": "wrong_scope"
+    }
+  ],
+  "response_sha256": "55c7d037dd6ba62964f6055cba94d3466c92bd68f7f4135670dfbb56815201ae",
+  "prompt_tokens": 723,
+  "output_tokens": 64,
+  "status": "events",
+  "fingerprint_stable": true
+}

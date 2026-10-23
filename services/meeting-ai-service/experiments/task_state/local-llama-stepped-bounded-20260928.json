@@ -1,0 +1,106 @@
+{
+  "schema": "sequential-task-events-local-v1",
+  "utc": "2026-09-28T13:33:22.799574+00:00",
+  "synthetic": true,
+  "target": "local-loopback-not-TEST",
+  "model": "llama3.1:8b",
+  "suite": "all",
+  "options": {
+    "num_ctx": 8192,
+    "num_predict": 384,
+    "temperature": 0.0,
+    "seed": 42,
+    "top_p": 0.9,
+    "num_gpu": 0,
+    "presence_penalty": 0.0
+  },
+  "think": null,
+  "source_hashes": {
+    "stepped.py": "166da2832f73245d98f93be1e25fd881153533971ec1fa372bb17076af39930b",
+    "stepped_probe.py": "0f343536fd63f2e6eadc733ef428393051c581df1064d51cc7f806e7adbc3dab",
+    "bounded_inference.py": "dea5ad55110523402a6f88e378190c7f0e3463c19749124b32679847032efb5d",
+    "quote_diagnostics.py": "5771d5d5ee6339d1f0877eacfa73cb55a1f2eca037171cc4632a46eb04446a74",
+    "prototype.py": "3688268ee12d4f6724ba2d8f6f9b2518e213377549eedd6663fc3124d95701b8",
+    "indexed.py": "6f27dca3a0ce02005042749b4f3cb11d452f6179d30e6447156862a988723973",
+    "indexed_probe.py": "083a2b4a1f26bfcd848a0a4c09052f68723278a8e87796de9f91d7803a6ab2b1",
+    "compact_probe.py": "ac7be762716a1485b552c3bbaf940190851f0b6452ff825ae13473452238b947",
+    "probe.py": "1e34e36e570f39b06d22849ed91e07a5f2e229586cff9049486db1570b1e21f0",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "rows": [
+    {
+      "case": "general-smoke",
+      "source_sha256": "48c8ab28c84f4c39517545ec6832bd010ad8e37e4df36ba0000bd98b773a77a6",
+      "steps": [
+        {
+          "focus": 1,
+          "prompt_sha256": "5ec8c5dbe53a1a68bef84358282416ae997b34dc852607dadbd07601cf9a0f2c",
+          "response_sha256": "aae848e5f0626f50b00f843579ba94a9e0adf9fddbe1e85e420261019f6c7a08",
+          "seconds": 33.25,
+          "prompt_tokens": 723,
+          "output_tokens": 59,
+          "done_reason": "stop",
+          "status": "events",
+          "events": 1
+        },
+        {
+          "focus": 2,
+          "prompt_sha256": "5800788b6dd5d27a604e819c21830090c5d7f5a6d79e4f67bc0955405e0eab8d",
+          "response_sha256": "bcff21a6083bc6078e29cd5bfff659fa9d0f833a56647ea3a7b6dc52356ab16b",
+          "seconds": 55.781,
+          "prompt_tokens": 1466,
+          "output_tokens": 14,
+          "done_reason": "stop",
+          "status": "no_event",
+          "events": 0
+        }
+      ],
+      "expected_tasks_including_tombstones": 2,
+      "candidate_tasks": 1,
+      "matched_tasks": 1,
+      "missing_or_ambiguous_work": 1,
+      "unexpected_tasks": 0,
+      "metadata_or_status_errors": 0,
+      "field_mismatches": {
+        "owner": 0,
+        "status": 0,
+        "date": 0,
+        "time": 0
+      },
+      "unresolved_units": 0,
+      "candidate_relation_pass": false,
+      "status": "evaluated"
+    }
+  ],
+  "semantic_qualification": false,
+  "phone_acceptance": false,
+  "calendar_normalization": false,
+  "server_context_coverage_verified": false,
+  "fingerprint_before": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "stopped_after_failure": true,
+  "fingerprint_after": {
+    "version": "0.34.4",
+    "model": "llama3.1:8b",
+    "digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+  },
+  "source_hashes_after": {
+    "stepped.py": "166da2832f73245d98f93be1e25fd881153533971ec1fa372bb17076af39930b",
+    "stepped_probe.py": "0f343536fd63f2e6eadc733ef428393051c581df1064d51cc7f806e7adbc3dab",
+    "bounded_inference.py": "dea5ad55110523402a6f88e378190c7f0e3463c19749124b32679847032efb5d",
+    "quote_diagnostics.py": "5771d5d5ee6339d1f0877eacfa73cb55a1f2eca037171cc4632a46eb04446a74",
+    "prototype.py": "3688268ee12d4f6724ba2d8f6f9b2518e213377549eedd6663fc3124d95701b8",
+    "indexed.py": "6f27dca3a0ce02005042749b4f3cb11d452f6179d30e6447156862a988723973",
+    "indexed_probe.py": "083a2b4a1f26bfcd848a0a4c09052f68723278a8e87796de9f91d7803a6ab2b1",
+    "compact_probe.py": "ac7be762716a1485b552c3bbaf940190851f0b6452ff825ae13473452238b947",
+    "probe.py": "1e34e36e570f39b06d22849ed91e07a5f2e229586cff9049486db1570b1e21f0",
+    "reference.json": "077f8a3aa0863374c6a657c406b5907d484db0f8af12ab1dce063b74bfc94005"
+  },
+  "code_stable": true,
+  "fingerprint_stable": true,
+  "local_relation_cases_passed": false,
+  "elapsed_seconds": 89.344
+}
