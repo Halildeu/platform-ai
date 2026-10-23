@@ -76,6 +76,26 @@ class CanonicalTranscriptSnapshot(BaseModel):
     )
     segment_count: int = Field(alias="segmentCount", ge=1, le=1_000_000)
     segments: list[CanonicalTranscriptSegment] = Field(min_length=1)
+    recording_outcome: Literal["UNKNOWN", "FINISHED", "INCOMPLETE"] = Field(
+        default="UNKNOWN", alias="recordingOutcome"
+    )
+    recording_incomplete_reason: Literal["CLOSURE_UNCONFIRMED"] | None = Field(
+        default=None, alias="recordingIncompleteReason"
+    )
+
+    @model_validator(mode="after")
+    def _verify_recording_closure(self) -> CanonicalTranscriptSnapshot:
+        # Legacy responses omit both keys. New evidence must be an explicit valid pair.
+        if (
+            "recording_outcome" not in self.model_fields_set
+            and "recording_incomplete_reason" in self.model_fields_set
+        ):
+            raise ValueError("canonical recording reason requires an outcome")
+        if (self.recording_outcome == "INCOMPLETE") != (
+            self.recording_incomplete_reason == "CLOSURE_UNCONFIRMED"
+        ):
+            raise ValueError("canonical recording closure pair is invalid")
+        return self
 
     @model_validator(mode="after")
     def _verify_content_hash(self) -> CanonicalTranscriptSnapshot:
@@ -306,9 +326,7 @@ class HttpCanonicalTranscriptClient:
             ) as response:
                 if response.status_code == 401:
                     self._capability_tokens.invalidate()
-                    raise CanonicalTranscriptRetryableError(
-                        "transcript_capability_http_401"
-                    )
+                    raise CanonicalTranscriptRetryableError("transcript_capability_http_401")
                 if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
                     raise CanonicalTranscriptRetryableError(
                         f"transcript_capability_http_{response.status_code}",

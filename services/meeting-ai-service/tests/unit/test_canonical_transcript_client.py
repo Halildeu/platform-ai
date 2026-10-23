@@ -42,9 +42,7 @@ def _settings(tmp_path: Path) -> Settings:
         ingestion_store_path=tmp_path / "delivery.sqlite3",
         ingestion_active_key_id="v1",
         ingestion_lookup_key_id="lookup-v1",
-        ingestion_encryption_keys_json=SecretStr(
-            json.dumps({"v1": key, "lookup-v1": lookup_key})
-        ),
+        ingestion_encryption_keys_json=SecretStr(json.dumps({"v1": key, "lookup-v1": lookup_key})),
         ready_consumer_enabled=True,
         ready_producer_replay_horizon_sec=604_800.0,
         ready_redis_url=SecretStr("redis://redis.test:6379/0"),
@@ -174,6 +172,8 @@ def test_fetch_uses_separate_least_privilege_token_and_tenant_bound_path(
             )
         assert result.transcript == "Bütçe kararlaştırıldı."
         assert result.finalized_at == datetime.fromisoformat("2026-07-18T01:00:00+00:00")
+        assert result.recording_outcome == "UNKNOWN"
+        assert result.recording_incomplete_reason is None
         assert transcript_request is not None
         assert not hasattr(result, "capability")
         return token_form, transcript_request
@@ -190,6 +190,69 @@ def test_fetch_uses_separate_least_privilege_token_and_tenant_bound_path(
     assert str(request.url).endswith(
         f"/tenants/{TENANT}/meetings/{MEETING}/sessions/{SESSION}/finalizations/1"
     )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [("UNKNOWN", None), ("FINISHED", None), ("INCOMPLETE", "CLOSURE_UNCONFIRMED")],
+)
+def test_fetch_preserves_canonical_recording_closure(
+    tmp_path: Path, outcome: str, reason: str | None
+) -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token"})
+            return _snapshot_response(recordingOutcome=outcome, recordingIncompleteReason=reason)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(
+                _event()
+            )
+        assert result.recording_outcome == outcome
+        assert result.recording_incomplete_reason == reason
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"recordingOutcome": None},
+        {"recordingOutcome": 1},
+        {"recordingOutcome": "1"},
+        {"recordingOutcome": "COMPLETE"},
+        {"recordingOutcome": "INCOMPLETE"},
+        {"recordingOutcome": "INCOMPLETE", "recordingIncompleteReason": None},
+        {"recordingOutcome": "INCOMPLETE", "recordingIncompleteReason": "OTHER"},
+        {"recordingOutcome": "FINISHED", "recordingIncompleteReason": "CLOSURE_UNCONFIRMED"},
+        {"recordingOutcome": "UNKNOWN", "recordingIncompleteReason": "CLOSURE_UNCONFIRMED"},
+        {"recordingIncompleteReason": "CLOSURE_UNCONFIRMED"},
+        {"recordingIncompleteReason": None},
+        {"recordingOutcome": "FINISHED", "recording_outcome": "INCOMPLETE"},
+        {
+            "recordingOutcome": "INCOMPLETE",
+            "recordingIncompleteReason": "CLOSURE_UNCONFIRMED",
+            "recording_incomplete_reason": None,
+        },
+    ],
+)
+def test_fetch_rejects_malformed_closure_without_returning_content(
+    tmp_path: Path, fields: dict[str, object]
+) -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "auth.test":
+                return httpx.Response(200, json={"access_token": "token"})
+            return _snapshot_response(**fields)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(CanonicalTranscriptTerminalError) as error:
+                await HttpCanonicalTranscriptClient(_settings(tmp_path), client).fetch(_event())
+        assert "Bütçe" not in str(error.value)
+        assert error.value.error_code == "transcript_invalid_response"
+
+    asyncio.run(scenario())
 
 
 def test_fetch_accepts_a_later_positive_finalization_version(tmp_path: Path) -> None:
@@ -299,13 +362,11 @@ def test_missing_segments_is_terminal(tmp_path: Path) -> None:
 def test_snapshot_and_capability_use_separate_permissions_without_second_transfer(
     tmp_path: Path,
 ) -> None:
-    async def scenario() -> (
-        tuple[
-            list[dict[str, list[str]]],
-            list[httpx.Request],
-            str,
-        ]
-    ):
+    async def scenario() -> tuple[
+        list[dict[str, list[str]]],
+        list[httpx.Request],
+        str,
+    ]:
         token_forms: list[dict[str, list[str]]] = []
         service_requests: list[httpx.Request] = []
 
