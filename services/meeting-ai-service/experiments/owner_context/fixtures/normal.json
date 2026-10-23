@@ -1,0 +1,715 @@
+{
+  "synthetic": true,
+  "sourceRun": "35971201863",
+  "sourceArtifactSha256": "6ef1c04071b07dd618688f815f2296bf34253d06bdc3cbab6a04ee1603a7f44d",
+  "transcript": "Bu toplantının konusu müşteri sunumudur. Sunumu 28 Eylül 2026 günü saat 14'te çevrimiçi yapmaya karar verdik. Zeynep sunum dosyasını 25 Eylül 2026 günü saat 17'ye kadar hazırlayacak. Mehmet. Bütçe tablosunu 26 Eylül 2026 günü saat 12'ye kadar kontrol edecek.",
+  "transcriptSha256": "5a889d11d1ab70acec1ddd8289464f795a7e9ae011091b1df4a776711ca8d7e3",
+  "finalEvents": [
+    {
+      "seq": 0,
+      "source_end_sample": 3200,
+      "source_start_sample": 0,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 200,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 2,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "Bu"
+    },
+    {
+      "seq": 1,
+      "source_end_sample": 13440,
+      "source_start_sample": 3200,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 640,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 11,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "toplantının"
+    },
+    {
+      "seq": 2,
+      "source_end_sample": 19200,
+      "source_start_sample": 13440,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 360,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 6,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "konusu"
+    },
+    {
+      "seq": 3,
+      "source_end_sample": 26240,
+      "source_start_sample": 19200,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 440,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 7,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "müşteri"
+    },
+    {
+      "seq": 4,
+      "source_end_sample": 38400,
+      "source_start_sample": 26240,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 760,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 9,
+            "textStart": 0
+          },
+          {
+            "endMs": 760,
+            "speaker": "S1",
+            "startMs": 760,
+            "textEnd": 10,
+            "textStart": 9
+          }
+        ]
+      },
+      "text": "sunumudur."
+    },
+    {
+      "seq": 5,
+      "source_end_sample": 51680,
+      "source_start_sample": 38400,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 830,
+            "speaker": "S1",
+            "startMs": 390,
+            "textEnd": 6,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "Sunumu"
+    },
+    {
+      "seq": 6,
+      "source_end_sample": 61920,
+      "source_start_sample": 51680,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 640,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 2,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "28"
+    },
+    {
+      "seq": 7,
+      "source_end_sample": 67040,
+      "source_start_sample": 61920,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 320,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "Eylül"
+    },
+    {
+      "seq": 8,
+      "source_end_sample": 85600,
+      "source_start_sample": 67040,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 920,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 4,
+            "textStart": 0
+          },
+          {
+            "endMs": 1160,
+            "speaker": "S1",
+            "startMs": 920,
+            "textEnd": 9,
+            "textStart": 5
+          }
+        ]
+      },
+      "text": "2026 günü"
+    },
+    {
+      "seq": 9,
+      "source_end_sample": 90080,
+      "source_start_sample": 85600,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 280,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 4,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "saat"
+    },
+    {
+      "seq": 10,
+      "source_end_sample": 99040,
+      "source_start_sample": 90080,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 560,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "14'te"
+    },
+    {
+      "seq": 11,
+      "source_end_sample": 108640,
+      "source_start_sample": 99040,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 600,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 9,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "çevrimiçi"
+    },
+    {
+      "seq": 12,
+      "source_end_sample": 115040,
+      "source_start_sample": 108640,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 400,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 7,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "yapmaya"
+    },
+    {
+      "seq": 13,
+      "source_end_sample": 119520,
+      "source_start_sample": 115040,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 280,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "karar"
+    },
+    {
+      "seq": 14,
+      "source_end_sample": 129760,
+      "source_start_sample": 119520,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 640,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 6,
+            "textStart": 0
+          },
+          {
+            "endMs": 640,
+            "speaker": "S1",
+            "startMs": 640,
+            "textEnd": 7,
+            "textStart": 6
+          }
+        ]
+      },
+      "text": "verdik."
+    },
+    {
+      "seq": 15,
+      "source_end_sample": 161120,
+      "source_start_sample": 129760,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 1680,
+            "speaker": "S1",
+            "startMs": 1240,
+            "textEnd": 6,
+            "textStart": 0
+          },
+          {
+            "endMs": 1960,
+            "speaker": "S1",
+            "startMs": 1680,
+            "textEnd": 12,
+            "textStart": 7
+          }
+        ]
+      },
+      "text": "Zeynep sunum"
+    },
+    {
+      "seq": 16,
+      "source_end_sample": 170720,
+      "source_start_sample": 161120,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 600,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 9,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "dosyasını"
+    },
+    {
+      "seq": 17,
+      "source_end_sample": 184160,
+      "source_start_sample": 170720,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 520,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 2,
+            "textStart": 0
+          },
+          {
+            "endMs": 840,
+            "speaker": "S1",
+            "startMs": 520,
+            "textEnd": 8,
+            "textStart": 3
+          }
+        ]
+      },
+      "text": "25 Eylül"
+    },
+    {
+      "seq": 18,
+      "source_end_sample": 198880,
+      "source_start_sample": 184160,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 920,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 4,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "2026"
+    },
+    {
+      "seq": 19,
+      "source_end_sample": 207200,
+      "source_start_sample": 198880,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 240,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 4,
+            "textStart": 0
+          },
+          {
+            "endMs": 520,
+            "speaker": "S1",
+            "startMs": 240,
+            "textEnd": 9,
+            "textStart": 5
+          }
+        ]
+      },
+      "text": "günü saat"
+    },
+    {
+      "seq": 20,
+      "source_end_sample": 214880,
+      "source_start_sample": 207200,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 480,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "17'ye"
+    },
+    {
+      "seq": 21,
+      "source_end_sample": 219360,
+      "source_start_sample": 214880,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 280,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "kadar"
+    },
+    {
+      "seq": 22,
+      "source_end_sample": 234720,
+      "source_start_sample": 219360,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 960,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 12,
+            "textStart": 0
+          },
+          {
+            "endMs": 960,
+            "speaker": "S1",
+            "startMs": 960,
+            "textEnd": 13,
+            "textStart": 12
+          }
+        ]
+      },
+      "text": "hazırlayacak."
+    },
+    {
+      "seq": 23,
+      "source_end_sample": 261600,
+      "source_start_sample": 234720,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 1680,
+            "speaker": "S1",
+            "startMs": 1200,
+            "textEnd": 6,
+            "textStart": 0
+          },
+          {
+            "endMs": 1680,
+            "speaker": "S1",
+            "startMs": 1680,
+            "textEnd": 7,
+            "textStart": 6
+          }
+        ]
+      },
+      "text": "Mehmet."
+    },
+    {
+      "seq": 24,
+      "source_end_sample": 266720,
+      "source_start_sample": 261600,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 320,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "Bütçe"
+    },
+    {
+      "seq": 25,
+      "source_end_sample": 276320,
+      "source_start_sample": 266720,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 600,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 9,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "tablosunu"
+    },
+    {
+      "seq": 26,
+      "source_end_sample": 285280,
+      "source_start_sample": 276320,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 560,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 2,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "26"
+    },
+    {
+      "seq": 27,
+      "source_end_sample": 290400,
+      "source_start_sample": 285280,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 320,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "Eylül"
+    },
+    {
+      "seq": 28,
+      "source_end_sample": 305120,
+      "source_start_sample": 290400,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 920,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 4,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "2026"
+    },
+    {
+      "seq": 29,
+      "source_end_sample": 308960,
+      "source_start_sample": 305120,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 240,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 4,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "günü"
+    },
+    {
+      "seq": 30,
+      "source_end_sample": 313440,
+      "source_start_sample": 308960,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 280,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 4,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "saat"
+    },
+    {
+      "seq": 31,
+      "source_end_sample": 321120,
+      "source_start_sample": 313440,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 480,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "12'ye"
+    },
+    {
+      "seq": 32,
+      "source_end_sample": 325600,
+      "source_start_sample": 321120,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 280,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 5,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "kadar"
+    },
+    {
+      "seq": 33,
+      "source_end_sample": 333280,
+      "source_start_sample": 325600,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 480,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 7,
+            "textStart": 0
+          }
+        ]
+      },
+      "text": "kontrol"
+    },
+    {
+      "seq": 34,
+      "source_end_sample": 343520,
+      "source_start_sample": 333280,
+      "speakerAttribution": {
+        "scope": "882e4504-3a3d-3323-9c6b-04674dbc9925",
+        "turns": [
+          {
+            "endMs": 640,
+            "speaker": "S1",
+            "startMs": 0,
+            "textEnd": 6,
+            "textStart": 0
+          },
+          {
+            "endMs": 640,
+            "speaker": "S1",
+            "startMs": 640,
+            "textEnd": 7,
+            "textStart": 6
+          }
+        ]
+      },
+      "text": "edecek."
+    }
+  ],
+  "observedActions": [
+    {
+      "due_date": "25 Eylül 2026 günü saat 17'ye kadar",
+      "owner": "Zeynep",
+      "text": "Zeynep sunum dosyasını 25 Eylül 2026 günü saat 17'ye kadar hazırlayacak."
+    },
+    {
+      "due_date": "26 Eylül 2026 günü saat 12'ye kadar",
+      "owner": null,
+      "text": "Bütçe tablosunu 26 Eylül 2026 günü saat 12'ye kadar kontrol edecek."
+    }
+  ],
+  "observedRejectedClaims": []
+}
